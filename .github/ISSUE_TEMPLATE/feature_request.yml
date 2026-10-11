@@ -1,6 +1,10 @@
 name: Feature request
 description: Suggest an improvement to Durable Actors.
 body:
+    - type: markdown
+      attributes:
+          value: |
+              Anyone can suggest a feature here; no Linear account is needed. A maintainer will add the corresponding DUR ticket ID during triage. Keep discussing the issue on GitHub.
     - type: textarea
       id: problem
       attributes:

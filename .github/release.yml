@@ -1,0 +1,10 @@
+changelog:
+    exclude:
+        labels: ["release:skip"]
+    categories:
+        - title: Features
+          labels: ["release:feature"]
+        - title: Fixes
+          labels: ["release:fix"]
+        - title: Uncategorized
+          labels: ["*"]

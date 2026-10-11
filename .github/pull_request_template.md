@@ -1,5 +1,9 @@
 ## What changed and why?
 
+<!-- Open a GitHub issue first; a maintainer will share its DUR ID. No Linear account is needed.
+Use a branch such as your-name/DUR-123-summary. Include Fixes DUR-123 and Closes #<GitHub issue> below.
+Your PR title becomes the release note. A maintainer must apply one label: release:feature, release:fix, or release:skip. -->
+
 Describe the problem and the resulting behavior. Link related issues.
 
 ## Validation

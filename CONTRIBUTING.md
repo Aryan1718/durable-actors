@@ -1,6 +1,8 @@
 # Contributing to Durable Actors
 
-We welcome bug reports, documentation improvements, examples, and code contributions. For a larger change, open an [issue](https://github.com/TerseAI/durable-actors/issues) to discuss the approach before starting. Small fixes can go straight to a pull request.
+We welcome bug reports, documentation improvements, examples, and code contributions. Start by opening a [GitHub issue](https://github.com/TerseAI/durable-actors/issues/new/choose). External contributors do not need a Linear account or the lit CLI. Discuss larger changes before starting implementation.
+
+New GitHub issues sync to our Durable Actors team in Linear. During triage, a maintainer adds the corresponding ticket ID and link to the GitHub issue, for example `Tracked as [DUR-123](https://linear.app/terse-inc/issue/DUR-123)`. Use that ID in your branch; you can continue the discussion entirely on GitHub. If the ID is missing, ask a maintainer on the issue. The Linear link may require team access, but the visible DUR ID is all you need.
 
 Please follow our [code of conduct](CODE_OF_CONDUCT.md). Report vulnerabilities privately through [SECURITY.md](SECURITY.md).
 
@@ -154,6 +156,10 @@ bash scripts/test-runtime-image.sh durable-actors:typescript typescript
 Repeat for `python` and `control-plane`. CI runs each target on amd64 and arm64. The TypeScript execution package bundles only the actor and host modules, collects dependency licenses, and is checked by `sdk package:check`. Examples, the CLI, compiler, and observer UI are excluded from that image. SQL migrations and `docs/reference/openapi.yaml` are Rust build inputs embedded in the executable; their source directories are not copied into the final images.
 
 ## Open a pull request
+
+Include exactly one Durable Actors ticket ID in the source branch, for example `your-name/DUR-123-fix-reconnect`. The `Ticket branch` check rejects missing, malformed, ambiguous, or other-team IDs. Release PRs follow the same rule. This checks the identifier format without accessing Linear; ask a maintainer for the corresponding DUR ticket if you do not have Linear access. Include `Fixes DUR-123` in the PR description so the integration can link and complete the ticket.
+
+Also include `Closes #123` for the corresponding GitHub issue. A maintainer applies exactly one release label: `release:feature`, `release:fix`, or `release:skip` for changes with no user-visible effect, including version-only release PRs. The same required check enforces this choice. Write the PR title as a concise description of the user-visible change: it becomes a bullet under **Features** or **Fixes** in the release notes. Put detailed migration guidance in the linked PR. External contributors can open a PR before a maintainer applies the label.
 
 Describe the problem, the resulting behavior, and how you verified it. Link related issues and include screenshots for UI changes. Note any checks you could not run. Maintainers will review the change and arrange releases through the existing [release workflow](.github/workflows/release.yml).
 
