@@ -6,9 +6,12 @@ import json
 import subprocess
 import sys
 
+import httpx
 from fixtures.sqlite import seed
-from test_authoring import Chat
+from test_authoring import Chat, Message
+from test_client import TARGET
 
+from durable_actors import AsyncActor, AsyncClient
 from durable_actors.codegen import generate_client
 from durable_actors.contract import public_contract
 
@@ -545,3 +548,31 @@ def check() -> None:
             text=True,
         )
         assert result.returncode == 0, result.stdout + result.stderr
+
+
+async def test_generated_async_client_invokes_and_decodes_shared_models(tmp_path, monkeypatch):
+    class Echo(AsyncActor):
+        async def echo(self, message: Message) -> Message:
+            return message
+
+    generate_client(public_contract([Echo]), tmp_path / "async_echo_client")
+    monkeypatch.syspath_prepend(str(tmp_path))
+    generated = importlib.import_module("async_echo_client")
+
+    async def handle(request):
+        assert request.url.path == "/v1/projects/local/actors/Echo/one/invoke"
+        body = json.loads(request.content)
+        assert body["method"] == "echo"
+        await asyncio.sleep(0)
+        return httpx.Response(
+            200,
+            json={"target": TARGET, "outcome": {"type": "completed", "result": body["args"][0]}},
+        )
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:
+        async with AsyncClient(http=http) as client:
+            actor = generated.async_actors.Echo.get("one", client)
+            message = generated.actors.Echo.Message(text="hello", role="user")
+            result = await actor.echo(message)
+    assert type(result) is generated.actors.Echo.Message
+    assert result == message

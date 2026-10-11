@@ -16,7 +16,7 @@ from typing import Any
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
-from .actor import Actor
+from .actor_base import ActorBase
 from .contract import Document, public_contract
 from .guards import is_actor
 
@@ -202,7 +202,7 @@ def source_paths(project: Path, output: Path) -> set[Path]:
     return paths
 
 
-def load_artifact(path: Path) -> list[type[Actor[Any, Any, Any, Any]]]:
+def load_artifact(path: Path) -> list[type[ActorBase[Any, Any, Any, Any]]]:
     with zipfile.ZipFile(path) as archive:
         manifest = json.loads(archive.read("durable-actors.json"))
     if manifest.get("version") != 1:
@@ -211,7 +211,7 @@ def load_artifact(path: Path) -> list[type[Actor[Any, Any, Any, Any]]]:
     return load_module(path, manifest["module"])
 
 
-def load_module(root: Path, module: str) -> list[type[Actor[Any, Any, Any, Any]]]:
+def load_module(root: Path, module: str) -> list[type[ActorBase[Any, Any, Any, Any]]]:
     sys.path[:0] = [str(root), str(root / "src")]
     importlib.invalidate_caches()
     loaded = importlib.import_module(module)

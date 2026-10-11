@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from copy import deepcopy
-from typing import TYPE_CHECKING, Any, Generic, Literal, Self, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar
 
 from typing_extensions import TypeVar as DefaultTypeVar
 
+from .actor_base import ActorBase
 from .database import ActorDatabase, actor_database
 from .json import JsonValue
 
@@ -23,7 +23,7 @@ Tag = DefaultTypeVar("Tag", bound=str, default=str)
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-class Actor(Generic[Metadata, Incoming, Outgoing, Tag]):
+class Actor(ActorBase[Metadata, Incoming, Outgoing, Tag]):
     """Base class for durable actors with typed RPCs and WebSocket hooks.
 
     Public def methods become synchronous RPCs. Every field must declare persisted()
@@ -34,18 +34,6 @@ class Actor(Generic[Metadata, Incoming, Outgoing, Tag]):
     messages, outgoing application messages, and allowed connection tags. Outgoing
     defaults to Incoming, tags to str, and other parameters to JsonValue.
     """
-
-    def __init__(self) -> None:
-        """Initialize independent field defaults; the runtime restores persisted values afterward."""
-        from .contract import describe_actor
-
-        for field in describe_actor(type(self)).fields.values():
-            value = (
-                field.default_factory()
-                if field.default_factory is not None
-                else deepcopy(field.default)
-            )
-            setattr(self, field.name, value)
 
     @classmethod
     def get(cls, actor_id: str, transport: ActorTransport | None = None) -> Self:
@@ -61,13 +49,6 @@ class Actor(Generic[Metadata, Incoming, Outgoing, Tag]):
     def connect(self, metadata: Metadata) -> Connection[Incoming, Outgoing, JsonValue, JsonValue]:
         """Open a typed WebSocket through a source-class reference from get()."""
         raise RuntimeError("connect() requires an actor reference from get()")
-
-    @property
-    def id(self) -> str:
-        """Identity of this actor, available during an active invocation or socket hook."""
-        from .socket import current_scope
-
-        return current_scope(self).actor_id
 
     @property
     def db(self) -> ActorDatabase:
@@ -120,14 +101,6 @@ class Actor(Generic[Metadata, Incoming, Outgoing, Tag]):
         scope = current_scope(self)
         return scope.blocking(scope.get_connection_count)
 
-    def set_websocket_auto_response(
-        self, request: str | None = None, response: str | None = None
-    ) -> None:
-        """Match raw text frames without waking the actor. Omit both values to clear."""
-        from .socket import current_scope
-
-        current_scope(self).set_websocket_auto_response(request, response)
-
     def broadcast(
         self,
         message: Outgoing,
@@ -154,7 +127,8 @@ class Actor(Generic[Metadata, Incoming, Outgoing, Tag]):
 def interleave(method: F) -> F:
     """Allow other invocations to enter before this method finishes.
 
-    Works with def RPCs and socket hooks. Handlers overlap on worker threads.
+    Works with sync and async RPCs and socket hooks. Sync handlers overlap on
+    worker threads; async handlers yield to other calls at await points.
     Ordinary invocations still serialize with each other and block new entries.
     Nested method calls inherit the outer invocation's admission policy.
 

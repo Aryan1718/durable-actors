@@ -8,7 +8,7 @@ from fixtures.effects import Effects
 from fixtures.sqlite import ActorRuntime, HostStorage, seed
 from pydantic import BaseModel
 
-from durable_actors import Actor, ephemeral, interleave, persisted
+from durable_actors import Actor, AsyncActor, ephemeral, interleave, persisted
 from durable_actors.runtime import ActorRuntime as Runtime
 
 
@@ -479,3 +479,21 @@ async def test_sql_commits_with_fields_and_rolls_back_when_the_call_fails(tmp_pa
     ]
     with pytest.raises(RuntimeError, match="outside its invocation"):
         captured[0].exec("SELECT amount FROM ledger")  # type: ignore[attr-defined]
+
+
+async def test_async_actor_serializes_across_awaits_and_persists_results():
+    class Counter(AsyncActor):
+        count: int = persisted(0)
+
+        async def increment(self, amount: int = 1) -> int:
+            before = self.count
+            await asyncio.sleep(0)
+            self.count = before + amount
+            return self.count
+
+    runtime = ActorRuntime(Counter, Effects())
+    reply = await runtime.handle(command(args=[2], sqlite=seed({"count": 3})))
+    assert reply["result"] == 5
+    replies = await asyncio.gather(*(runtime.handle(command()) for _ in range(3)))
+    assert [reply["result"] for reply in replies] == [6, 7, 8]
+    assert runtime.database.fields() == {"count": 8}

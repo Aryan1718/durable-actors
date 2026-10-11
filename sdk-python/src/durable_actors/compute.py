@@ -8,7 +8,7 @@ from weakref import WeakKeyDictionary
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from .actor import Actor
+from .actor_base import ActorBase
 from .guards import is_actor
 
 ComputeRegion = Literal[
@@ -20,7 +20,7 @@ ComputeRegion = Literal[
     "europe-west",
     "asia-southeast",
 ]
-A = TypeVar("A", bound=Actor[Any, Any, Any, Any])
+A = TypeVar("A", bound=ActorBase[Any, Any, Any, Any])
 
 
 class ComputeOptions(BaseModel):
@@ -47,7 +47,9 @@ class ComputeOptions(BaseModel):
         return value
 
 
-_options: WeakKeyDictionary[type[Actor[Any, Any, Any, Any]], ComputeOptions] = WeakKeyDictionary()
+_options: WeakKeyDictionary[type[ActorBase[Any, Any, Any, Any]], ComputeOptions] = (
+    WeakKeyDictionary()
+)
 
 
 def compute(
@@ -78,7 +80,7 @@ def compute(
     return decorate
 
 
-def compute_contract(actor: type[Actor[Any, Any, Any, Any]]) -> dict[str, Any]:
+def compute_contract(actor: type[ActorBase[Any, Any, Any, Any]]) -> dict[str, Any]:
     options = _options.get(actor)
     return (
         {}

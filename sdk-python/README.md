@@ -49,6 +49,20 @@ counter = actors.Counter.get("one")
 print(counter.increment())
 ```
 
+## Async actors and clients
+
+Define `AsyncActor` methods and socket hooks with `async def`. Calls stay serialized across `await` unless marked `@interleave`. Generated `async_actors` clients work with either actor style:
+
+```python
+from durable_actors import AsyncClient
+from generated import async_actors
+
+async with AsyncClient() as client:
+    print(await async_actors.Counter.get("one", client).increment())
+```
+
+Await actor database and connection queries, and `broadcast()`; socket handle methods remain synchronous. Reuse `AsyncClient` for connection pooling. Close async connections and subscriptions with `async with` or `aclose()`.
+
 ## Use the client in another application
 
 Copy the entire generated package, including its helper modules, into the application. From that application's root, install the client runtime:

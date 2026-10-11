@@ -1,7 +1,11 @@
-"""Define durable Python actors and use synchronous typed clients and subscriptions."""
+"""Define sync or async durable actors and use typed clients and subscriptions."""
 
 from .actor import Actor as Actor
 from .actor import interleave as interleave
+from .async_actor import AsyncActor as AsyncActor
+from .async_client import AsyncActorTransport as AsyncActorTransport
+from .async_client import AsyncClient as AsyncClient
+from .async_connection import AsyncConnection as AsyncConnection
 from .client import ActorInvocationError as ActorInvocationError
 from .client import ActorProtocolError as ActorProtocolError
 from .client import ActorTransport as ActorTransport
@@ -13,6 +17,7 @@ from .compute import compute as compute
 from .connection import StateSnapshot as StateSnapshot
 from .connection import StateUpdate as StateUpdate
 from .database import ActorDatabase as ActorDatabase
+from .database import AsyncActorDatabase as AsyncActorDatabase
 from .database import SqliteValue as SqliteValue
 from .fields import emitted as emitted
 from .fields import ephemeral as ephemeral
@@ -25,4 +30,5 @@ from .session import ActorSession as ActorSession
 from .session import ActorSessionRejectedError as ActorSessionRejectedError
 from .session import ActorSessionTransport as ActorSessionTransport
 from .socket import ActorSocket as ActorSocket
+from .subscription import AsyncSubscription as AsyncSubscription
 from .subscription import Subscription as Subscription

@@ -65,20 +65,7 @@ def remote_method(
 ) -> Callable[..., Any]:
     @wraps(getattr(actor, name))
     def invoke(self: A, *args: Any, **kwargs: Any) -> Any:
-        bound = method.signature.bind(*args, **kwargs)
-        bound.apply_defaults()
-        values: list[Any] = []
-        for key, value in bound.arguments.items():
-            encoded = encode(
-                method.parameters[key],
-                list(value)
-                if method.signature.parameters[key].kind is inspect.Parameter.VAR_POSITIONAL
-                else value,
-            )
-            if method.signature.parameters[key].kind is inspect.Parameter.VAR_POSITIONAL:
-                values.extend(encoded)
-            else:
-                values.append(encoded)
+        values = remote_arguments(method, args, kwargs)
         result = client.invoke(actor.__name__, actor_id, name, values)
         return decode(method.result, result)
 
@@ -87,3 +74,21 @@ def remote_method(
 
 def unavailable(self: object) -> Any:
     raise AttributeError("actor state is remote; read it through an RPC or generated subscription")
+
+
+def remote_arguments(method: Method, args: tuple[Any, ...], kwargs: dict[str, Any]) -> list[Any]:
+    bound = method.signature.bind(*args, **kwargs)
+    bound.apply_defaults()
+    values: list[Any] = []
+    for key, value in bound.arguments.items():
+        encoded = encode(
+            method.parameters[key],
+            list(value)
+            if method.signature.parameters[key].kind is inspect.Parameter.VAR_POSITIONAL
+            else value,
+        )
+        if method.signature.parameters[key].kind is inspect.Parameter.VAR_POSITIONAL:
+            values.extend(encoded)
+        else:
+            values.append(encoded)
+    return values

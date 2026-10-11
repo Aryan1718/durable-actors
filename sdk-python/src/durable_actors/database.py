@@ -5,8 +5,11 @@ from __future__ import annotations
 from collections.abc import Generator
 from contextlib import contextmanager
 from contextvars import ContextVar, Token
+from functools import partial
 from typing import Protocol
 from weakref import WeakKeyDictionary, ref
+
+from .threads import run_in_thread
 
 SqliteValue = str | int | float | bytes | None
 
@@ -39,6 +42,17 @@ class ActorDatabase:
         if admission is None or admission.actor is not self._actor() or not admission.active:
             raise RuntimeError("actor database is unavailable outside its invocation")
         return self._storage.exec(sql, *bindings)
+
+
+class AsyncActorDatabase:
+    """Invocation-scoped SQLite statements executed off the event loop."""
+
+    def __init__(self, database: ActorDatabase) -> None:
+        self._database = database
+
+    async def exec(self, sql: str, *bindings: SqliteValue) -> list[dict[str, SqliteValue]]:
+        """Execute a statement, draining it before cancellation releases the invocation."""
+        return await run_in_thread(partial(self._database.exec, sql, *bindings))
 
 
 def bind_actor_database(actor: object, storage: SqlDatabase) -> None:

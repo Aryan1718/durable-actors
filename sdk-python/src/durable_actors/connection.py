@@ -119,19 +119,7 @@ class Connection(Generic[Send, Receive, State, Patch]):
         raises the underlying WebSocket connection-closed exception.
         """
         data = self._wire.recv(timeout=timeout)
-        if not isinstance(data, str):
-            raise ActorProtocolError("actor sockets require JSON text")
-        value = json.loads(data)
-        if is_document(value) and value.get("type") in {"state", "state_update"}:
-            if type(value.get("version")) is not int or value["version"] < 0:
-                raise ActorProtocolError("invalid state version")
-            if value["type"] == "state":
-                state = self._state.validate_json(json.dumps(value["state"]), strict=True)
-                return StateSnapshot[State](state=state, version=value["version"])
-            patch = self._patch.validate_json(json.dumps(value["changes"]), strict=True)
-            removed = TypeAdapter(list[str]).validate_python(value["removed"], strict=True)
-            return StateUpdate[Patch](changes=patch, removed=removed, version=value["version"])
-        return self._outgoing.validate_json(data, strict=True)
+        return decode_message(data, self._outgoing, self._state, self._patch)
 
     def __iter__(self) -> Connection[Send, Receive, State, Patch]:
         return self
@@ -156,3 +144,24 @@ class Connection(Generic[Send, Receive, State, Patch]):
         traceback: TracebackType | None,
     ) -> None:
         self.close()
+
+
+def decode_message(
+    data: str | bytes,
+    outgoing: TypeAdapter[Receive],
+    state_adapter: TypeAdapter[State],
+    patch_adapter: TypeAdapter[Patch],
+) -> Receive | StateSnapshot[State] | StateUpdate[Patch]:
+    if not isinstance(data, str):
+        raise ActorProtocolError("actor sockets require JSON text")
+    value = json.loads(data)
+    if is_document(value) and value.get("type") in {"state", "state_update"}:
+        if type(value.get("version")) is not int or value["version"] < 0:
+            raise ActorProtocolError("invalid state version")
+        if value["type"] == "state":
+            state = state_adapter.validate_json(json.dumps(value["state"]), strict=True)
+            return StateSnapshot[State](state=state, version=value["version"])
+        patch = patch_adapter.validate_json(json.dumps(value["changes"]), strict=True)
+        removed = TypeAdapter(list[str]).validate_python(value["removed"], strict=True)
+        return StateUpdate[Patch](changes=patch, removed=removed, version=value["version"])
+    return outgoing.validate_json(data, strict=True)

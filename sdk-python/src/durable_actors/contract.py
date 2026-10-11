@@ -12,6 +12,8 @@ from pydantic.json_schema import JsonSchemaMode
 from typing_extensions import TypeAliasType
 
 from .actor import Actor
+from .actor_base import ActorBase
+from .async_actor import AsyncActor
 from .compute import compute_contract
 from .guards import is_document, is_field, is_list
 from .json import JsonValue
@@ -51,14 +53,14 @@ class Method:
 
 @dataclass(frozen=True)
 class Definition:
-    actor: type[Actor[Any, Any, Any, Any]]
+    actor: type[ActorBase[Any, Any, Any, Any]]
     fields: dict[str, Field]
     methods: dict[str, Method]
     reentrant_methods: set[str]
     socket_types: tuple[Any, Any, Any, Any]
 
 
-def public_contract(actors: list[type[Actor[Any, Any, Any, Any]]]) -> Document:
+def public_contract(actors: list[type[ActorBase[Any, Any, Any, Any]]]) -> Document:
     names = [actor.__name__ for actor in actors]
     if not names or len(names) != len(set(names)):
         raise ValueError("export at least one uniquely named actor")
@@ -70,19 +72,20 @@ def public_contract(actors: list[type[Actor[Any, Any, Any, Any]]]) -> Document:
     }
 
 
-_definitions: dict[type[Actor[Any, Any, Any, Any]], Definition] = {}
+_definitions: dict[type[ActorBase[Any, Any, Any, Any]], Definition] = {}
 
 
-def describe_actor(actor: type[Actor[Any, Any, Any, Any]]) -> Definition:
+def describe_actor(actor: type[ActorBase[Any, Any, Any, Any]]) -> Definition:
     if actor not in _definitions:
         _definitions[actor] = _describe_actor(actor)
     return _definitions[actor]
 
 
-def _describe_actor(actor: type[Actor[Any, Any, Any, Any]]) -> Definition:
-    if Actor not in actor.__bases__:
-        raise ValueError("actors must extend Actor directly")
-    if actor.__init__ is not Actor.__init__:
+def _describe_actor(actor: type[ActorBase[Any, Any, Any, Any]]) -> Definition:
+    base = next((base for base in actor.__bases__ if base in (Actor, AsyncActor)), None)
+    if base is None:
+        raise ValueError("actors must extend Actor or AsyncActor directly")
+    if actor.__init__ is not ActorBase.__init__:
         raise ValueError("use annotated field defaults instead of an actor constructor")
     hints = get_type_hints(actor, include_extras=True)
     fields = {
@@ -108,12 +111,13 @@ def _describe_actor(actor: type[Actor[Any, Any, Any, Any]]) -> Definition:
         if name.startswith("_"):
             continue
         if (
-            inspect.iscoroutinefunction(value)
+            inspect.iscoroutinefunction(value) != (base is AsyncActor)
             or inspect.isgeneratorfunction(value)
             or inspect.isasyncgenfunction(value)
         ):
             raise ValueError(
-                f"{actor.__name__}.{name}: actor methods and hooks must be synchronous def functions"
+                f"{actor.__name__}.{name}: actor methods and hooks must be "
+                + ("async def functions" if base is AsyncActor else "synchronous def functions")
             )
         if name in RESERVED:
             raise ValueError(f"reserved actor method: {name}")
@@ -125,7 +129,7 @@ def _describe_actor(actor: type[Actor[Any, Any, Any, Any]]) -> Definition:
         (
             get_args(base)
             for base in getattr(actor, "__orig_bases__", ())
-            if get_origin(base) is Actor
+            if get_origin(base) in (Actor, AsyncActor)
         ),
         (JsonValue, JsonValue, JsonValue, str),
     )
@@ -208,7 +212,7 @@ def documentation(value: object) -> Document:
     return {"description": inspect.cleandoc(description)} if description else {}
 
 
-def read_field(actor: type[Actor[Any, Any, Any, Any]], name: str, hint: Any) -> Field:
+def read_field(actor: type[ActorBase[Any, Any, Any, Any]], name: str, hint: Any) -> Field:
     if name in RESERVED | HOOKS | {"id"}:
         raise ValueError(f"reserved actor field: {name}")
     options = getattr(actor, name, MISSING)

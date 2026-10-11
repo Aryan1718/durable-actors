@@ -18,6 +18,7 @@ def generate_client(contract: Document, output: Path) -> None:
         raise ValueError("unsupported actor contract")
     files: dict[str, str] = {}
     namespaces: list[str] = []
+    async_namespaces: list[str] = []
     names: list[str] = []
     for index, actor in enumerate(contract["actors"]):
         name = identifier(actor["actorName"])
@@ -30,6 +31,7 @@ def generate_client(contract: Document, output: Path) -> None:
         files[f"_{module}_models.py"] = model_source
         files[f"_{module}.py"] = source
         namespaces.append(actor_namespace(actor, types, models, index))
+        async_namespaces.append(actor_namespace(actor, types, models, index, asynchronous=True))
         names.append(name)
     files["actors.py"] = (
         '"""Typed actor namespaces; obtain an instance handle with actors.Name.get(actor_id)."""\n'
@@ -42,6 +44,20 @@ def generate_client(contract: Document, output: Path) -> None:
         "from durable_actors.client import SocketGrant as _SocketGrant\n"
         "from pydantic import TypeAdapter as _TypeAdapter\n"
         + "\n".join(namespaces)
+        + f"\n__all__ = {names!r}\n"
+    )
+    files["async_actors.py"] = (
+        '"""Typed async actor handles sharing the synchronous namespace models."""\n'
+        "from __future__ import annotations\n"
+        "import builtins as _builtins\n"
+        "from typing import TypeAlias as _TypeAlias, Literal as _Literal\n"
+        "from durable_actors.async_client import AsyncActorTransport as _ActorTransport\n"
+        "from durable_actors.generated import Unset as _Unset\n"
+        "from durable_actors.proxy import prepare_async_authorization as _prepare_authorization\n"
+        "from durable_actors.client import SocketGrant as _SocketGrant\n"
+        "from pydantic import TypeAdapter as _TypeAdapter\n"
+        "from . import actors as _sync_actors\n"
+        + "\n".join(async_namespaces)
         + f"\n__all__ = {names!r}\n"
     )
     files["__init__.py"] = proxy_module(names)
@@ -196,20 +212,27 @@ def root_types(source: str, name: str) -> dict[str, str]:
     return types
 
 
-def actor_namespace(actor: Document, types: dict[str, str], models: list[str], index: int) -> str:
+def actor_namespace(
+    actor: Document,
+    types: dict[str, str],
+    models: list[str],
+    index: int,
+    asynchronous: bool = False,
+) -> str:
     name = identifier(actor["actorName"])
     client, model = f"_client_{index}", f"_models_{index}"
+    stub = "AsyncStub" if asynchronous else "Stub"
     lines = [
         f"from . import _{name.lower()} as {client}",
         f"from . import _{name.lower()}_models as {model}",
         "",
         f"class {name}:",
         docstring(actor.get("description") or f"Clients and types for {name} actors.", 4),
-        *namespace_aliases(types, models, client, model),
+        *namespace_aliases(types, models, client, model, stub),
         "",
-        *get_method(client),
+        *get_method(client, stub, asynchronous),
         "",
-        *authorization_methods(name, types, model),
+        *authorization_methods(name, types, model, asynchronous),
         "",
         *method_namespace(actor, types, model),
     ]
@@ -217,10 +240,10 @@ def actor_namespace(actor: Document, types: dict[str, str], models: list[str], i
 
 
 def namespace_aliases(
-    types: dict[str, str], models: list[str], client: str, model: str
+    types: dict[str, str], models: list[str], client: str, model: str, stub: str
 ) -> list[str]:
     aliases = {
-        "Stub": f"{client}.Stub",
+        "Stub": f"{client}.{stub}",
         **{
             kind: namespace_type(types["Socket" + kind], model)
             for kind in ("Metadata", "Incoming", "Outgoing", "State", "EmittedState", "StatePatch")
@@ -243,12 +266,13 @@ def namespace_aliases(
     return [f"    {key}: _TypeAlias = {value}" for key, value in aliases.items()]
 
 
-def get_method(client: str) -> list[str]:
+def get_method(client: str, stub: str, asynchronous: bool) -> list[str]:
+    style = "async" if asynchronous else "synchronous"
     return [
         "    @_builtins.staticmethod",
-        f"    def get(actor_id: _builtins.str, transport: _ActorTransport | None = None) -> {client}.Stub:",
+        f"    def get(actor_id: _builtins.str, transport: _ActorTransport | None = None) -> {client}.{stub}:",
         docstring(
-            "Return a synchronous actor handle without sending a request.\n\n"
+            f"Return a {style} actor handle without sending a request.\n\n"
             "Args:\n"
             "    actor_id: Identity of the actor to call.\n"
             "    transport: Optional caller-owned transport. Uses the SDK-managed\n"
@@ -256,25 +280,36 @@ def get_method(client: str) -> list[str]:
             "The returned Stub provides the actor's typed RPC methods.",
             8,
         ),
-        f"        return {client}.Stub(actor_id, transport)",
+        f"        return {client}.{stub}(actor_id, transport)",
     ]
 
 
-def authorization_methods(name: str, types: dict[str, str], model: str) -> list[str]:
+def authorization_methods(
+    name: str, types: dict[str, str], model: str, asynchronous: bool = False
+) -> list[str]:
     metadata = namespace_type(types["SocketMetadata"], model)
+    prefix = "async " if asynchronous else ""
+    awaited = "await " if asynchronous else ""
+    authorization = (
+        [f"    Authorization: _TypeAlias = _sync_actors.{name}.Authorization"]
+        if asynchronous
+        else [
+            f"    class Authorization(_SocketAuthorization[{metadata}]):",
+            docstring(
+                f"Backend-approved access to a {name} actor and its typed connection metadata.", 8
+            ),
+            f"        actor_name: _Literal[{name!r}] = {name!r}",
+        ]
+    )
     return [
-        f"    class Authorization(_SocketAuthorization[{metadata}]):",
-        docstring(
-            f"Backend-approved access to a {name} actor and its typed connection metadata.", 8
-        ),
-        f"        actor_name: _Literal[{name!r}] = {name!r}",
+        *authorization,
         "",
         "    @_builtins.staticmethod",
-        f"    def prepare_websocket(authorization: {name}.Authorization, transport: _ActorTransport | None = None) -> _SocketGrant:",
+        f"    {prefix}def prepare_websocket(authorization: {name}.Authorization, transport: _ActorTransport | None = None) -> _SocketGrant:",
         docstring(
             "Issue browser access after authenticating the user and authorizing this actor.", 8
         ),
-        f"        return _prepare_authorization(_TypeAdapter({name}.Authorization).validate_python(authorization), transport)",
+        f"        return {awaited}_prepare_authorization(_TypeAdapter({name}.Authorization).validate_python(authorization), transport)",
     ]
 
 
@@ -282,10 +317,12 @@ def proxy_module(names: list[str]) -> str:
     authorization = " | ".join(f"actors.{name}.Authorization" for name in names) or "_Never"
     return f'''"""Generated actor clients, authorization types, and browser access helpers."""
 from . import actors as actors
+from . import async_actors as async_actors
 from typing import TypeAlias as _TypeAlias, Never as _Never
 from pydantic import TypeAdapter as _TypeAdapter
 from durable_actors.client import ActorTransport as _ActorTransport, SocketGrant as _SocketGrant
-from durable_actors.proxy import prepare_authorization as _prepare_authorization
+from durable_actors.proxy import prepare_authorization as _prepare_authorization, prepare_async_authorization as _prepare_async_authorization
+from durable_actors.async_client import AsyncActorTransport as _AsyncActorTransport
 from durable_actors import ActorSession as ActorSession, ActorSessionTransport as ActorSessionTransport, ActorSessionRejectedError as ActorSessionRejectedError
 
 ActorAuthorization: _TypeAlias = {authorization}
@@ -297,6 +334,13 @@ class ActorProxy:
     def handle(authorization: ActorAuthorization, transport: _ActorTransport | None = None) -> _SocketGrant:
         """Issue a grant after the backend has authenticated and authorized the user."""
         return _prepare_authorization(_TypeAdapter(ActorAuthorization).validate_python(authorization), transport)
+
+class AsyncActorProxy:
+    """Issue WebSocket grants with an async transport."""
+
+    @staticmethod
+    async def handle(authorization: ActorAuthorization, transport: _AsyncActorTransport | None = None) -> _SocketGrant:
+        return await _prepare_async_authorization(_TypeAdapter(ActorAuthorization).validate_python(authorization), transport)
 '''
 
 
@@ -374,36 +418,54 @@ def actor_client(actor: Document, types: dict[str, str]) -> str:
     lines = [
         "from __future__ import annotations",
         "import json as _json",
-        "from collections.abc import Callable as _Callable",
+        "from collections.abc import Callable as _Callable, Awaitable as _Awaitable",
         "from pydantic import TypeAdapter as _TypeAdapter",
         "from durable_actors.client import ActorTransport as _ActorTransport, SocketGrant as _SocketGrant, default_client as _default_client",
+        "from durable_actors.async_client import AsyncActorTransport as _AsyncActorTransport, default_async_client as _default_async_client",
+        "from durable_actors.async_connection import AsyncConnection as _AsyncConnection",
         "from durable_actors.connection import Connection as _Connection",
-        "from durable_actors.subscription import Subscription as _Subscription",
+        "from durable_actors.subscription import Subscription as _Subscription, AsyncSubscription as _AsyncSubscription",
         "from durable_actors.generated import UNSET as _UNSET, Unset as _Unset, arguments as _arguments, argument as _argument",
         f"from . import _{name.lower()}_models as _models",
         "",
-        "class Stub:",
-        docstring(actor.get("description") or f"Synchronous client for {name} actors.", 4),
-        "    def __init__(self, actor_id: str, transport: _ActorTransport | None = None) -> None:",
-        docstring(
-            "Address an actor using the SDK-managed transport by default.\n\n"
-            "Args:\n"
-            "    actor_id: Identity of the actor to call.\n"
-            "    transport: Optional custom transport; the caller owns its lifetime.",
-            8,
-        ),
-        "        self._actor_id = actor_id",
-        "        self._transport = transport if transport is not None else _default_client()",
-        "",
     ]
-    for method in actor["rpc"]["methods"]:
-        lines.extend(rpc_method(name, method, actor["rpc"]["schema"], types))
-    lines.extend(socket_methods(name, types))
-    lines.extend(subscription_method(actor, types))
+    lines.extend(stub_class(actor, types, False))
+    lines.extend(stub_class(actor, types, True))
     return "\n".join(lines)
 
 
-def rpc_method(actor: str, method: Document, schema: Document, types: dict[str, str]) -> list[str]:
+def stub_class(actor: Document, types: dict[str, str], asynchronous: bool) -> list[str]:
+    name = identifier(actor["actorName"])
+    stub = "AsyncStub" if asynchronous else "Stub"
+    transport = "_AsyncActorTransport" if asynchronous else "_ActorTransport"
+    default = "_default_async_client" if asynchronous else "_default_client"
+    style = "Async" if asynchronous else "Synchronous"
+    lines = [
+        f"class {stub}:",
+        docstring(actor.get("description") or f"{style} client for {name} actors.", 4),
+        f"    def __init__(self, actor_id: str, transport: {transport} | None = None) -> None:",
+        docstring("Address an actor. An injected transport remains caller-owned.", 8),
+        "        self._actor_id = actor_id",
+        f"        self._transport = transport if transport is not None else {default}()",
+        "",
+    ]
+    for method in actor["rpc"]["methods"]:
+        lines.extend(rpc_method(name, method, actor["rpc"]["schema"], types, asynchronous))
+    lines.extend(socket_methods(name, types, asynchronous))
+    lines.extend(subscription_method(actor, types, asynchronous))
+    return lines
+
+
+def rpc_method(
+    actor: str,
+    method: Document,
+    schema: Document,
+    types: dict[str, str],
+    asynchronous: bool = False,
+) -> list[str]:
+    prefix = "async " if asynchronous else ""
+    awaited = "await " if asynchronous else ""
+    style = "asynchronously" if asynchronous else "synchronously"
     name = identifier(method["name"])
     if name in {"connect", "prepare_websocket", "subscribe", "broadcast"}:
         raise ValueError(f"reserved actor method: {name}")
@@ -411,16 +473,16 @@ def rpc_method(actor: str, method: Document, schema: Document, types: dict[str, 
     result = method["result"]
     returned = "None" if result["kind"] == "void" else types["Rpc" + root_key(result["type"])]
     lines = [
-        f"    def {name}(_self{', ' if params else ''}{', '.join(params)}) -> {returned}:",
+        f"    {prefix}def {name}(_self{', ' if params else ''}{', '.join(params)}) -> {returned}:",
         docstring(
             method.get("description")
-            or f"Invoke {actor}.{name} synchronously.\n\n"
+            or f"Invoke {actor}.{name} {style}.\n\n"
             "Arguments and results are validated against the actor contract.\n"
             "Remote failures raise ActorInvocationError.",
             8,
         ),
         f"        _args = _arguments([{', '.join(values)}], [{', '.join(defaults)}])",
-        f"        _result = _self._transport.invoke({actor!r}, _self._actor_id, {name!r}, _args)",
+        f"        _result = {awaited}_self._transport.invoke({actor!r}, _self._actor_id, {name!r}, _args)",
     ]
     if returned != "None":
         lines.extend(
@@ -477,20 +539,25 @@ def method_parameters(
     return params, values, defaults
 
 
-def socket_methods(actor: str, types: dict[str, str]) -> list[str]:
+def socket_methods(actor: str, types: dict[str, str], asynchronous: bool = False) -> list[str]:
+    prefix = "async " if asynchronous else ""
+    awaited = "await " if asynchronous else ""
+    connection_type = "_AsyncConnection" if asynchronous else "_Connection"
+    style = "async" if asynchronous else "synchronous"
+    cleanup = "aclose() or async with" if asynchronous else "close() or with"
     metadata, incoming, outgoing = (
         types["Socket" + kind] for kind in ("Metadata", "Incoming", "Outgoing")
     )
     state, patch = types["SocketEmittedState"], types["SocketStatePatch"]
-    connection = f"_Connection[{incoming}, {outgoing}, {state}, {patch}]"
+    connection = f"{connection_type}[{incoming}, {outgoing}, {state}, {patch}]"
     return [
-        f"    def broadcast(self, message: {outgoing}) -> None:",
+        f"    {prefix}def broadcast(self, message: {outgoing}) -> None:",
         docstring(
             "Broadcast a typed application message to every connection without persisting it.", 8
         ),
-        f"        self._transport.broadcast({actor!r}, self._actor_id, _argument(message, _TypeAdapter({outgoing})))",
+        f"        {awaited}self._transport.broadcast({actor!r}, self._actor_id, _argument(message, _TypeAdapter({outgoing})))",
         "",
-        f"    def prepare_websocket(self, metadata: {metadata}) -> _SocketGrant:",
+        f"    {prefix}def prepare_websocket(self, metadata: {metadata}) -> _SocketGrant:",
         docstring(
             "Authorize a WebSocket connection without opening it.\n\n"
             "Args:\n"
@@ -500,25 +567,27 @@ def socket_methods(actor: str, types: dict[str, str]) -> list[str]:
             "    Accepted connections remain authorized until they close.",
             8,
         ),
-        f"        return self._transport.prepare_websocket({actor!r}, self._actor_id, _argument(metadata, _TypeAdapter({metadata})))",
+        f"        return {awaited}self._transport.prepare_websocket({actor!r}, self._actor_id, _argument(metadata, _TypeAdapter({metadata})))",
         "",
-        f"    def connect(self, metadata: {metadata}) -> {connection}:",
+        f"    {prefix}def connect(self, metadata: {metadata}) -> {connection}:",
         docstring(
-            "Open a typed, synchronous WebSocket connection.\n\n"
+            f"Open a typed, {style} WebSocket connection.\n\n"
             "Args:\n"
             "    metadata: Typed metadata passed to the actor's on_connect hook.\n\n"
             "Use send() for application messages and receive() or iteration for\n"
-            "messages and state events. Close the connection explicitly or use with.\n"
+            f"messages and state events. Use {cleanup} for cleanup.\n"
             "For complete emitted-state callbacks, use subscribe() when available.",
             8,
         ),
-        "        grant = self.prepare_websocket(metadata)",
-        f"        return {connection}.open(grant, _TypeAdapter({incoming}), _TypeAdapter({outgoing}), _TypeAdapter({state}), _TypeAdapter({patch}))",
+        f"        grant = {awaited}self.prepare_websocket(metadata)",
+        f"        return {awaited}{connection}.open(grant, _TypeAdapter({incoming}), _TypeAdapter({outgoing}), _TypeAdapter({state}), _TypeAdapter({patch}))",
         "",
     ]
 
 
-def subscription_method(actor: Document, types: dict[str, str]) -> list[str]:
+def subscription_method(
+    actor: Document, types: dict[str, str], asynchronous: bool = False
+) -> list[str]:
     if not actor["socket"]["emittable"]:
         return []
     metadata, state = types["SocketMetadata"], types["SocketEmittedState"]
@@ -528,6 +597,16 @@ def subscription_method(actor: Document, types: dict[str, str]) -> list[str]:
         if nullable({"$ref": "#/definitions/Metadata"}, schema["definitions"], set())
         else ""
     )
+    if asynchronous:
+        return [
+            f"    async def subscribe(self, callback: _Callable[[{state}], _Awaitable[None] | None], *, metadata: {metadata}{default}, on_error: _Callable[[Exception], _Awaitable[None] | None] | None = None) -> _AsyncSubscription[{state}]:",
+            docstring(
+                "Subscribe to merged state on an asyncio task. Callbacks may be async.\nUse aclose() or async with to stop receiving and await cleanup.",
+                8,
+            ),
+            f"        return _AsyncSubscription(await self.connect(metadata), callback, _TypeAdapter({state}), on_error=on_error)",
+            "",
+        ]
     return [
         f"    def subscribe(self, callback: _Callable[[{state}], None], *, metadata: {metadata}{default}, on_error: _Callable[[Exception], None] | None = None) -> _Subscription[{state}]:",
         docstring(

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from threading import Event, Thread, current_thread
 from types import TracebackType
 from typing import Any, Generic, Protocol, TypeVar
@@ -115,6 +117,93 @@ class Subscription(Generic[State]):
             return
         try:
             self._on_error(error)
+        except Exception:
+            logging.getLogger(__name__).exception("Actor subscription error handler failed")
+
+
+class AsyncStateStream(Protocol):
+    async def receive(self) -> object: ...
+    async def aclose(self) -> None: ...
+
+
+class AsyncSubscription(Generic[State]):
+    """Receive merged state on an asyncio task, awaiting callbacks in order.
+
+    Callbacks and on_error may be synchronous or async. Failures stop the
+    subscription and populate error. Use async with or aclose() for cleanup.
+    """
+
+    def __init__(
+        self,
+        connection: AsyncStateStream,
+        callback: Callable[[State], Awaitable[None] | None],
+        state: TypeAdapter[State],
+        *,
+        on_error: Callable[[Exception], Awaitable[None] | None] | None = None,
+    ) -> None:
+        self._connection = connection
+        self._callback = callback
+        self._state = _StateAccumulator(state)
+        self._on_error = on_error
+        self._error: Exception | None = None
+        self._stopping = False
+        self._task = asyncio.create_task(self._run(), name="durable-actors-subscription")
+
+    @property
+    def closed(self) -> bool:
+        return self._task.done()
+
+    @property
+    def error(self) -> Exception | None:
+        return self._error
+
+    async def aclose(self) -> None:
+        """Cancel receiving and await cleanup; safe to call from the callback."""
+        self._stopping = True
+        if asyncio.current_task() is self._task:
+            return
+        if not self._task.done():
+            self._task.cancel()
+        await asyncio.gather(self._task, return_exceptions=True)
+        await self._connection.aclose()
+
+    async def __aenter__(self) -> AsyncSubscription[State]:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.aclose()
+
+    async def _run(self) -> None:
+        try:
+            while not self._stopping:
+                try:
+                    event = await self._connection.receive()
+                except ConnectionClosedOK:
+                    break
+                state = self._state.apply(event)
+                if state is not None and not self._stopping:
+                    result = self._callback(state)
+                    if inspect.isawaitable(result):
+                        await result
+        except Exception as error:
+            await self._report(error)
+        finally:
+            await self._connection.aclose()
+
+    async def _report(self, error: Exception) -> None:
+        self._error = error
+        if self._on_error is None:
+            logging.getLogger(__name__).exception("Actor state subscription stopped")
+            return
+        try:
+            result = self._on_error(error)
+            if inspect.isawaitable(result):
+                await result
         except Exception:
             logging.getLogger(__name__).exception("Actor subscription error handler failed")
 

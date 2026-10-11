@@ -91,7 +91,50 @@ class ActorTransport(RpcTransport, Protocol):
     def broadcast(self, actor_name: str, actor_id: str, message: Any) -> None: ...
 
 
-class Client:
+class ClientConfiguration:
+    def __init__(
+        self,
+        control_plane_url: str | None = None,
+        *,
+        project_id: str | None = None,
+        api_key: str | None = None,
+        home_region: str | None = None,
+        telemetry: Callable[[dict[str, Any]], None] | None = None,
+    ) -> None:
+        self.origin = validate_origin(
+            control_plane_url
+            or os.environ.get("DURABLE_ACTORS_CONTROL_PLANE_URL", "http://127.0.0.1:7100")
+        )
+        local = urlsplit(self.origin).hostname in {"localhost", "127.0.0.1", "::1"}
+        self.project_id = component(
+            project_id or os.environ.get("DURABLE_ACTORS_PROJECT_ID") or ("local" if local else ""),
+            64,
+        )
+        key = (
+            api_key
+            if api_key is not None
+            else os.environ.get("DURABLE_ACTORS_SECRET", os.environ.get("DURABLE_ACTORS_API_KEY"))
+        )
+        if key is not None and not key.strip():
+            raise ValueError("API key must not be empty")
+        self.headers = {"authorization": f"Bearer {key.strip()}"} if key is not None else {}
+        self.home_region = home_region or os.environ.get("DURABLE_ACTORS_HOME_REGION")
+        if self.home_region is not None:
+            component(self.home_region, 255)
+        self._telemetry = telemetry or stderr_telemetry
+        self._closed = False
+        self._targets: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def actor_path(self, actor_name: str, actor_id: str) -> str:
+        """Return the validated project-scoped actor path."""
+        return f"/v1/projects/{self.project_id}/actors/{component(actor_name, 255)}/{component(actor_id, 128)}"
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("client is closed")
+
+
+class Client(ClientConfiguration):
     """Synchronous HTTP transport for actor RPCs, contracts, and socket grants.
 
     Generated clients use an SDK-managed shared instance by default. Construct
@@ -125,31 +168,15 @@ class Client:
             telemetry: Receives invocation timing and outcome, without payloads or
                 credentials. Defaults to stderr when DURABLE_ACTORS_TELEMETRY=1.
         """
-        self.origin = validate_origin(
-            control_plane_url
-            or os.environ.get("DURABLE_ACTORS_CONTROL_PLANE_URL", "http://127.0.0.1:7100")
+        super().__init__(
+            control_plane_url,
+            project_id=project_id,
+            api_key=api_key,
+            home_region=home_region,
+            telemetry=telemetry,
         )
-        local = urlsplit(self.origin).hostname in {"localhost", "127.0.0.1", "::1"}
-        self.project_id = component(
-            project_id or os.environ.get("DURABLE_ACTORS_PROJECT_ID") or ("local" if local else ""),
-            64,
-        )
-        key = (
-            api_key
-            if api_key is not None
-            else os.environ.get("DURABLE_ACTORS_SECRET", os.environ.get("DURABLE_ACTORS_API_KEY"))
-        )
-        if key is not None and not key.strip():
-            raise ValueError("API key must not be empty")
-        self.headers = {"authorization": f"Bearer {key.strip()}"} if key is not None else {}
-        self.home_region = home_region or os.environ.get("DURABLE_ACTORS_HOME_REGION")
-        if self.home_region is not None:
-            component(self.home_region, 255)
-        self._telemetry = telemetry or stderr_telemetry
         self._http = http if http is not None else httpx.Client(timeout=180, follow_redirects=False)
         self._owns_http = http is None
-        self._closed = False
-        self._targets: dict[tuple[str, str], dict[str, Any]] = {}
 
     def __enter__(self) -> Client:
         return self
@@ -302,10 +329,6 @@ class Client:
             raise ActorProtocolError("invalid contract publication")
         return cast(dict[str, Any], value["contract"])
 
-    def actor_path(self, actor_name: str, actor_id: str) -> str:
-        """Return the project-scoped HTTP path after validating the actor name and ID."""
-        return f"/v1/projects/{self.project_id}/actors/{component(actor_name, 255)}/{component(actor_id, 128)}"
-
     def _invoke(
         self, actor_name: str, actor_id: str, method: str, args: list[Any], request_id: str
     ) -> Any:
@@ -335,28 +358,10 @@ class Client:
                         "unavailable", request_id, f"could not connect to {self.origin}: {error}"
                     ) from error
                 reply = {"type": "not_executed", "reason": "upstream_not_reached"}
-            kind = reply.get("type")
-            if kind == "completed" and "result" in reply:
-                return reply["result"]
-            if (
-                kind == "failed"
-                and isinstance(reply.get("code"), str)
-                and isinstance(reply.get("message"), str)
-            ):
-                raise ActorInvocationError(reply["code"], request_id, reply["message"])
-            if kind != "unauthenticated" and not (
-                kind == "not_executed"
-                and reply.get("reason")
-                in {"stale_owner", "host_unavailable", "upstream_not_reached"}
-            ):
-                raise ActorProtocolError("invalid invocation outcome")
+            completed, result = invocation_outcome(reply, request_id, attempt)
+            if completed:
+                return result
             self._targets.pop(key, None)
-            if attempt:
-                raise ActorInvocationError(
-                    "unauthenticated" if kind == "unauthenticated" else "unavailable",
-                    request_id,
-                    "actor rejected invocation before execution",
-                )
         raise AssertionError("unreachable")
 
     def _target(self, key: tuple[str, str], path: str, request_id: str) -> dict[str, Any]:
@@ -373,10 +378,6 @@ class Client:
         target = validate_target(document(response))
         self._targets[key] = target
         return target
-
-    def _ensure_open(self) -> None:
-        if self._closed:
-            raise RuntimeError("client is closed")
 
     def _invoke_attempt(
         self,
@@ -402,30 +403,9 @@ class Client:
             json=body,
             follow_redirects=False,
         )
-        if target is not None and response.status_code == 401:
-            return {"type": "unauthenticated"}
-        value = document(response)
-        if not response.is_success:
-            error = value.get("error", {})
-            if response.status_code in {401, 403}:
-                raise ActorInvocationError(
-                    "unauthenticated", request_id, "application credential rejected"
-                )
-            if not isinstance(error, dict):
-                raise ActorProtocolError("invalid invocation error")
-            error = cast(dict[str, Any], error)
-            if not isinstance(error.get("code"), str) or not isinstance(error.get("message"), str):
-                raise ActorProtocolError(f"invalid HTTP {response.status_code} error")
-            raise ActorInvocationError(error["code"], request_id, error["message"])
-        if target is not None:
-            return value
-        target = validate_target(value.get("target"))
-        reply = value.get("outcome")
-        if not isinstance(reply, dict):
-            raise ActorProtocolError("missing invocation outcome")
-        reply = cast(dict[str, Any], reply)
-        if reply.get("type") in {"completed", "failed"}:
-            self._targets[key] = target
+        reply, discovered = invocation_response(response, request_id, target)
+        if discovered is not None:
+            self._targets[key] = discovered
         return reply
 
 
@@ -488,3 +468,55 @@ def document(response: httpx.Response) -> dict[str, Any]:
 def stderr_telemetry(event: dict[str, Any]) -> None:
     if os.environ.get("DURABLE_ACTORS_TELEMETRY") == "1":
         print(json.dumps(event), file=sys.stderr)
+
+
+def invocation_outcome(reply: dict[str, Any], request_id: str, attempt: int) -> tuple[bool, Any]:
+    kind = reply.get("type")
+    if kind == "completed" and "result" in reply:
+        return True, reply["result"]
+    if (
+        kind == "failed"
+        and isinstance(reply.get("code"), str)
+        and isinstance(reply.get("message"), str)
+    ):
+        raise ActorInvocationError(reply["code"], request_id, reply["message"])
+    if kind != "unauthenticated" and not (
+        kind == "not_executed"
+        and reply.get("reason") in {"stale_owner", "host_unavailable", "upstream_not_reached"}
+    ):
+        raise ActorProtocolError("invalid invocation outcome")
+    if attempt:
+        raise ActorInvocationError(
+            "unauthenticated" if kind == "unauthenticated" else "unavailable",
+            request_id,
+            "actor rejected invocation before execution",
+        )
+    return False, None
+
+
+def invocation_response(
+    response: httpx.Response, request_id: str, target: dict[str, Any] | None
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    if target is not None and response.status_code == 401:
+        return {"type": "unauthenticated"}, None
+    value = document(response)
+    if not response.is_success:
+        error = value.get("error", {})
+        if response.status_code in {401, 403}:
+            raise ActorInvocationError(
+                "unauthenticated", request_id, "application credential rejected"
+            )
+        if not isinstance(error, dict):
+            raise ActorProtocolError("invalid invocation error")
+        error = cast(dict[str, Any], error)
+        if not isinstance(error.get("code"), str) or not isinstance(error.get("message"), str):
+            raise ActorProtocolError(f"invalid HTTP {response.status_code} error")
+        raise ActorInvocationError(error["code"], request_id, error["message"])
+    if target is not None:
+        return value, None
+    target = validate_target(value.get("target"))
+    reply = value.get("outcome")
+    if not isinstance(reply, dict):
+        raise ActorProtocolError("missing invocation outcome")
+    reply = cast(dict[str, Any], reply)
+    return reply, target if reply.get("type") in {"completed", "failed"} else None

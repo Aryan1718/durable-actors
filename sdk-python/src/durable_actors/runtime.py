@@ -8,7 +8,7 @@ from collections.abc import Callable
 from functools import partial
 from typing import Any
 
-from .actor import Actor
+from .actor_base import ActorBase
 from .contract import Document, Method, decode, describe_actor, encode
 from .database import actor_database_invocation, bind_actor_database
 from .socket import Effects, SocketScope, scope_context
@@ -19,7 +19,7 @@ from .threads import run_in_thread
 class ActorRuntime:
     def __init__(
         self,
-        actor: type[Actor[Any, Any, Any, Any]],
+        actor: type[ActorBase[Any, Any, Any, Any]],
         effects: Effects,
         database: Storage,
     ) -> None:
@@ -28,7 +28,7 @@ class ActorRuntime:
         self.completion = asyncio.Lock()
         self.fatal: Document | None = None
         self.definition = describe_actor(actor)
-        self.instance: Actor[Any, Any, Any, Any] | None = None
+        self.instance: ActorBase[Any, Any, Any, Any] | None = None
         self.identity: Document | None = None
         self.lifecycle = asyncio.Lock()
         self.pending: set[asyncio.Task[Document]] = set()
@@ -169,6 +169,11 @@ class ActorRuntime:
                     self.sequence += 1
                     reply["sequence"] = self.sequence
                 return reply
+        except asyncio.CancelledError:
+            if not self.definition.reentrant_methods:
+                self.instance = None
+                await run_in_thread(self.database.rollback)
+            raise
         except Exception as error:
             if not self.definition.reentrant_methods:
                 self.database.rollback()
@@ -246,6 +251,12 @@ async def invoke_handler(
     scope: SocketScope, handler: Callable[..., Any], *args: Any, **kwargs: Any
 ) -> Any:
     with actor_database_invocation(getattr(handler, "__self__", None)):
+        if inspect.iscoroutinefunction(handler):
+            try:
+                return await handler(*args, **kwargs)
+            except asyncio.CancelledError:
+                scope.cancel()
+                raise
         return await run_in_thread(partial(handler, *args, **kwargs), scope.cancel)
 
 
