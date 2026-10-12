@@ -11,7 +11,7 @@ export class Workspace extends Actor<null, DocumentInfo, DocumentInfo[]> {
     }
 
     async onMessage(_socket: ActorSocket<null, DocumentInfo[]>, document: DocumentInfo) {
-        if (!this.documents.some(item => item.id === document.id)) this.documents.push(document)
+        if (!this.documents.some(item => item.id === document.id)) this.documents = [...this.documents, document]
         this.broadcast(this.documents)
     }
 }

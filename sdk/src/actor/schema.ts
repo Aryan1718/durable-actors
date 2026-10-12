@@ -21,7 +21,8 @@ interface ActorSchema {
     readonly actorName: string
     readonly fields: readonly ActorFieldSchema[]
     readonly sandbox?: ComputeOptions
-    readonly reentrantMethods?: readonly string[]
+    readonly atomicMethods?: readonly string[]
+    readonly interleaveMethods?: readonly string[]
     readonly contract?: SocketContract
 }
 

@@ -13,6 +13,7 @@ interface SdkSymbols {
     readonly Persisted: ts.Symbol
     readonly Ephemeral: ts.Symbol
     readonly Emittable: ts.Symbol
+    readonly Atomic?: ts.Symbol
     readonly Interleave?: ts.Symbol
     readonly Compute?: ts.Symbol
 }
@@ -20,7 +21,8 @@ interface SdkSymbols {
 enum AnnotationKind {
     Persistence = "persistence",
     Emission = "emission",
-    Reentrancy = "reentrancy",
+    Interleave = "interleave",
+    Atomicity = "atomicity",
     Compute = "compute"
 }
 
@@ -33,7 +35,10 @@ interface PersistenceAnnotation {
 type Annotation =
     | PersistenceAnnotation
     | { readonly kind: AnnotationKind.Compute; readonly node: ts.Decorator; readonly options: ComputeOptions }
-    | { readonly kind: AnnotationKind.Emission | AnnotationKind.Reentrancy; readonly node: ts.Decorator }
+    | {
+          readonly kind: AnnotationKind.Emission | AnnotationKind.Interleave | AnnotationKind.Atomicity
+          readonly node: ts.Decorator
+      }
 
 interface DecoratorUse {
     readonly node: ts.Decorator

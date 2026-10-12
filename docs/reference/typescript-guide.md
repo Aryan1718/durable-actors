@@ -249,6 +249,9 @@ export class BankAccount extends Actor {
 ```
 
 - SQL writes and `@Persisted` fields commit together when the method or socket hook succeeds.
+- Assigning a `@Persisted` field writes its JSON value through the same SQL execution path as `this.db.exec()`. Writes still commit at successful method completion.
+- Reassign objects and arrays to persist changes: `this.messages = [...this.messages, message]`. Nested mutations such as `this.messages.push(message)` only change memory; they are not saved, even at method completion. Assign `undefined` to remove a saved field value rather than using `delete`.
+- Saved fields are restored before persistence tracking begins. Defaults are inserted only for fields missing from SQLite, so adding a persisted property initializes existing actors without replacing their saved values. Initialization does not delete existing rows.
 - Bind values with `?` placeholders. Values can be strings, numbers, bigints, byte arrays, or `null`.
 - `this.db` is available in constructors and field initializers, as well as methods and socket hooks. SQLite is restored before construction; `@Persisted` fields are hydrated afterward.
 - Keep constructor SQL synchronous and repeatable (for example, `CREATE TABLE IF NOT EXISTS`): constructors run again when actors are restored. Constructor writes commit with the next successful method or socket hook; a throwing constructor rolls them back.

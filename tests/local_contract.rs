@@ -13,25 +13,30 @@ use tokio::{
 
 #[tokio::test]
 #[ignore = "requires bun run --bun --cwd sdk build and Bun"]
-async fn sqlite_and_object_fields_survive_runtime_restart_together() -> Result<()> {
+async fn atomic_sqlite_and_object_fields_survive_runtime_restart_together() -> Result<()> {
     let project = tempfile::tempdir()?;
     local_project::write_actor(
         project.path(),
         r#"
         @Persisted count = 0;
         @Persisted payload = "";
+        @Atomic
         async initialize(): Promise<void> {
             this.payload = "x".repeat(17 * 1024 * 1024);
             this.db.exec("CREATE TABLE entries (value TEXT NOT NULL)");
             this.db.exec("CREATE TABLE payload (data BLOB)");
             this.db.exec("INSERT INTO payload VALUES (zeroblob(?))", 25 * 1024 * 1024);
         }
+        @Atomic
         async insert(value: string): Promise<void> { this.db.exec("INSERT INTO entries (value) VALUES (?)", value); }
+        @Atomic
         async increment(): Promise<number> { return ++this.count; }
+        @Atomic
         async migrate(): Promise<void> {
             this.db.exec("ALTER TABLE entries ADD COLUMN enabled INTEGER DEFAULT 1");
             this.db.exec("PRAGMA user_version = 2");
         }
+        @Atomic
         async fail(): Promise<void> {
             ++this.count;
             this.db.exec("INSERT INTO entries VALUES ('discarded')");

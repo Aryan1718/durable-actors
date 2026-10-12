@@ -1,10 +1,35 @@
-import { Actor, Persisted } from "durable-actors"
+import { Actor, Atomic, Persisted } from "durable-actors"
 
 class SessionCounter extends Actor {
     @Persisted private count = 0
 
     async increment(amount = 1): Promise<number> {
         this.count += amount
+        return this.count
+    }
+
+    @Atomic
+    async incrementAtomic(): Promise<number> {
+        return this.incrementTwice()
+    }
+
+    async incrementTwice(): Promise<number> {
+        this.count++
+        this.count++
+        return this.count
+    }
+
+    async failAfterWrite(): Promise<void> {
+        this.count++
+        throw new Error("failed after write")
+    }
+
+    @Atomic
+    async failAtomic(): Promise<void> {
+        return this.failAfterWrite()
+    }
+
+    async read(): Promise<number> {
         return this.count
     }
 

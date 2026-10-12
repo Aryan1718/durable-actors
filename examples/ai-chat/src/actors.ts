@@ -9,6 +9,6 @@ export class ChatHistory extends Actor {
     }
 
     async append(...messages: UIMessage[]) {
-        this.messages.push(...messages)
+        this.messages = [...this.messages, ...messages]
     }
 }

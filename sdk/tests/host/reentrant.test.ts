@@ -14,11 +14,11 @@ function deferred() {
     return { promise, resolve }
 }
 
-async function setup(actorClass: ActorClass, reentrantMethods: string[], allowNextInvocation = () => {}) {
+async function setup(actorClass: ActorClass, interleaveMethods: string[], allowNextInvocation = () => {}) {
     const definition = registerActorClass(actorClass, {
         actorName: actorClass.name,
         fields: [{ name: "count", persistence: Persistence.Persisted }],
-        ...{ reentrantMethods }
+        ...{ interleaveMethods }
     })
     const runtime = new ActorRuntime(definition, allowNextInvocation)
     const sqlite = await seed()
@@ -243,7 +243,7 @@ test("emittable changes compare consecutive completed snapshots, including a val
     }
     const definition = registerActorClass(ReentrantEmission, {
         actorName: "ReentrantEmission",
-        reentrantMethods: ["hold"],
+        interleaveMethods: ["hold"],
         fields: [{ name: "count", persistence: Persistence.Persisted, emittable: true }]
     })
     const runtime = new ActorRuntime(definition, () => {})

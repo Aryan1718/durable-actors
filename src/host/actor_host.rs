@@ -7,7 +7,8 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result};
+use crate::state_transport::{SqlitePersisted, SqliteWrite, SqliteWriter};
+use anyhow::{Context, Result, ensure};
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::{Id, JoinError, JoinSet},
@@ -243,6 +244,32 @@ impl ActorHost {
     }
 }
 
+#[async_trait::async_trait]
+impl SqliteWriter for ActorHost {
+    async fn persist_sqlite(&self, write: &SqliteWrite) -> Result<SqlitePersisted> {
+        ensure!(
+            write.txid.is_some(),
+            "checkpoint requires a captured SQLite transaction"
+        );
+        let (reply, result) = oneshot::channel();
+        self.commands
+            .send(HostCommand::Checkpoint(Checkpoint {
+                write: write.clone(),
+                reply,
+            }))
+            .await
+            .context("actor dispatcher stopped")?;
+        result
+            .await
+            .context("actor stopped before checkpoint acknowledgment")?
+    }
+}
+
+struct Checkpoint {
+    write: SqliteWrite,
+    reply: oneshot::Sender<Result<SqlitePersisted>>,
+}
+
 struct HostDispatcher {
     last_active: tokio::time::Instant,
     endpoint: HostEndpoint,
@@ -305,6 +332,7 @@ impl HostDispatcher {
                 Some(result) = self.tasks.join_next_with_id(), if !self.tasks.is_empty() => self.task_stopped(result),
                 command = commands.recv() => match command {
                     Some(HostCommand::Invoke(request)) => self.admit(*request, &completed),
+                    Some(HostCommand::Checkpoint(checkpoint)) => self.checkpoint(checkpoint),
                     Some(HostCommand::Drain(reply)) => {
                         self.accepting.send_replace(false);
                         self.drained.retain(|waiter| !waiter.is_closed());
@@ -314,6 +342,23 @@ impl HostDispatcher {
                     None => return,
                 },
             }
+        }
+    }
+
+    fn checkpoint(&self, checkpoint: Checkpoint) {
+        if self.identity.as_ref() == Some(&checkpoint.write.actor.storage_key())
+            && let Some(mailbox) = &self.mailbox
+        {
+            if let Err(error) = mailbox.checkpoints.send(checkpoint) {
+                let _ = error
+                    .0
+                    .reply
+                    .send(Err(anyhow::anyhow!("actor checkpoint receiver stopped")));
+            }
+        } else {
+            let _ = checkpoint
+                .reply
+                .send(Err(anyhow::anyhow!("checkpoint has no active actor")));
         }
     }
 
@@ -387,15 +432,18 @@ impl HostDispatcher {
             self.replication.clone(),
         );
         let (sender, requests) = mpsc::unbounded_channel();
+        let (checkpoints, incoming_checkpoints) = mpsc::unbounded_channel();
         let task = self.tasks.spawn(run_actor(
             actor.storage_key(),
             runtime,
             requests,
             completed,
             self.accepting.subscribe(),
+            incoming_checkpoints,
         ));
         self.mailbox = Some(ActorMailbox {
             sender,
+            checkpoints,
             admitted: 0,
             task_id: task.id(),
         });
@@ -453,11 +501,22 @@ async fn run_actor(
     mut requests: mpsc::UnboundedReceiver<ActorRequest>,
     completed: mpsc::Sender<ActorCompletion>,
     accepting: watch::Receiver<bool>,
+    checkpoints: mpsc::UnboundedReceiver<Checkpoint>,
 ) {
     if let Some(admission) = runtime.executor().invocation_admission() {
-        admission::run(object, runtime, requests, completed, accepting, admission).await;
+        admission::run(
+            object,
+            runtime,
+            requests,
+            completed,
+            accepting,
+            admission,
+            checkpoints,
+        )
+        .await;
         return;
     }
+    drop(checkpoints);
     while let Some(mut request) = requests.recv().await {
         drop(request.waiting.take());
         let invocation = request.operation.invocation().into_owned();
@@ -509,11 +568,13 @@ async fn run_actor(
 }
 
 enum HostCommand {
+    Checkpoint(Checkpoint),
     Invoke(Box<ActorRequest>),
     Drain(oneshot::Sender<()>),
 }
 
 struct ActorMailbox {
+    checkpoints: mpsc::UnboundedSender<Checkpoint>,
     sender: mpsc::UnboundedSender<ActorRequest>,
     admitted: usize,
     task_id: Id,

@@ -25,6 +25,9 @@ try {
         },
         () => {},
         () => commit(sqlite),
+        async () => {
+            throw new Error("unexpected immediate persistence")
+        },
         async published => {
             effects.push(...published)
         },

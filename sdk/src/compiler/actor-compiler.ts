@@ -7,9 +7,10 @@ import { ActorDefinitionError } from "../errors.js"
 import type { PublicActorContract } from "../wire/public-contract.js"
 
 import { DeclarationCompiler } from "./declarations.js"
+import { readAtomicity, validateAtomicity } from "./features/atomicity.js"
 import { readCompute, validateCompute } from "./features/compute.js"
+import { readInterleave, validateInterleave } from "./features/interleave.js"
 import { readEmission, readPersistence, validatePersistence } from "./features/persistence.js"
-import { readReentrancy, validateReentrancy } from "./features/reentrancy.js"
 import { extractPublicSchema } from "./public-schema.js"
 import { rpcContract } from "./rpc-contract.js"
 import { socketContract } from "./socket-contract.js"
@@ -297,8 +298,10 @@ function readDecorator(symbol: ts.Symbol | undefined, use: DecoratorUse, sdk: Sd
             return readPersistence(use, Persistence.Ephemeral)
         case sdk.Emittable:
             return readEmission(use)
+        case sdk.Atomic:
+            return readAtomicity(use)
         case sdk.Interleave:
-            return readReentrancy(use)
+            return readInterleave(use)
         case sdk.Compute:
             return readCompute(use)
         default:
@@ -313,15 +316,18 @@ function validateActors(actors: readonly ParsedActor[], discoveryDiagnostics: re
         diagnostics.push(...actor.diagnostics, ...actor.members.flatMap(member => member.diagnostics))
         const persistence = validatePersistence(actor)
         diagnostics.push(...persistence.diagnostics)
-        const reentrancy = validateReentrancy(actor)
-        diagnostics.push(...reentrancy.diagnostics)
+        const atomicity = validateAtomicity(actor)
+        diagnostics.push(...atomicity.diagnostics)
+        const interleave = validateInterleave(actor)
+        diagnostics.push(...interleave.diagnostics)
         const compute = validateCompute(actor)
         diagnostics.push(...compute.diagnostics)
         schemas.push({
             actorName: actor.name,
             fields: persistence.fields,
             ...(compute.options === undefined ? {} : { sandbox: compute.options }),
-            ...(reentrancy.methods.length ? { reentrantMethods: reentrancy.methods } : {})
+            ...(atomicity.methods.length ? { atomicMethods: atomicity.methods } : {}),
+            ...(interleave.methods.length ? { interleaveMethods: interleave.methods } : {})
         })
     }
     return { schemas: diagnostics.length === 0 ? schemas : [], diagnostics }
@@ -335,6 +341,7 @@ function resolveSdkSymbols(checker: ts.TypeChecker, source: ts.SourceFile): SdkS
         if (symbol === undefined) throw new ActorDefinitionError(`cannot resolve SDK export ${name}`)
         return canonicalSymbol(checker, symbol)
     }
+    const atomic = exports.find(symbol => symbol.name === "Atomic")
     const interleave = exports.find(symbol => symbol.name === "Interleave")
     const compute = exports.find(symbol => symbol.name === "Compute")
     return {
@@ -342,6 +349,7 @@ function resolveSdkSymbols(checker: ts.TypeChecker, source: ts.SourceFile): SdkS
         Persisted: resolve("Persisted"),
         Ephemeral: resolve("Ephemeral"),
         Emittable: resolve("Emittable"),
+        ...(atomic === undefined ? {} : { Atomic: canonicalSymbol(checker, atomic) }),
         ...(compute === undefined ? {} : { Compute: canonicalSymbol(checker, compute) }),
         ...(interleave === undefined ? {} : { Interleave: canonicalSymbol(checker, interleave) })
     }

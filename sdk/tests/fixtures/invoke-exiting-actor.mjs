@@ -17,7 +17,8 @@ try {
             sqlite
         },
         () => {},
-        () => commit(sqlite)
+        () => commit(sqlite),
+        async (_commitId, txid) => ({ txid })
     )
     console.log(JSON.stringify(reply))
 } finally {

@@ -9,8 +9,16 @@ interface ActorDatabase {
     exec<Row extends object = Record<string, SqliteValue>>(sql: string, ...bindings: SqliteValue[]): Row[]
 }
 
+type PersistenceMode = "atomic" | "immediate"
+
+interface ActorInvocationContext {
+    readonly actor: object
+    active: boolean
+    readonly mode: PersistenceMode
+}
+
 const databases = new WeakMap<object, ActorDatabase>()
-const invocation = new AsyncLocalStorage<{ actor: object; active: boolean }>()
+const invocation = new AsyncLocalStorage<ActorInvocationContext>()
 const construction = new AsyncLocalStorage<{ database: ActorDatabase; actor?: object; active: boolean }>()
 
 function actorDatabase(actor: object): ActorDatabase {
@@ -39,17 +47,26 @@ function bindConstructingActorDatabase(actor: object): void {
 function bindActorDatabase(actor: object, database: ActorDatabase): void {
     databases.set(actor, {
         exec<Row extends object>(sql: string, ...bindings: SqliteValue[]): Row[] {
-            const context = invocation.getStore()
-            const creating = construction.getStore()
-            if (!(context?.actor === actor && context.active) && !(creating?.actor === actor && creating.active))
-                throw new ActorDefinitionError("actor database is unavailable outside its invocation")
+            assertActorDatabaseAccess(actor)
             return database.exec<Row>(sql, ...bindings)
         }
     })
 }
 
-async function runWithActorDatabase<T>(actor: object, operation: () => Promise<T>): Promise<T> {
-    const context = { actor, active: true }
+function assertActorDatabaseAccess(actor: object): void {
+    const context = invocation.getStore()
+    const creating = construction.getStore()
+    if (!(context?.actor === actor && context.active) && !(creating?.actor === actor && creating.active))
+        throw new ActorDefinitionError("actor database is unavailable outside its invocation")
+}
+
+function actorDatabaseMode(): PersistenceMode | undefined {
+    const context = invocation.getStore()
+    return context?.active ? context.mode : undefined
+}
+
+async function runWithActorDatabase<T>(actor: object, mode: PersistenceMode, operation: () => Promise<T>): Promise<T> {
+    const context: ActorInvocationContext = { actor, active: true, mode }
     try {
         return await invocation.run(context, operation)
     } finally {
@@ -57,5 +74,12 @@ async function runWithActorDatabase<T>(actor: object, operation: () => Promise<T
     }
 }
 
-export { actorDatabase, bindConstructingActorDatabase, constructWithActorDatabase, runWithActorDatabase }
+export {
+    actorDatabase,
+    actorDatabaseMode,
+    assertActorDatabaseAccess,
+    bindConstructingActorDatabase,
+    constructWithActorDatabase,
+    runWithActorDatabase
+}
 export type { ActorDatabase, SqliteValue }

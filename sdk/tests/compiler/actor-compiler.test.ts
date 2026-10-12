@@ -28,14 +28,41 @@ test("db is reserved for the actor SQLite database", () => {
     assert.ok(result.diagnostics.some(diagnostic => String(diagnostic.messageText).includes("reserved")))
 })
 
+test("records only atomic methods, including aliased decorators", () => {
+    const result = analyze(`import { Actor, Atomic as A } from "./sdk.js"
+        export class PiAgent extends Actor { @A async testAtomic() {} async prompt() {} }`)
+    assert.deepEqual(result.diagnostics, [])
+    assert.deepEqual(result.schemas, [{ actorName: "PiAgent", fields: [], atomicMethods: ["testAtomic"] }])
+})
+
+test("rejects invalid atomic declarations", () => {
+    for (const member of [
+        "@Atomic value = 1",
+        "@Atomic sync() {}",
+        "@Atomic static async run() {}",
+        "@Atomic private async run() {}",
+        "@Atomic protected async run() {}",
+        "@Atomic async #run() {}",
+        "@Atomic() async run() {}",
+        "@Atomic @Atomic async run() {}"
+    ]) {
+        const result = analyze(`import { Actor, Atomic } from "./sdk.js"
+            export class Room extends Actor { ${member} }`)
+        assert.ok(
+            result.diagnostics.some(diagnostic => String(diagnostic.messageText).includes("@Atomic")),
+            member
+        )
+    }
+})
+
 test("recognizes aliased interleave async methods", () => {
     const result = analyze(`import { Actor, Interleave as R } from "./sdk.js"
         export class Room extends Actor { @R async stream() {} async read() {} }`)
     assert.deepEqual(result.diagnostics, [])
-    assert.deepEqual(result.schemas, [{ actorName: "Room", fields: [], reentrantMethods: ["stream"] }])
+    assert.deepEqual(result.schemas, [{ actorName: "Room", fields: [], interleaveMethods: ["stream"] }])
 })
 
-test("continues compiling undecorated actors against SDKs without reentrancy", () => {
+test("continues compiling undecorated actors against SDKs without interleave", () => {
     const result = analyze(`import { Actor } from "./sdk.js"; export class Room extends Actor { async read() {} }`, {
         "sdk.ts": `export abstract class Actor { protected constructor() {} }
             export function Persisted(...args: unknown[]) {}
@@ -469,6 +496,7 @@ function analyze(source: string, extra: Record<string, string> = {}) {
             export function Persisted(...args: unknown[]) {}
             export function Emittable(...args: unknown[]) {}
             export function Interleave(...args: unknown[]) {}
+            export function Atomic(...args: unknown[]) {}
             export function Compute(...args: unknown[]) {}
             export function Ephemeral(...args: unknown[]) {}`,
             ...extra

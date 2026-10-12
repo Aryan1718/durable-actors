@@ -10,9 +10,9 @@ Each example includes an app and a local actor runtime:
 
 Follow the example's README to install dependencies, copy `.env.example` to `.env`, and start its two processes. AI chat also requires an OpenAI API key.
 
-## Pi agent and CLI
+## Persistence tests and CLI
 
-[Pi agent](pi-agent/README.md) runs a basic Pi prompt inside an actor. The separate [CLI](cli/README.md) calls it through a client generated from the running server. Model calls require an OpenAI API key.
+[Persistence tests](persistence-tests/) exercise immediate writes, atomic rollback, interleaving, and crash recovery. The separate [CLI](cli/README.md) calls the actor through a generated client. No model API key is needed.
 
 ## Guide examples
 

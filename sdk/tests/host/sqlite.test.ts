@@ -50,6 +50,7 @@ class SqliteCounter extends Actor {
 
 const definition = registerActorClass(SqliteCounter, {
     actorName: "SqliteCounter",
+    atomicMethods: ["fail"],
     fields: [{ name: "count", persistence: Persistence.Persisted }]
 })
 
@@ -97,7 +98,7 @@ test("field writes wait for a competing SQLite writer", async () => {
     try {
         assert.deepEqual(await once(writer, "message"), ["locked", undefined])
         writer.send("release")
-        database.persistFields({ count: 1 })
+        database.persistField("count", 1)
         await database.snapshot()
         assert.deepEqual(fields(state), { count: 1 })
         assert.deepEqual(await exited, [0, null])
@@ -181,7 +182,7 @@ test("large JSON fields and SQLite databases restore together", async () => {
     assert.ok(Reflect.get(read, "sqlite")?.txid > 0)
 })
 
-test("failed calls roll back object fields, SQL writes, and SQL schema changes", async () => {
+test("failed atomic calls roll back object fields, SQL writes, and SQL schema changes", async () => {
     const runtime = createRuntime()
     await invoke(runtime, "initialize")
     const inserted = await invoke(runtime, "insert", ["retained"])
@@ -263,7 +264,7 @@ test("reentrant failures preserve SQL already captured by an overlapping success
         registerActorClass(ReentrantSqlite, {
             actorName: "ReentrantSqlite",
             fields: [{ name: "count", persistence: Persistence.Persisted }],
-            reentrantMethods: ["hold"]
+            interleaveMethods: ["hold"]
         })
     )
     const saved = { actor: { project_id: "test", actor_name: "ReentrantSqlite", actor_id: "one" } }
@@ -287,11 +288,10 @@ test("compiled object schema changes preserve SQLite while adding and removing f
             fields: [{ name: "count", persistence: Persistence.Ephemeral }]
         }
     })
-    const read = await invoke(updated, "read", [], {
-        sqlite: await recoverRuntime(runtime, Reflect.get(inserted, "sqlite"))
-    })
+    const recovered = await recoverRuntime(runtime, Reflect.get(inserted, "sqlite"))
+    const read = await invoke(updated, "read", [], { sqlite: recovered })
     assert.deepEqual(Reflect.get(read, "result"), { count: 0, rows: [{ value: "retained" }] })
-    assert.ok(Reflect.get(read, "sqlite")?.txid > 1)
+    assert.equal(Reflect.get(read, "sqlite")?.txid, recovered.txid)
 })
 
 test("database handles cannot write after their invocation completes", async () => {

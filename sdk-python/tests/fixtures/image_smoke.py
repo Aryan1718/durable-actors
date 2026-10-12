@@ -53,18 +53,20 @@ class Counter(Actor):
                             nonlocal txid
                             while True:
                                 message = json.loads(messages.readline())
-                                if message["type"] != "commit_sqlite":
+                                if message["type"] != "persist_sqlite":
                                     return message
+                                assert message["mode"] == "atomic_snapshot"
                                 txid += 1
                                 send(
                                     {
-                                        "type": "sqlite_committed",
+                                        "type": "sqlite_persisted",
                                         "message_id": message["message_id"],
+                                        "commit_id": message["commit_id"],
                                         "txid": txid,
                                     }
                                 )
 
-                        assert receive() == {"type": "warm", "protocol": 24}
+                        assert receive() == {"type": "warm", "protocol": 26}
                         send(
                             {
                                 "type": "load",
@@ -74,10 +76,10 @@ class Counter(Actor):
                         )
                         assert receive() == {
                             "type": "attach",
-                            "protocol": 24,
+                            "protocol": 26,
                             "actor_names": ["Counter"],
                         }
-                        send({"type": "attached", "protocol": 24})
+                        send({"type": "attached", "protocol": 26})
                         actor = {"project_id": "local", "actor_name": "Counter", "actor_id": "one"}
                         send(
                             {

@@ -106,40 +106,9 @@ impl SqliteCapture {
 
     pub(crate) async fn capture(&mut self, state: &SqliteState) -> Result<Vec<LtxFile>> {
         ensure!(state.txid >= self.txid, "SQLite transaction went backwards");
-        let checkpoint = self
-            .files(9, state.txid)
-            .await?
-            .into_iter()
-            .filter(|file| file.last > self.published)
-            .max_by_key(|file| file.last);
-        let snapshot = checkpoint.as_ref().map(|file| file.last);
-        let mut next = checkpoint
-            .as_ref()
-            .map_or(self.published + 1, |file| file.last + 1);
-        let mut files = checkpoint.into_iter().collect::<Vec<_>>();
-        for file in self.files(0, state.txid).await? {
-            if file.last < next {
-                continue;
-            }
-            ensure!(
-                file.first == next,
-                "Litestream capture has a transaction gap"
-            );
-            next = file
-                .last
-                .checked_add(1)
-                .context("Litestream transaction overflow")?;
-            files.push(file);
-        }
-        ensure!(
-            next == state
-                .txid
-                .checked_add(1)
-                .context("Litestream transaction overflow")?,
-            "Litestream has not replicated the actor commit"
-        );
-        if let Some(snapshot) = snapshot {
-            self.prune(snapshot).await?;
+        let files = collect_ltx_files(&self.path(), self.published, state.txid).await?;
+        if let Some(snapshot) = files.iter().find(|file| file.level == 9) {
+            self.prune(snapshot.last).await?;
         }
         self.txid = state.txid;
         self.published = state.txid;
@@ -190,35 +159,6 @@ impl SqliteCapture {
         );
         Ok(capture)
     }
-
-    async fn files(&self, level: u8, through: u64) -> Result<Vec<LtxFile>> {
-        let directory = self.replica().join("ltx").join(level.to_string());
-        let mut entries = match tokio::fs::read_dir(directory).await {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(error) => return Err(error.into()),
-        };
-        let mut files = Vec::new();
-        while let Some(entry) = entries.next_entry().await? {
-            let name = entry.file_name();
-            let Some((first, last)) = range(&name.to_string_lossy()) else {
-                continue;
-            };
-            if last > through || last <= self.published {
-                continue;
-            }
-            files.push((first, last, entry.path()));
-        }
-        files.sort_by_key(|(first, last, _)| (*first, *last));
-        if level == 9 && files.len() > 1 {
-            files.drain(..files.len() - 1);
-        }
-        let mut captured = Vec::with_capacity(files.len());
-        for (first, last, path) in files {
-            captured.push(read_ltx(level, first, last, path).await?);
-        }
-        Ok(captured)
-    }
 }
 
 impl Drop for SqliteCapture {
@@ -233,6 +173,73 @@ impl Drop for SqliteCapture {
             });
         }
     }
+}
+
+pub(crate) async fn collect_ltx_files(
+    path: &Path,
+    after: u64,
+    through: u64,
+) -> Result<Vec<LtxFile>> {
+    let checkpoint = read_ltx_files(path, after, 9, through)
+        .await?
+        .into_iter()
+        .filter(|file| file.last > after)
+        .max_by_key(|file| file.last);
+    let mut next = checkpoint.as_ref().map_or(after + 1, |file| file.last + 1);
+    let mut files = checkpoint.into_iter().collect::<Vec<_>>();
+    for file in read_ltx_files(path, after, 0, through).await? {
+        if file.last < next {
+            continue;
+        }
+        ensure!(
+            file.first == next,
+            "Litestream capture has a transaction gap"
+        );
+        next = file
+            .last
+            .checked_add(1)
+            .context("Litestream transaction overflow")?;
+        files.push(file);
+    }
+    ensure!(
+        next == through
+            .checked_add(1)
+            .context("Litestream transaction overflow")?,
+        "Litestream has not replicated the actor commit"
+    );
+    Ok(files)
+}
+
+async fn read_ltx_files(path: &Path, after: u64, level: u8, through: u64) -> Result<Vec<LtxFile>> {
+    let directory = path
+        .with_file_name("replica")
+        .join("ltx")
+        .join(level.to_string());
+    let mut entries = match tokio::fs::read_dir(directory).await {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(error) => return Err(error.into()),
+    };
+    let mut files = Vec::new();
+    while let Some(entry) = entries.next_entry().await? {
+        let name = entry.file_name();
+        let Some((first, last)) = range(&name.to_string_lossy()) else {
+            continue;
+        };
+        if last > through || last <= after {
+            continue;
+        }
+        files.push((first, last, entry.path()));
+    }
+    files.sort_by_key(|(first, last, _)| (*first, *last));
+    if level == 9 && files.len() > 1 {
+        files.drain(..files.len() - 1);
+    }
+    let mut captured = Vec::with_capacity(files.len());
+    for (first, last, path) in files {
+        captured.push(read_ltx(level, first, last, path).await?);
+    }
+    Ok(captured)
 }
 
 async fn read_ltx(level: u8, first: u64, last: u64, path: PathBuf) -> Result<LtxFile> {

@@ -3,8 +3,10 @@ use anyhow::{Context, Result, ensure};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod legacy;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StateSnapshot {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attribution: Option<StateAttribution>,
@@ -12,6 +14,13 @@ pub struct StateSnapshot {
     pub owner_epoch: u64,
     pub request_id: String,
     pub sqlite: SqliteSnapshot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion: Option<RequestCompletion>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RequestCompletion {
+    #[serde(deserialize_with = "Value::deserialize")]
     pub result: Value,
 }
 
@@ -81,14 +90,16 @@ impl StateSnapshot {
             owner_epoch,
             request_id,
             sqlite,
-            result,
+            completion: Some(RequestCompletion { result }),
         };
         snapshot.validate()?;
         Ok(snapshot)
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self> {
-        let snapshot: Self = serde_json::from_slice(bytes).context("decode actor SQLite commit")?;
+        let snapshot: Self = serde_json::from_slice(bytes)
+            .or_else(|_| legacy::decode(bytes))
+            .context("decode actor SQLite commit")?;
         snapshot.validate()?;
         Ok(snapshot)
     }

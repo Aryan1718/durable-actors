@@ -29,11 +29,12 @@ class Session(Channel):
         self.pending: dict[tuple[str, int], asyncio.Future[Any]] = {}
         self.tasks: set[asyncio.Task[None]] = set()
         self.residency: asyncio.Task[None] | None = None
+        self.next_persistence_id = 0
 
     async def run(self, entrypoint: str | None, generic: bool) -> None:
         try:
             if generic:
-                await self.send({"type": "warm", "protocol": 24})
+                await self.send({"type": "warm", "protocol": 26})
                 assignment = await self.read()
                 if (
                     assignment.get("type") != "load"
@@ -53,10 +54,10 @@ class Session(Channel):
                 for actor in actors
             }
             await self.send(
-                {"type": "attach", "protocol": 24, "actor_names": sorted(self.runtimes)}
+                {"type": "attach", "protocol": 26, "actor_names": sorted(self.runtimes)}
             )
             attached = await self.read()
-            if attached.get("type") != "attached" or attached.get("protocol") != 24:
+            if attached.get("type") != "attached" or attached.get("protocol") != 26:
                 raise ValueError("unsupported executor protocol")
             if attached.get("supports_residency"):
                 self.residency = asyncio.create_task(self.report_residency())
@@ -72,7 +73,7 @@ class Session(Channel):
                 elif message["type"] in {
                     "socket_connections",
                     "socket_effects_published",
-                    "sqlite_committed",
+                    "sqlite_persisted",
                 }:
                     pending = self.pending.pop((message["type"], message["message_id"]))
                     if pending.cancelled():
@@ -81,8 +82,8 @@ class Session(Channel):
                         pending.set_exception(RuntimeError(message["error"]))
                     else:
                         pending.set_result(
-                            message.get("txid")
-                            if message["type"] == "sqlite_committed"
+                            message
+                            if message["type"] == "sqlite_persisted"
                             else message.get("connections")
                         )
                 else:
@@ -116,7 +117,14 @@ class Session(Channel):
             self.writer.close()
 
     async def commit_sqlite(self) -> int:
-        txid = await self.exchange("commit_sqlite", "sqlite_committed")
+        self.next_persistence_id += 1
+        commit_id = self.next_persistence_id
+        reply = await self.exchange(
+            "persist_sqlite", "sqlite_persisted", commit_id=commit_id, mode="atomic_snapshot"
+        )
+        if reply.get("commit_id") != commit_id:
+            raise ValueError("unexpected SQLite persistence acknowledgment")
+        txid = reply.get("txid")
         if not valid_txid(txid):
             raise ValueError("invalid host commit position")
         return int(txid)

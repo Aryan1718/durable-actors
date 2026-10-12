@@ -71,7 +71,7 @@ class Counter(Actor):
                     if generic:
                         assert json.loads(await reader.readline()) == {
                             "type": "warm",
-                            "protocol": 24,
+                            "protocol": 26,
                         }
                         writer.write(
                             (
@@ -89,10 +89,10 @@ class Counter(Actor):
                     attached = json.loads(await reader.readline())
                     assert attached == {
                         "type": "attach",
-                        "protocol": 24,
+                        "protocol": 26,
                         "actor_names": ["Counter"],
                     }
-                    writer.write(b'{"type":"attached","protocol":24}\n')
+                    writer.write(b'{"type":"attached","protocol":26}\n')
                     writer.write(
                         (
                             json.dumps(
@@ -114,13 +114,20 @@ class Counter(Actor):
                     )
                     await writer.drain()
                     assert json.loads(await reader.readline()) == {
-                        "type": "commit_sqlite",
+                        "type": "persist_sqlite",
                         "message_id": 1,
+                        "commit_id": 1,
+                        "mode": "atomic_snapshot",
                     }
                     writer.write(
                         (
                             json.dumps(
-                                {"type": "sqlite_committed", "message_id": 1, "txid": commit(state)}
+                                {
+                                    "type": "sqlite_persisted",
+                                    "message_id": 1,
+                                    "commit_id": 1,
+                                    "txid": commit(state),
+                                }
                             )
                             + "\n"
                         ).encode()
@@ -206,12 +213,13 @@ class Counter(Actor):
                 async def receive():
                     while True:
                         message = json.loads(await reader.readline())
-                        if message["type"] != "commit_sqlite":
+                        if message["type"] != "persist_sqlite":
                             return message
                         send(
                             {
-                                "type": "sqlite_committed",
+                                "type": "sqlite_persisted",
                                 "message_id": message["message_id"],
+                                "commit_id": message["commit_id"],
                                 "txid": commit(invocation["sqlite"]),
                             }
                         )
@@ -220,7 +228,7 @@ class Counter(Actor):
                     writer.write((json.dumps(message) + "\n").encode())
 
                 assert (await receive())["type"] == "attach"
-                send({"type": "attached", "protocol": 24})
+                send({"type": "attached", "protocol": 26})
                 actor = {"project_id": "local", "actor_name": "Counter", "actor_id": "one"}
                 invocation = {
                     "type": "invoke",

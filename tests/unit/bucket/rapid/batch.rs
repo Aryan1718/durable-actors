@@ -768,7 +768,7 @@ async fn conflicting_batches_never_allow_recovery_to_delete_rapid_data() -> Resu
         .unwrap();
     let manifest: Manifest = serde_json::from_slice(&f.archive.get(&key).await?.unwrap().bytes)?;
     let mut snapshot = StateSnapshot::decode(&original)?;
-    snapshot.result = serde_json::json!(9);
+    snapshot.completion.as_mut().unwrap().result = serde_json::json!(9);
     let frame = Record {
         version: 1,
         state: snapshot.encode()?.into(),
@@ -842,7 +842,8 @@ async fn large_records_archive_after_retry_and_remain_indexed() -> Result<()> {
     archive.fail_batch.store(true, Ordering::SeqCst);
     writer.start(&f.stream).await?;
     let mut snapshot = StateSnapshot::decode(&state(1, 1)?)?;
-    snapshot.result = serde_json::json!({"data": "x".repeat(5 * 1024 * 1024)});
+    snapshot.completion.as_mut().unwrap().result =
+        serde_json::json!({"data": "x".repeat(5 * 1024 * 1024)});
     let bytes = snapshot.encode()?;
     writer.put(&f.stream.object(1), bytes.clone()).await?;
     writer.put(&f.stream.object(2), state(2, 1)?).await?;

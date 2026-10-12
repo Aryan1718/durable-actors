@@ -54,10 +54,10 @@ async def warm_executor(entrypoint, environment):
         try:
             async with asyncio.timeout(10):
                 host = await connected
-                assert await host.receive() == {"type": "warm", "protocol": 24}
+                assert await host.receive() == {"type": "warm", "protocol": 26}
                 host.send({"type": "load", "entrypoint": entrypoint, "environment": environment})
                 assert (await host.receive())["type"] == "attach"
-                host.send({"type": "attached", "protocol": 24})
+                host.send({"type": "attached", "protocol": 26})
             yield host
         finally:
             if process.returncode is None:

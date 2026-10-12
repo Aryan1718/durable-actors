@@ -152,13 +152,13 @@ test("built actors run without source, compiler, or TypeScript loader", { timeou
     const receive = async () => {
         for (;;) {
             const message = JSON.parse((await lines.next()).value)
-            if (message.type !== "commit_sqlite") return message
-            send({ type: "sqlite_committed", message_id: message.message_id, txid: await commit(sqlite) })
+            if (message.type !== "persist_sqlite") return message
+            send({ type: "sqlite_persisted", message_id: message.message_id, commit_id: message.commit_id, txid: await commit(sqlite) })
         }
     }
-    assert.deepEqual(await receive(), { type: "attach", protocol: 24, actor_names: ["BuiltCounter"] })
+    assert.deepEqual(await receive(), { type: "attach", protocol: 26, actor_names: ["BuiltCounter"] })
     const send = message => socket.write(JSON.stringify(message) + "\n")
-    send({ type: "attached", protocol: 24 })
+    send({ type: "attached", protocol: 26 })
     const actor = { project_id: "default", actor_name: "BuiltCounter", actor_id: "counter" }
     let sqlite = await seed()
     const invoke = messageId =>

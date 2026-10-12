@@ -22,9 +22,11 @@ use tokio::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info};
 
+use crate::state_transport::{SqlitePersisted, SqlitePersistenceMode, SqliteWrite, SqliteWriter};
+
 use super::{ActorInvocationFailure, ActorKey, ActorSocketSource};
 
-const ACTOR_EXECUTOR_PROTOCOL_VERSION: u32 = 24;
+const ACTOR_EXECUTOR_PROTOCOL_VERSION: u32 = 26;
 const MAX_PENDING_EXECUTOR_COMMANDS: usize = 64;
 
 #[derive(Debug, Serialize)]
@@ -358,10 +360,10 @@ impl ActorExecutorConnection {
         &self,
         publisher: Option<Arc<dyn ActorSocketPublisher>>,
         sockets: Option<Arc<dyn ActorSocketSource>>,
-        replication: Arc<dyn crate::litestream::Replicator>,
+        persistence: Arc<dyn SqliteWriter>,
     ) -> Result<()> {
         self.executor
-            .mark_ready(publisher, sockets, replication)
+            .mark_ready(publisher, sockets, persistence)
             .await?;
         info!(
             actor_names = ?self.executor.actor_names,
@@ -584,7 +586,7 @@ impl JsActorExecutor {
         &self,
         publisher: Option<Arc<dyn ActorSocketPublisher>>,
         sockets: Option<Arc<dyn ActorSocketSource>>,
-        replication: Arc<dyn crate::litestream::Replicator>,
+        persistence: Arc<dyn SqliteWriter>,
     ) -> Result<()> {
         let (reply, ready) = oneshot::channel();
         self.commands
@@ -592,7 +594,7 @@ impl JsActorExecutor {
                 reply,
                 publisher,
                 sockets,
-                replication,
+                persistence,
             ))
             .await
             .context("actor executor stopped")?;
@@ -614,8 +616,9 @@ impl JsActorExecutor {
                 reply,
                 resident_only: false,
                 admission_granted: false,
-                committed_txid: None,
-                commit_failed: false,
+                persisted_txid: None,
+                persistence_failed: false,
+                last_persistence_id: None,
             })))
             .await
             .context("actor executor stopped")?;
@@ -649,9 +652,9 @@ async fn run_executor_connection(
         publishing_ids: HashSet::new(),
         loading_connections: JoinSet::new(),
         connection_lookup_ids: HashSet::new(),
-        replication: None,
-        committing: JoinSet::new(),
-        commit_ids: HashSet::new(),
+        persistence: None,
+        persisting: JoinSet::new(),
+        persistence_ids: HashSet::new(),
     };
     tokio::try_join!(
         driver.run(commands, replies),
@@ -675,9 +678,9 @@ struct ExecutorDriver {
     publishing_ids: HashSet<u64>,
     loading_connections: JoinSet<(u64, Result<super::SocketLookup>)>,
     connection_lookup_ids: HashSet<u64>,
-    replication: Option<Arc<dyn crate::litestream::Replicator>>,
-    committing: JoinSet<(u64, Result<u64>)>,
-    commit_ids: HashSet<u64>,
+    persistence: Option<Arc<dyn SqliteWriter>>,
+    persisting: JoinSet<(u64, u64, Result<SqlitePersisted>)>,
+    persistence_ids: HashSet<u64>,
 }
 
 impl ExecutorDriver {
@@ -702,22 +705,26 @@ impl ExecutorDriver {
                         ActorExecutorClientMessage::ReadyForInvocation { message_id } => self.allow_next_invocation(message_id)?,
                         ActorExecutorClientMessage::Reply { message_id, reply } => self.deliver(message_id, reply)?,
                         ActorExecutorClientMessage::SocketEffects { message_id, effects } => self.publish(message_id, effects)?,
-                        ActorExecutorClientMessage::CommitSqlite { message_id } => self.commit_sqlite(message_id)?,
+                        ActorExecutorClientMessage::PersistSqlite { message_id, commit_id, mode, txid } => self.persist_sqlite(message_id, commit_id, mode, txid)?,
                         ActorExecutorClientMessage::GetConnections { message_id, query } => self.load_connections(message_id, query)?,
                         ActorExecutorClientMessage::Warm { .. } | ActorExecutorClientMessage::Attach { .. } => anyhow::bail!("customer actor executor attached more than once"),
                     }
                 }
-                committed = self.committing.join_next(), if !self.committing.is_empty() => {
-                    let (message_id, result) = committed.context("SQLite capture stopped")??;
-                    self.commit_ids.remove(&message_id);
-                    let pending = self.pending.get_mut(&message_id).context("SQLite commit lost its invocation")?;
-                    let (txid, error) = match result {
-                        Ok(txid) => { pending.committed_txid = Some(txid); (Some(txid), None) },
-                        Err(error) => { pending.commit_failed = true; (None, Some(format!("{error:#}"))) },
+                persisted = self.persisting.join_next(), if !self.persisting.is_empty() => {
+                    let (message_id, commit_id, result) = persisted.context("SQLite persistence stopped")??;
+                    self.persistence_ids.remove(&message_id);
+                    let pending = self.pending.get_mut(&message_id).context("SQLite persistence lost its invocation")?;
+                    let (txid, state_version, error) = match result {
+                        Ok(position) => {
+                            pending.persisted_txid = Some(position.txid);
+                            (Some(position.txid), position.state_version, None)
+                        }
+                        Err(error) => { pending.persistence_failed = true; (None, None, Some(format!("{error:#}"))) }
                     };
                     self.outbound.send(ExecutorWrite {
-                        bytes: encode_server_message(&ActorExecutorServerMessage::SqliteCommitted { message_id, txid, error })?,
-                        written: None,
+                        bytes: encode_server_message(&ActorExecutorServerMessage::SqlitePersisted {
+                            message_id, commit_id, txid, state_version, error,
+                        })?, written: None,
                     }).await.context("actor executor writer stopped")?;
                 }
                 published = self.publishing.join_next(), if !self.publishing.is_empty() => {
@@ -764,8 +771,8 @@ impl ExecutorDriver {
                     );
                 self.enqueue(*pending)
             }
-            ExecutorRequest::Ready(written, publisher, sockets, replication) => {
-                self.replication = Some(replication);
+            ExecutorRequest::Ready(written, publisher, sockets, persistence) => {
+                self.persistence = Some(persistence);
                 self.publisher = publisher;
                 self.sockets = sockets;
                 self.outbound
@@ -804,37 +811,57 @@ impl ExecutorDriver {
         Ok(())
     }
 
-    fn commit_sqlite(&mut self, message_id: u64) -> Result<()> {
+    fn persist_sqlite(
+        &mut self,
+        message_id: u64,
+        commit_id: u64,
+        mode: SqlitePersistenceMode,
+        txid: Option<u64>,
+    ) -> Result<()> {
         let pending = self
             .pending
-            .get(&message_id)
-            .context("SQLite commit has no active invocation")?;
+            .get_mut(&message_id)
+            .context("SQLite persistence has no active invocation")?;
+        let request_id = match &pending.command {
+            ExecutorCommand::Invoke(invocation) => &invocation.request_id,
+            ExecutorCommand::WebsocketEvent(invocation) => &invocation.request_id,
+            _ => anyhow::bail!("SQLite persistence requires an invocation"),
+        };
         ensure!(
-            matches!(
-                pending.command,
-                ExecutorCommand::Invoke(_) | ExecutorCommand::WebsocketEvent(_)
-            ),
-            "SQLite commit requires an invocation"
+            !pending.persistence_failed && !self.persistence_ids.contains(&message_id),
+            "SQLite persistence is failed or already pending"
         );
         ensure!(
-            pending.committed_txid.is_none()
-                && !pending.commit_failed
-                && !self.commit_ids.contains(&message_id),
-            "SQLite commit was already requested"
+            pending
+                .last_persistence_id
+                .is_none_or(|previous| commit_id > previous),
+            "SQLite persistence request ID repeated"
         );
         let path = pending
             .state
             .as_ref()
             .and_then(|state| state.sqlite.path.as_ref())
-            .context("invocation has no registered SQLite database")?
-            .clone();
-        let replication = self
-            .replication
+            .context("invocation has no registered SQLite database")?;
+        let write = SqliteWrite {
+            request_id: request_id.clone(),
+            actor: pending.command.actor().clone(),
+            path: path.into(),
+            mode,
+            txid,
+        };
+        let persistence = self
+            .persistence
             .clone()
-            .context("executor is not ready for SQLite commits")?;
-        self.commit_ids.insert(message_id);
-        self.committing
-            .spawn(async move { (message_id, replication.sync(Path::new(&path)).await) });
+            .context("executor is not ready for SQLite persistence")?;
+        pending.last_persistence_id = Some(commit_id);
+        self.persistence_ids.insert(message_id);
+        self.persisting.spawn(async move {
+            (
+                message_id,
+                commit_id,
+                persistence.persist_sqlite(&write).await,
+            )
+        });
         Ok(())
     }
 
@@ -937,8 +964,8 @@ impl ExecutorDriver {
 
     fn deliver(&mut self, message_id: u64, reply: ExecutorReply) -> Result<()> {
         ensure!(
-            !self.commit_ids.contains(&message_id),
-            "actor replied before SQLite capture completed"
+            !self.persistence_ids.contains(&message_id),
+            "actor replied before SQLite persistence completed"
         );
         ensure!(
             !self.connection_lookup_ids.contains(&message_id),
@@ -953,15 +980,15 @@ impl ExecutorDriver {
             .remove(&message_id)
             .with_context(|| format!("actor executor replied to unknown message {message_id}"))?;
         ensure!(
-            !pending.commit_failed || matches!(reply, ExecutorReply::Failed { .. }),
-            "actor returned success after SQLite capture failed"
+            !pending.persistence_failed || matches!(reply, ExecutorReply::Failed { .. }),
+            "actor returned success after SQLite persistence failed"
         );
-        if let Some(txid) = pending.committed_txid {
+        if let Some(txid) = pending.persisted_txid {
             match &reply {
                 ExecutorReply::Invoked { state, .. }
                 | ExecutorReply::WebsocketHandled { state, .. } => ensure!(
                     state.sqlite.txid == txid,
-                    "actor reply differs from its captured SQLite position"
+                    "actor reply differs from its acknowledged SQLite position"
                 ),
                 _ => {}
             }
@@ -1043,7 +1070,7 @@ enum ExecutorRequest {
         oneshot::Sender<Result<()>>,
         Option<Arc<dyn ActorSocketPublisher>>,
         Option<Arc<dyn ActorSocketSource>>,
-        Arc<dyn crate::litestream::Replicator>,
+        Arc<dyn SqliteWriter>,
     ),
 }
 
@@ -1052,8 +1079,9 @@ struct PendingCommand {
     state: Option<Arc<ActorState>>,
     resident_only: bool,
     admission_granted: bool,
-    committed_txid: Option<u64>,
-    commit_failed: bool,
+    persisted_txid: Option<u64>,
+    persistence_failed: bool,
+    last_persistence_id: Option<u64>,
     reply: oneshot::Sender<Result<ExecutorReply>>,
 }
 
@@ -1128,10 +1156,13 @@ async fn remove_socket(path: &Path) -> Result<()> {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ActorExecutorServerMessage<'a> {
-    SqliteCommitted {
+    SqlitePersisted {
         message_id: u64,
+        commit_id: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         txid: Option<u64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        state_version: Option<u64>,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -1168,8 +1199,11 @@ struct ExecutorCommandEnvelope<'a> {
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ActorExecutorClientMessage {
-    CommitSqlite {
+    PersistSqlite {
         message_id: u64,
+        commit_id: u64,
+        mode: SqlitePersistenceMode,
+        txid: Option<u64>,
     },
     Warm {
         protocol: u32,

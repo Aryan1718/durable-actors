@@ -11,6 +11,7 @@ import { ActorConfigurationError, ActorDefinitionError, errorMessage } from "../
 import { ActorRuntime } from "./actor-runtime.js"
 import { failedReply } from "./protocol.js"
 import type { ActorWorkerData, ActorWorkerMessage, ActorWorkerRequest } from "./protocol.js"
+import { persistenceBuffer, waitForPersistence } from "./sqlite-persistence.js"
 import { SqliteActorDatabase } from "./sqlite.js"
 
 const port = parentPort
@@ -86,7 +87,7 @@ async function initialize(data: ActorWorkerData): Promise<void> {
             runtime ??= new ActorRuntime(
                 definition,
                 allowNextInvocation,
-                new SqliteActorDatabase(commitSqlite),
+                new SqliteActorDatabase(commitSqlite, persistSqlite),
                 publish,
                 getConnections
             )
@@ -126,6 +127,23 @@ function commitSqlite(): Promise<number> {
         committing.set(messageId, { resolve, reject })
         post({ type: "commit_sqlite", messageId })
     })
+}
+
+let nextCommitId = 0
+
+function persistSqlite(): number {
+    const messageId = invocation.getStore()
+    if (messageId === undefined) throw new Error("SQLite persistence has no active invocation")
+    const captured = requestPersistence(messageId)
+    return requestPersistence(messageId, captured.txid).txid
+}
+
+function requestPersistence(messageId: number, txid?: number) {
+    const commitId = ++nextCommitId
+    if (!Number.isSafeInteger(commitId)) throw new Error("SQLite persistence request ID overflow")
+    const buffer = persistenceBuffer()
+    post({ type: "persist_sqlite", messageId, commitId, buffer, txid })
+    return waitForPersistence(buffer)
 }
 
 function publish(effects: readonly SocketEffect[]): Promise<void> {

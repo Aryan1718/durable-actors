@@ -1,6 +1,7 @@
 use super::tests::test_issuer;
 use super::*;
 use crate::request_tracking::HostState;
+use crate::state_transport::{SqlitePersisted, SqlitePersistenceMode, SqliteWrite, SqliteWriter};
 use crate::{
     actor::{ActorExecutorListener, ActorSocketPublisher, ActorSocketSource},
     control_plane::{ActorTokenPurpose, ControlPlaneClient, admin::LocalAdminRegistry},
@@ -689,13 +690,6 @@ impl Stack {
         ));
         let replication = Arc::new(crate::litestream::Litestream::default());
         let (child, connection) = start_worker(directory.path()).await?;
-        connection
-            .mark_ready(
-                Some(local_sockets.clone()),
-                Some(source.unwrap_or_else(|| local_sockets.clone())),
-                replication.clone(),
-            )
-            .await?;
         let host = Arc::new(ActorHost::new(
             HostEndpoint {
                 id: host_id.clone(),
@@ -705,8 +699,18 @@ impl Stack {
             storage.clone(),
             storage.runtime.clone(),
             local_sockets.clone(),
-            replication,
+            replication.clone(),
         ));
+        connection
+            .mark_ready(
+                Some(local_sockets.clone()),
+                Some(source.unwrap_or_else(|| local_sockets.clone())),
+                Arc::new(TestSqlitePersistence {
+                    replication,
+                    host: host.clone(),
+                }),
+            )
+            .await?;
         host.activate_actor(actor.clone()).await?;
         tasks.spawn(async move {
             let _ = connection
@@ -820,7 +824,7 @@ async fn start_worker(
         &entrypoint,
         format!(
             r#"
-import {{ Actor, Persisted, Emittable, type ActorSocket }} from {};
+import {{ Actor, Atomic, Persisted, Emittable, type ActorSocket }} from {};
 import {{ existsSync }} from 'node:fs';
 import {{ setTimeout }} from 'node:timers/promises';
 export class Counter extends Actor<{{name?:string; notified?:boolean; user?:string}}, {{type:"start"; padding?:string}}, {{delta:string}} | {{text:string}}> {{
@@ -831,6 +835,7 @@ export class Counter extends Actor<{{name?:string; notified?:boolean; user?:stri
     async readHistory() {{ return this.history; }}
     async appendHistory() {{ this.history += 'saved'; return this.history; }}
     async change() {{ this.count++; this.count++; this.secret = 'changed'; }}
+    @Atomic
     async fail() {{ this.count++; throw new Error('failed'); }}
     async onConnect(socket: ActorSocket<{{name?:string; notified?:boolean; user?:string}}, {{delta:string}} | {{text:string}}, "member">) {{
         socket.metadata = {{ name: 'member' }};
@@ -1235,4 +1240,22 @@ fn assert_completed_invocation(mut reply: serde_json::Value, result: serde_json:
     assert!(queue_wait.is_finite() && queue_wait >= 0.0 && queue_wait <= duration);
     assert_eq!(metadata["hostState"], "warm");
     assert!(metadata["routingMs"].as_f64().unwrap() >= 0.0);
+}
+
+struct TestSqlitePersistence {
+    replication: Arc<dyn crate::litestream::Replicator>,
+    host: Arc<ActorHost>,
+}
+
+#[async_trait]
+impl SqliteWriter for TestSqlitePersistence {
+    async fn persist_sqlite(&self, write: &SqliteWrite) -> Result<SqlitePersisted> {
+        match write.mode {
+            SqlitePersistenceMode::AtomicSnapshot => Ok(SqlitePersisted {
+                txid: self.replication.sync(&write.path).await?,
+                state_version: None,
+            }),
+            SqlitePersistenceMode::DurableWrite => self.host.persist_sqlite(write).await,
+        }
+    }
 }

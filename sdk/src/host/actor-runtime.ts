@@ -15,10 +15,11 @@ import { ActorDefinitionError, ActorProtocolError, ActorSerializationError, erro
 import { cloneJson, cloneJsonObject, isJsonObject } from "../json.js"
 import type { JsonObject, JsonValue } from "../json.js"
 
+import { bindPersistedFields, isPersistedField } from "./persisted-fields.js"
 import { failedReply } from "./protocol.js"
 import type { ActorExecutorReply, HydrateCommand, InvokeCommand, WebSocketEventCommand } from "./protocol.js"
 import { SqliteCaptureError } from "./sqlite.js"
-import type { ActorDatabaseStorage, SqliteState } from "./sqlite.js"
+import type { ActorDatabaseStorage } from "./sqlite.js"
 import type { SocketPublisher, SocketSource } from "./types.js"
 
 class ActorRuntime {
@@ -46,9 +47,9 @@ class ActorRuntime {
     async handle(command: InvokeCommand | WebSocketEventCommand | HydrateCommand): Promise<ActorExecutorReply> {
         if (command.type === "hydrate") return this.execute(command)
         const method = command.type === "invoke" ? command.method : lifecycleMethod(command)
-        const reentrant = this.definition.state.reentrantMethods?.includes(method) ?? false
+        const interleave = this.definition.state.interleaveMethods?.includes(method) ?? false
         const operation = this.serial.then(() => this.execute(command))
-        if (!reentrant) this.serial = operation.catch(() => undefined)
+        if (!interleave) this.serial = operation.catch(() => undefined)
         return operation
     }
 
@@ -75,7 +76,7 @@ class ActorRuntime {
     }
 
     private get interleaved(): boolean {
-        return (this.definition.state.reentrantMethods?.length ?? 0) > 0
+        return (this.definition.state.interleaveMethods?.length ?? 0) > 0
     }
 
     private completionOrder(): { sequence?: number } {
@@ -100,7 +101,7 @@ class ActorRuntime {
             )
         }
 
-        const before = snapshotActorState(instance, this.definition.state)
+        const before = this.database.fields()
         try {
             this.admitNext(command.method)
             const operation = await runWithActorSockets(
@@ -109,6 +110,7 @@ class ActorRuntime {
                 async () =>
                     runWithActorDatabase(
                         instance,
+                        this.definition.state.atomicMethods?.includes(command.method) ? "atomic" : "immediate",
                         async () => Reflect.apply(method, instance, command.args) as Promise<unknown>
                     ),
                 this.publish,
@@ -116,12 +118,13 @@ class ActorRuntime {
             )
             const result: JsonValue = operation.value === undefined ? null : cloneJson(operation.value, "actor result")
             return await this.complete(async () => {
-                const state = snapshotActorState(instance, this.definition.state)
+                validateActorState(instance, this.definition.state)
+                const state = this.database.fields()
                 const effects = [...operation.effects, ...this.stateUpdates(before, state)]
                 return {
                     type: "invoked",
                     result,
-                    sqlite: await this.databaseState(state),
+                    sqlite: await this.database.snapshot(),
                     ...this.completionOrder(),
                     ...(effects.length === 0 ? {} : { effects })
                 }
@@ -131,7 +134,7 @@ class ActorRuntime {
                 this.fatal = failedReply("actor_database_failed", errorMessage(error))
                 return this.fatal
             }
-            if (!this.interleaved) this.restoreInstance(command.actor, before)
+            if (!this.interleaved) this.restoreInstance(command.actor)
             return failedReply("actor_method_failed", errorMessage(error))
         }
     }
@@ -142,7 +145,7 @@ class ActorRuntime {
         const instance = prepared
         const methodName = lifecycleMethod(command)
         const method: unknown = Reflect.get(instance, methodName)
-        const before = snapshotActorState(instance, this.definition.state)
+        const before = this.database.fields()
         try {
             this.admitNext(methodName)
             const operation = await runWithActorSockets(
@@ -157,6 +160,7 @@ class ActorRuntime {
                         )
                     await runWithActorDatabase(
                         instance,
+                        this.definition.state.atomicMethods?.includes(methodName) ? "atomic" : "immediate",
                         async () => Reflect.apply(method, instance, args) as Promise<unknown>
                     )
                 },
@@ -165,7 +169,8 @@ class ActorRuntime {
                 command.connections
             )
             return await this.complete(async () => {
-                const state = snapshotActorState(instance, this.definition.state)
+                validateActorState(instance, this.definition.state)
+                const state = this.database.fields()
                 const effects = [
                     ...operation.effects,
                     ...this.stateUpdates(
@@ -176,7 +181,7 @@ class ActorRuntime {
                 ]
                 return {
                     type: "websocket_handled",
-                    sqlite: await this.databaseState(state),
+                    sqlite: await this.database.snapshot(),
                     ...this.completionOrder(),
                     effects: socketEffects(command, state, effects, this.definition.state)
                 }
@@ -186,13 +191,13 @@ class ActorRuntime {
                 this.fatal = failedReply("actor_database_failed", errorMessage(error))
                 return this.fatal
             }
-            if (!this.interleaved) this.restoreInstance(command.actor, before)
+            if (!this.interleaved) this.restoreInstance(command.actor)
             return failedReply("actor_socket_failed", errorMessage(error))
         }
     }
 
     private admitNext(method: string): void {
-        if (this.definition.state.reentrantMethods?.includes(method)) this.allowNextInvocation()
+        if (this.definition.state.interleaveMethods?.includes(method)) this.allowNextInvocation()
     }
 
     private prepare(command: InvokeCommand | WebSocketEventCommand | HydrateCommand): AnyActor | ActorExecutorReply {
@@ -230,14 +235,9 @@ class ActorRuntime {
         return completed
     }
 
-    private async databaseState(fields: JsonObject): Promise<SqliteState> {
-        this.database.persistFields(fields)
-        return await this.database.snapshot()
-    }
-
-    private restoreInstance(identity: ActorIdentity, state: JsonObject): void {
+    private restoreInstance(identity: ActorIdentity): void {
         this.database.rollback()
-        this.createInstance(identity, state)
+        this.createInstance(identity, this.database.fields())
     }
 
     private stateUpdates(before: JsonObject, state: JsonObject, except?: string): SocketEffect[] {
@@ -260,7 +260,9 @@ class ActorRuntime {
         bindActorIdentity(instance, identity.actor_id)
         validateActorState(instance, this.definition.state)
         if (state !== null) hydrateActorState(instance, persistedState(state), this.definition.state)
-        if (this.interleaved) this.lastCompletedState = snapshotActorState(instance, this.definition.state)
+        this.database.initializeFields(snapshotActorState(instance, this.definition.state))
+        bindPersistedFields(instance, this.definition.state, this.database)
+        if (this.interleaved) this.lastCompletedState = this.database.fields()
         this.identity = { ...identity }
         this.instance = instance
         return instance
@@ -395,6 +397,7 @@ function hydrateActorState(instance: object, state: JsonObject, schema: ActorSch
     }
 }
 
+// Make sure every public field in the Actor has a @Persisted or @Ephemeral decorator! Throws otherwise
 function validateActorState(instance: object, schema: ActorSchema): void {
     const fields = new Set(schema.fields.filter(field => !field.private).map(field => field.name))
     for (const key of Reflect.ownKeys(instance)) {
@@ -403,7 +406,7 @@ function validateActorState(instance: object, schema: ActorSchema): void {
                 `actor field ${schema.actorName}.${String(key)} must declare @Persisted or @Ephemeral`
             )
         const descriptor = Object.getOwnPropertyDescriptor(instance, key)!
-        if (!("value" in descriptor))
+        if (!("value" in descriptor) && !isPersistedField(instance, key, descriptor))
             throw new ActorDefinitionError(`actor field ${schema.actorName}.${key} must be a data property`)
     }
 }

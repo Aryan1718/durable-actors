@@ -34,7 +34,7 @@ test("loads a prepared JavaScript artifact only inside the first execution Worke
         const lines = createInterface({ input: socket })
         lines.once("line", line => {
             assert.deepEqual(JSON.parse(line).actor_names, ["SessionCounter"])
-            socket.write(`${JSON.stringify({ type: "attached", protocol: 24 })}\n`)
+            socket.write(`${JSON.stringify({ type: "attached", protocol: 26 })}\n`)
             socket.end()
         })
     })
@@ -113,10 +113,10 @@ test("the actor session carries only owned execution commands", async t => {
 
         assert.deepEqual(await readMessage(iterator), {
             type: "attach",
-            protocol: 24,
+            protocol: 26,
             actor_names: ["SessionCounter"]
         })
-        customerSocket.write(`${JSON.stringify({ type: "attached", protocol: 24 })}\n`)
+        customerSocket.write(`${JSON.stringify({ type: "attached", protocol: 26 })}\n`)
         await startup
 
         const sqlite = await seed(null)
@@ -138,9 +138,25 @@ test("the actor session carries only owned execution commands", async t => {
                 }
             })}\n`
         )
-        assert.deepEqual(await readMessage(iterator), { type: "commit_sqlite", message_id: 1 })
+        assert.deepEqual(await readMessage(iterator), {
+            type: "persist_sqlite",
+            message_id: 1,
+            commit_id: 1,
+            mode: "atomic_snapshot"
+        })
+        const txid1 = await commit(sqlite)
         customerSocket.write(
-            `${JSON.stringify({ type: "sqlite_committed", message_id: 1, txid: await commit(sqlite) })}\n`
+            `${JSON.stringify({ type: "sqlite_persisted", message_id: 1, commit_id: 1, txid: txid1 })}\n`
+        )
+        assert.deepEqual(await readMessage(iterator), {
+            type: "persist_sqlite",
+            message_id: 1,
+            commit_id: 2,
+            mode: "durable_write",
+            txid: txid1
+        })
+        customerSocket.write(
+            `${JSON.stringify({ type: "sqlite_persisted", message_id: 1, commit_id: 2, state_version: 1, txid: txid1 })}\n`
         )
         assertSessionReply(await readMessage(iterator), 1, { type: "invoked", result: 4 })
 
@@ -189,9 +205,25 @@ test("the actor session carries only owned execution commands", async t => {
                 }
             })}\n`
         )
-        assert.deepEqual(await readMessage(iterator), { type: "commit_sqlite", message_id: 3 })
+        assert.deepEqual(await readMessage(iterator), {
+            type: "persist_sqlite",
+            message_id: 3,
+            commit_id: 3,
+            mode: "atomic_snapshot"
+        })
+        const txid2 = await commit(sqlite)
         customerSocket.write(
-            `${JSON.stringify({ type: "sqlite_committed", message_id: 3, txid: await commit(sqlite) })}\n`
+            `${JSON.stringify({ type: "sqlite_persisted", message_id: 3, commit_id: 3, txid: txid2 })}\n`
+        )
+        assert.deepEqual(await readMessage(iterator), {
+            type: "persist_sqlite",
+            message_id: 3,
+            commit_id: 4,
+            mode: "durable_write",
+            txid: txid2
+        })
+        customerSocket.write(
+            `${JSON.stringify({ type: "sqlite_persisted", message_id: 3, commit_id: 4, state_version: 2, txid: txid2 })}\n`
         )
         assertSessionReply(await readMessage(iterator), 3, { type: "invoked", result: 5 })
 
@@ -286,7 +318,7 @@ test("reports resident instances when the Rust host advertises support", { timeo
         lines.on("line", line => {
             const message = JSON.parse(line)
             if (message.type === "attach")
-                socket.write(`${JSON.stringify({ type: "attached", protocol: 24, supports_residency: true })}\n`)
+                socket.write(`${JSON.stringify({ type: "attached", protocol: 26, supports_residency: true })}\n`)
             else if (message.type === "residency") {
                 received = message.actors
                 socket.end()
@@ -327,4 +359,141 @@ function actorBundle(): Promise<string> {
         await buildActor(source, output, { local: true })
         return output
     })())
+}
+
+for (const outcome of ["success", "rejection", "disconnect", "atomic", "method_failure", "atomic_failure"] as const) {
+    test(`immediate persistence crosses the Worker/session boundary: ${outcome}`, { timeout: 10_000 }, async t => {
+        const root = await mkdtemp("/tmp/immediate-session-")
+        const sqlite = await seed({ count: 0 })
+        let peer: Socket | undefined
+        let completed = false
+        const commits: number[] = []
+        let capturedTxid: number | undefined
+        let resolve!: () => void
+        let reject!: (error: unknown) => void
+        const done = new Promise<void>((yes, no) => {
+            resolve = yes
+            reject = no
+        })
+        const server = createServer(socket => {
+            peer = socket
+            const send = (message: unknown) => socket.write(`${JSON.stringify(message)}\n`)
+            const lines = createInterface({ input: socket })
+            lines.on("line", line => {
+                void (async () => {
+                    const message = JSON.parse(line)
+                    if (message.type === "attach") {
+                        send({ type: "attached", protocol: 26 })
+                        send({
+                            type: "command",
+                            message_id: 17,
+                            command: {
+                                type: "invoke",
+                                request_id: "immediate",
+                                actor: actorIdentity(),
+                                method:
+                                    outcome === "atomic_failure"
+                                        ? "failAtomic"
+                                        : outcome === "atomic"
+                                          ? "incrementAtomic"
+                                          : outcome === "method_failure"
+                                            ? "failAfterWrite"
+                                            : "incrementTwice",
+                                args: [],
+                                sqlite
+                            }
+                        })
+                    } else if (message.type === "persist_sqlite") {
+                        assert.equal(message.message_id, 17)
+                        const capture = commits.length % 2 === 0
+                        assert.equal(message.mode, capture ? "atomic_snapshot" : "durable_write")
+                        if (!capture) assert.equal(message.txid, capturedTxid)
+                        commits.push(message.commit_id)
+                        await new Promise(ready => setTimeout(ready, 20))
+                        assert.equal(completed, false)
+                        if (capture) {
+                            capturedTxid = await commit(sqlite)
+                            send({
+                                type: "sqlite_persisted",
+                                message_id: 17,
+                                commit_id: message.commit_id,
+                                txid: capturedTxid
+                            })
+                        } else if (outcome === "disconnect") {
+                            socket.destroy()
+                            resolve()
+                        } else if (outcome === "rejection") {
+                            send({
+                                type: "sqlite_persisted",
+                                message_id: 17,
+                                commit_id: message.commit_id,
+                                error: "durable storage rejected checkpoint"
+                            })
+                        } else {
+                            send({
+                                type: "sqlite_persisted",
+                                message_id: 17,
+                                commit_id: message.commit_id,
+                                txid: capturedTxid,
+                                state_version: commits.length / 2
+                            })
+                        }
+                    } else if (message.type === "reply") {
+                        completed = true
+                        if (
+                            (outcome === "method_failure" || outcome === "atomic_failure") &&
+                            message.message_id === 17
+                        ) {
+                            assert.equal(message.reply.code, "actor_method_failed")
+                            send({
+                                type: "command",
+                                message_id: 18,
+                                command: {
+                                    type: "invoke",
+                                    request_id: "read",
+                                    actor: actorIdentity(),
+                                    method: "read",
+                                    args: [],
+                                    resident_only: true
+                                }
+                            })
+                            return
+                        }
+                        if (outcome === "method_failure" || outcome === "atomic_failure") {
+                            assert.equal(message.reply.type, "invoked")
+                            assert.equal(message.reply.result, outcome === "atomic_failure" ? 0 : 1)
+                            assert.equal(commits.length, outcome === "atomic_failure" ? 0 : 2)
+                        } else if (outcome === "success" || outcome === "atomic") {
+                            assert.equal(message.reply.type, "invoked")
+                            assert.equal(message.reply.result, 2)
+                            assert.equal(commits.length, outcome === "atomic" ? 1 : 4)
+                            if (outcome === "success") assert.notEqual(commits[0], commits[1])
+                        } else {
+                            assert.equal(message.reply.code, "actor_database_failed")
+                            assert.match(message.reply.message, /durable storage rejected checkpoint/)
+                            assert.equal(commits.length, 2)
+                        }
+                        socket.end()
+                        resolve()
+                    }
+                })().catch(reject)
+            })
+        })
+        t.after(async () => {
+            peer?.destroy()
+            server.close()
+            await rm(root, { recursive: true, force: true })
+        })
+        server.listen(`${root}/executor.sock`)
+        await once(server, "listening")
+        const session = new ActorSession(
+            parseHostSettings({
+                DURABLE_ACTORS_EXECUTOR_SOCKET: `${root}/executor.sock`,
+                DURABLE_ACTORS_ENTRYPOINT: await actorBundle()
+            })
+        )
+        await session.start()
+        await done
+        await session.waitUntilDisconnected()
+    })
 }

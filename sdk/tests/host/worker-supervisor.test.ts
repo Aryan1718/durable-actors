@@ -343,7 +343,7 @@ test("starts one speculative Worker and gives it to the first actor", async () =
     }
 })
 
-test("thrown methods and socket handlers roll back state without restarting the worker", async () => {
+test("atomic methods and socket handlers roll back state without restarting the worker", async () => {
     const root = await createTypeScriptConsumer()
     const entrypoint = await buildConsumer(root)
     const supervisor = new ActorWorkerSupervisor({
@@ -668,7 +668,7 @@ async function createTypeScriptConsumer(actorName = "SessionCounter", preamble =
     await writeFile(path.join(root, "package.json"), JSON.stringify({ type: "module" }))
     await writeFile(
         path.join(source, "actors.ts"),
-        `import { Actor, Persisted, Ephemeral } from ${JSON.stringify(path.join(compiledSdkRoot, "index.js"))}
+        `import { Actor, Atomic, Persisted, Ephemeral } from ${JSON.stringify(path.join(compiledSdkRoot, "index.js"))}
 import { threadId } from "node:worker_threads"
 ${preamble}
 
@@ -689,6 +689,7 @@ export class ${actorName} extends Actor<{ userId: string }, { text: string }> {
         return threadId
     }
 
+    @Atomic
     async explode(): Promise<void> {
         this.count = 999
         throw new Error("failed")
@@ -698,6 +699,7 @@ export class ${actorName} extends Actor<{ userId: string }, { text: string }> {
         this.count += 1
     }
 
+    @Atomic
     async onMessage(socket: { metadata: { userId: string }, send(message: { text: string }): void }, message: { text: string }): Promise<void> {
         this.count += 1
         if (message.text === "fail") throw new Error("failed")

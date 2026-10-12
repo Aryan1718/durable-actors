@@ -1,5 +1,6 @@
 import { createRequire } from "node:module"
 
+import { actorDatabaseMode } from "../actor/database.js"
 import type { ActorDatabase, SqliteValue } from "../actor/database.js"
 import type { JsonObject, JsonValue } from "../json.js"
 
@@ -14,7 +15,8 @@ class SqliteCaptureError extends Error {}
 
 interface ActorDatabaseStorage extends ActorDatabase {
     fields(): JsonObject
-    persistFields(fields: JsonObject): void
+    initializeFields(fields: JsonObject): void
+    persistField(name: string, value: JsonValue | undefined): void
     restore(state: SqliteState | undefined): void
     snapshot(): Promise<SqliteState>
     rollback(): void
@@ -30,6 +32,7 @@ class SqliteActorDatabase implements ActorDatabaseStorage {
 
     constructor(
         private readonly commit: SqliteCommitter,
+        private readonly persist: () => number,
         private readonly connect: (path: string) => SqliteConnection = openSqlite
     ) {}
 
@@ -37,9 +40,7 @@ class SqliteActorDatabase implements ActorDatabaseStorage {
         validateStatement(sql)
         const database = this.open()
         validateSingleStatement(database, sql)
-        const statement = database.prepare(sql)
-        if (!database.isTransaction) database.exec("BEGIN IMMEDIATE")
-        return statement.all(...bindings) as Row[]
+        return this.execute(sql, ...bindings) as Row[]
     }
 
     fields(): JsonObject {
@@ -50,15 +51,27 @@ class SqliteActorDatabase implements ActorDatabaseStorage {
         return Object.fromEntries(rows.map(row => [row.name, JSON.parse(row.value) as JsonValue]))
     }
 
-    persistFields(fields: JsonObject): void {
-        const database = this.fieldDatabase()
-        const put = database.prepare(
-            "INSERT INTO __terse_fields (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value WHERE value <> excluded.value"
-        )
-        for (const [name, value] of Object.entries(fields)) put.all(name, JSON.stringify(value))
-        database
-            .prepare("DELETE FROM __terse_fields WHERE name NOT IN (SELECT value FROM json_each(?))")
-            .all(JSON.stringify(Object.keys(fields)))
+    initializeFields(fields: JsonObject): void {
+        const existing = this.fields()
+        for (const [name, value] of Object.entries(fields)) {
+            if (Object.hasOwn(existing, name)) continue
+            this.execute(
+                "INSERT INTO __terse_fields (name, value) VALUES (?, ?) ON CONFLICT(name) DO NOTHING",
+                name,
+                JSON.stringify(value)
+            )
+        }
+    }
+
+    persistField(name: string, value: JsonValue | undefined): void {
+        this.fieldDatabase()
+        if (value === undefined) this.execute("DELETE FROM __terse_fields WHERE name = ?", name)
+        else
+            this.execute(
+                "INSERT INTO __terse_fields (name, value) VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value WHERE value <> excluded.value",
+                name,
+                JSON.stringify(value)
+            )
     }
 
     restore(state: SqliteState | undefined): void {
@@ -101,6 +114,32 @@ class SqliteActorDatabase implements ActorDatabaseStorage {
             this.connection = undefined
             this.seed = undefined
             this.failure = undefined
+        }
+    }
+
+    private execute(sql: string, ...bindings: SqliteValue[]): object[] {
+        const database = this.open()
+        const statement = database.prepare(sql)
+        if (!database.isTransaction) database.exec("BEGIN IMMEDIATE")
+        const immediate = actorDatabaseMode() === "immediate"
+        const before = immediate ? this.changeToken() : undefined
+        const rows = statement.all(...bindings)
+        if (immediate && this.changeToken() !== before) this.persistSqlite()
+        return rows
+    }
+
+    private persistSqlite(): void {
+        try {
+            const version = this.changeToken()
+            this.open().exec("COMMIT")
+            const txid = this.persist()
+            if (!Number.isSafeInteger(txid) || txid <= this.txid) throw new Error("invalid host persistence position")
+            this.txid = txid
+            this.version = version
+        } catch (cause) {
+            const message = cause instanceof Error ? cause.message : String(cause)
+            this.failure = new SqliteCaptureError(`failed to persist actor SQLite write: ${message}`, { cause })
+            throw this.failure
         }
     }
 

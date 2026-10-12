@@ -51,7 +51,7 @@ async fn missing_replication_files_cannot_be_acknowledged() -> Result<()> {
     let db = rusqlite::Connection::open(capture.path())?;
     db.execute("INSERT INTO __terse_fields VALUES ('count','1')", [])?;
     let position = replication.sync(&capture.path()).await?;
-    let files = capture.files(0, position).await?;
+    let files = read_ltx_files(&capture.path(), capture.published, 0, position).await?;
     tokio::fs::remove_file(files.last().unwrap().path(&capture.replica())).await?;
     assert!(
         capture

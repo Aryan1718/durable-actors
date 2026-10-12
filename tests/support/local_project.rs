@@ -7,7 +7,7 @@ pub fn write_actor(project: &Path, body: &str) -> Result<()> {
     std::fs::write(
         project.join("actors.ts"),
         format!(
-            "import {{ Actor, Persisted, Ephemeral, type ActorSocket }} from {}; export class Counter extends Actor {{ {body} }}",
+            "import {{ Actor, Atomic, Persisted, Ephemeral, type ActorSocket }} from {}; export class Counter extends Actor {{ {body} }}",
             serde_json::to_string(&sdk.join("dist/index.js"))?
         ),
     )?;

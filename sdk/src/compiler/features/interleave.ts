@@ -4,24 +4,24 @@ import { definitionDiagnostic } from "../actor-compiler.js"
 import { AnnotationKind } from "../types.js"
 import type { DecoratorResult, DecoratorUse, ParsedActor } from "../types.js"
 
-function readReentrancy(use: DecoratorUse): DecoratorResult {
+function readInterleave(use: DecoratorUse): DecoratorResult {
     const node = use.target
-    if (use.called) return invalidReentrancy(use)
-    if (!ts.isMethodDeclaration(node) || !node.body) return invalidReentrancy(use)
-    if (!hasModifier(node, ts.SyntaxKind.AsyncKeyword)) return invalidReentrancy(use)
-    if (hasModifier(node, ts.SyntaxKind.StaticKeyword)) return invalidReentrancy(use)
+    if (use.called) return invalidInterleave(use)
+    if (!ts.isMethodDeclaration(node) || !node.body) return invalidInterleave(use)
+    if (!hasModifier(node, ts.SyntaxKind.AsyncKeyword)) return invalidInterleave(use)
+    if (hasModifier(node, ts.SyntaxKind.StaticKeyword)) return invalidInterleave(use)
     if (hasModifier(node, ts.SyntaxKind.PrivateKeyword) || hasModifier(node, ts.SyntaxKind.ProtectedKeyword))
-        return invalidReentrancy(use)
-    if (!ts.isIdentifier(node.name) && !ts.isStringLiteral(node.name)) return invalidReentrancy(use)
+        return invalidInterleave(use)
+    if (!ts.isIdentifier(node.name) && !ts.isStringLiteral(node.name)) return invalidInterleave(use)
 
-    return { annotations: [{ kind: AnnotationKind.Reentrancy, node: use.node }], diagnostics: [] }
+    return { annotations: [{ kind: AnnotationKind.Interleave, node: use.node }], diagnostics: [] }
 }
 
-function validateReentrancy(actor: ParsedActor) {
+function validateInterleave(actor: ParsedActor) {
     const methods: string[] = []
     const diagnostics: ts.Diagnostic[] = []
     for (const member of actor.members) {
-        const annotations = member.annotations.filter(annotation => annotation.kind === AnnotationKind.Reentrancy)
+        const annotations = member.annotations.filter(annotation => annotation.kind === AnnotationKind.Interleave)
         if (annotations.length > 1)
             diagnostics.push(definitionDiagnostic(member.node, "@Interleave cannot be repeated"))
         if (annotations.length === 1) methods.push((member.node.name as ts.Identifier | ts.StringLiteral).text)
@@ -33,7 +33,7 @@ function hasModifier(node: ts.MethodDeclaration, kind: ts.SyntaxKind): boolean {
     return ts.getModifiers(node)?.some(modifier => modifier.kind === kind) ?? false
 }
 
-function invalidReentrancy(use: DecoratorUse): DecoratorResult {
+function invalidInterleave(use: DecoratorUse): DecoratorResult {
     return {
         annotations: [],
         diagnostics: [
@@ -45,4 +45,4 @@ function invalidReentrancy(use: DecoratorUse): DecoratorResult {
     }
 }
 
-export { readReentrancy, validateReentrancy }
+export { readInterleave, validateInterleave }

@@ -9,7 +9,7 @@ export class ChatRoom extends Actor<Member, string, ChatMessage[]> {
     }
 
     async onMessage(socket: ActorSocket<Member, ChatMessage[]>, text: string) {
-        this.history.push({ name: socket.metadata.name, text })
+        this.history = [...this.history, { name: socket.metadata.name, text }]
         this.broadcast(this.history)
     }
 }

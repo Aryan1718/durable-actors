@@ -59,14 +59,17 @@ try {
             const { value, done } = await lines.next()
             assert.equal(done, false, "executor closed its connection")
             const message = JSON.parse(value)
-            if (message.type !== "commit_sqlite") return message
-            send({ type: "sqlite_committed", message_id: message.message_id, txid: ++txid })
+            if (message.type !== "persist_sqlite") return message
+            assert.ok(["atomic_snapshot", "durable_write"].includes(message.mode))
+            if (message.mode === "atomic_snapshot") txid++
+            else assert.equal(message.txid, txid)
+            send({ type: "sqlite_persisted", message_id: message.message_id, commit_id: message.commit_id, txid })
         }
     }
-    assert.deepEqual(await receive(), { type: "warm", protocol: 24 })
+    assert.deepEqual(await receive(), { type: "warm", protocol: 26 })
     send({ type: "load", entrypoint, environment: {} })
-    assert.deepEqual(await receive(), { type: "attach", protocol: 24, actor_names: ["Counter"] })
-    send({ type: "attached", protocol: 24 })
+    assert.deepEqual(await receive(), { type: "attach", protocol: 26, actor_names: ["Counter"] })
+    send({ type: "attached", protocol: 26 })
     const actor = { project_id: "default", actor_name: "Counter", actor_id: "one" }
     for (let expected = 1; expected <= 2; expected++) {
         send({

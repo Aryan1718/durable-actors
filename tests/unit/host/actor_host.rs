@@ -330,8 +330,20 @@ async fn assert_reentrant_commit_order(fail_write: bool) -> Result<()> {
         assert_eq!(second?, completed(2));
         let writes = state.writes.lock().unwrap();
         assert_eq!(writes.len(), 2);
-        assert_eq!(StateSnapshot::decode(&writes[0])?.result, json!(1));
-        assert_eq!(StateSnapshot::decode(&writes[1])?.result, json!(2));
+        assert_eq!(
+            StateSnapshot::decode(&writes[0])?
+                .completion
+                .unwrap()
+                .result,
+            json!(1)
+        );
+        assert_eq!(
+            StateSnapshot::decode(&writes[1])?
+                .completion
+                .unwrap()
+                .result,
+            json!(2)
+        );
         Ok::<_, anyhow::Error>(())
     };
     tokio::time::timeout(Duration::from_secs(2), operation).await??;
@@ -1640,6 +1652,287 @@ async fn socket_events_return_effects_only_after_committing_state() -> Result<()
     Ok(())
 }
 
+struct CheckpointingExecutor {
+    admission: watch::Sender<()>,
+    checkpoints: mpsc::UnboundedSender<(ActorState, oneshot::Sender<()>)>,
+}
+#[async_trait]
+impl ActorExecutor for CheckpointingExecutor {
+    fn supports(&self, _: &str) -> bool {
+        true
+    }
+    fn invocation_admission(&self) -> Option<watch::Receiver<()>> {
+        Some(self.admission.subscribe())
+    }
+    async fn invoke(
+        &self,
+        invocation: ActorMethodInvocation,
+        state: Option<&ActorState>,
+    ) -> Result<ActorMethodOutcome> {
+        let count = fields(state)?["count"].as_u64().unwrap_or(0);
+        let mut state = write_fields(state, json!({"count": count + 1})).await?;
+        if invocation.request_id == "first" {
+            for value in [count + 1, count + 2] {
+                state = write_fields(Some(&state), json!({"count": value})).await?;
+                let (reply, ack) = oneshot::channel();
+                self.checkpoints.send((state.clone(), reply))?;
+                ack.await?;
+            }
+            return Ok(ActorMethodOutcome::Failed(ActorInvocationFailure {
+                code: "actor_method_failed".into(),
+                message: "failed after durable writes".into(),
+            }));
+        }
+        Ok(ActorMethodOutcome::Completed {
+            result: json!(count + 1),
+            state,
+            effects: vec![],
+        })
+    }
+}
+
+#[tokio::test]
+async fn checkpoints_wait_for_durability_and_share_atomic_versions() -> Result<()> {
+    use crate::state_transport::{SqlitePersistenceMode, SqliteWrite, SqliteWriter};
+    let (checkpoints, mut captured) = mpsc::unbounded_channel();
+    let (started, mut saving) = mpsc::unbounded_channel();
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let writes = Arc::new(FakeStateTransport {
+        paused_commit: Some((started, release.clone())),
+        ..Default::default()
+    });
+    let host = Arc::new(ActorHost::new(
+        HostEndpoint {
+            id: super::super::HostId::new("host-1"),
+            route: "http://host.invalid/".into(),
+        },
+        Arc::new(CheckpointingExecutor {
+            admission: watch::channel(()).0,
+            checkpoints,
+        }),
+        Arc::new(FakeAuthority::default()),
+        writes.clone(),
+        Arc::new(EmptySocketPublisher),
+        replication().await,
+    ));
+    assert_eq!(invoke(&host, "atomic-before").await?, completed(1));
+    let caller = host.clone();
+    let invocation = tokio::spawn(async move { invoke(&caller, "first").await });
+    for version in [2, 3] {
+        let (state, ack) = tokio::time::timeout(Duration::from_secs(3), captured.recv())
+            .await?
+            .unwrap();
+        let write = SqliteWrite {
+            request_id: "first".into(),
+            actor: ActorKey {
+                project_id: "default".into(),
+                actor_name: "Counter".into(),
+                actor_id: "counter-1".into(),
+            },
+            path: state.sqlite.path.clone().unwrap().into(),
+            mode: SqlitePersistenceMode::DurableWrite,
+            txid: Some(state.sqlite.txid),
+        };
+        let caller = host.clone();
+        let checkpoint = tokio::spawn(async move { caller.persist_sqlite(&write).await });
+        tokio::time::timeout(Duration::from_secs(3), saving.recv())
+            .await?
+            .unwrap();
+        assert!(
+            !checkpoint.is_finished(),
+            "checkpoint acknowledged before storage"
+        );
+        assert!(
+            !invocation.is_finished(),
+            "method resumed before durability"
+        );
+        release.add_permits(1);
+        let saved = checkpoint.await??;
+        assert_eq!(saved.state_version, Some(version));
+        assert_eq!(saved.txid, state.sqlite.txid);
+        ack.send(()).unwrap();
+    }
+    assert!(matches!(
+        invocation.await??,
+        ActorExecutionResult::Failed { .. }
+    ));
+    assert_eq!(invoke(&host, "atomic-after").await?, completed(4));
+    let snapshots = writes
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|bytes| StateSnapshot::decode(bytes))
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(
+        snapshots
+            .iter()
+            .map(|s| s.state_version)
+            .collect::<Vec<_>>(),
+        vec![1, 2, 3, 4]
+    );
+    assert!(snapshots[0].completion.is_some());
+    assert!(snapshots[1].completion.is_none());
+    assert!(snapshots[2].completion.is_none());
+    assert_eq!(snapshots[3].completion.as_ref().unwrap().result, json!(4));
+    for pair in snapshots.windows(2) {
+        assert_eq!(
+            pair[1].sqlite.parent.as_ref().unwrap().state_version,
+            pair[0].state_version
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_checkpoint_stops_the_actor_without_acknowledging_the_write() -> Result<()> {
+    use crate::state_transport::{SqlitePersistenceMode, SqliteWrite, SqliteWriter};
+    let (checkpoints, mut captured) = mpsc::unbounded_channel();
+    let writes = Arc::new(FakeStateTransport {
+        failures: AtomicUsize::new(1),
+        ..Default::default()
+    });
+    let host = Arc::new(ActorHost::new(
+        HostEndpoint {
+            id: super::super::HostId::new("host-1"),
+            route: "http://host.invalid/".into(),
+        },
+        Arc::new(CheckpointingExecutor {
+            admission: watch::channel(()).0,
+            checkpoints,
+        }),
+        Arc::new(FakeAuthority::default()),
+        writes,
+        Arc::new(EmptySocketPublisher),
+        replication().await,
+    ));
+    let caller = host.clone();
+    let invocation = tokio::spawn(async move { invoke(&caller, "first").await });
+    let (state, ack) = tokio::time::timeout(Duration::from_secs(3), captured.recv())
+        .await?
+        .unwrap();
+    let error = host
+        .persist_sqlite(&SqliteWrite {
+            request_id: "first".into(),
+            actor: ActorKey {
+                project_id: "default".into(),
+                actor_name: "Counter".into(),
+                actor_id: "counter-1".into(),
+            },
+            path: state.sqlite.path.clone().unwrap().into(),
+            mode: SqlitePersistenceMode::DurableWrite,
+            txid: Some(state.sqlite.txid),
+        })
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("write response lost"));
+    assert!(
+        matches!(invocation.await??, ActorExecutionResult::Failed { failure } if failure.code == "outcome_unknown")
+    );
+    assert!(ack.send(()).is_err());
+    assert_eq!(
+        invoke(&host, "after").await?,
+        ActorExecutionResult::HostUnavailable
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn delayed_interleaved_completion_cannot_rewind_a_checkpoint() -> Result<()> {
+    use crate::actor::ActorInterleavedOutcome;
+    use crate::state_transport::{SqlitePersistenceMode, SqliteWrite, SqliteWriter};
+    struct Executor {
+        admission: watch::Sender<()>,
+        captured: mpsc::UnboundedSender<(String, ActorState, oneshot::Sender<()>)>,
+    }
+    #[async_trait]
+    impl ActorExecutor for Executor {
+        fn supports(&self, _: &str) -> bool {
+            true
+        }
+        fn invocation_admission(&self) -> Option<watch::Receiver<()>> {
+            Some(self.admission.subscribe())
+        }
+        async fn invoke(
+            &self,
+            invocation: ActorMethodInvocation,
+            state: Option<&ActorState>,
+        ) -> Result<ActorMethodOutcome> {
+            let count = fields(state)?["count"].as_u64().unwrap_or(0) + 1;
+            let state = write_fields(state, json!({"count": count})).await?;
+            if count <= 2 {
+                let (reply, ack) = oneshot::channel();
+                self.captured
+                    .send((invocation.request_id, state.clone(), reply))?;
+                self.admission.send_replace(());
+                ack.await?;
+            }
+            Ok(ActorMethodOutcome::Interleaved(ActorInterleavedOutcome {
+                sequence: count,
+                result: json!(count),
+                state,
+                effects: vec![],
+            }))
+        }
+    }
+    let (captured, mut captures) = mpsc::unbounded_channel();
+    let writes = Arc::new(FakeStateTransport::default());
+    let host = Arc::new(ActorHost::new(
+        HostEndpoint {
+            id: super::super::HostId::new("host-1"),
+            route: "http://host.invalid/".into(),
+        },
+        Arc::new(Executor {
+            admission: watch::channel(()).0,
+            captured,
+        }),
+        Arc::new(FakeAuthority::default()),
+        writes.clone(),
+        Arc::new(EmptySocketPublisher),
+        replication().await,
+    ));
+    let caller = host.clone();
+    let older = tokio::spawn(async move { invoke(&caller, "older").await });
+    let (_, _, release_older) = tokio::time::timeout(Duration::from_secs(3), captures.recv())
+        .await?
+        .unwrap();
+    let caller = host.clone();
+    let newer = tokio::spawn(async move { invoke(&caller, "newer").await });
+    let (_, state, release_newer) = tokio::time::timeout(Duration::from_secs(3), captures.recv())
+        .await?
+        .unwrap();
+    let saved = host
+        .persist_sqlite(&SqliteWrite {
+            request_id: "newer".into(),
+            actor: ActorKey {
+                project_id: "default".into(),
+                actor_name: "Counter".into(),
+                actor_id: "counter-1".into(),
+            },
+            path: state.sqlite.path.clone().unwrap().into(),
+            mode: SqlitePersistenceMode::DurableWrite,
+            txid: Some(state.sqlite.txid),
+        })
+        .await?;
+    assert_eq!(saved.state_version, Some(1));
+    release_older.send(()).unwrap();
+    assert_eq!(older.await??, completed(1));
+    release_newer.send(()).unwrap();
+    assert_eq!(newer.await??, completed(2));
+    assert_eq!(invoke(&host, "after").await?, completed(3));
+    let snapshots = writes
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|bytes| StateSnapshot::decode(bytes))
+        .collect::<Result<Vec<_>>>()?;
+    assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[1].state_version, 2);
+    assert!(snapshots[1].sqlite.txid > snapshots[0].sqlite.txid);
+    Ok(())
+}
+
 async fn invoke(host: &ActorHost, request_id: &str) -> Result<ActorExecutionResult> {
     host.invoke_actor(
         ActorInvocation {
@@ -1683,3 +1976,52 @@ fn ticket(state_version: u64) -> WritePlan {
 
 #[path = "http_invocation.rs"]
 mod http_invocation;
+
+#[tokio::test]
+async fn restored_request_only_returns_a_saved_result_when_completion_is_present() -> Result<()> {
+    for complete in [false, true] {
+        let mut snapshot = StateSnapshot::new(
+            1,
+            1,
+            "request".into(),
+            crate::test_sqlite::snapshot(json!({"count": 3}))?,
+            Value::Null,
+        )?;
+        if !complete {
+            snapshot.completion = None;
+        }
+        let executor = Arc::new(IncrementingExecutor {
+            invocations: AtomicU64::new(0),
+        });
+        let host = ActorHost::new(
+            HostEndpoint {
+                id: super::super::HostId::new("host-1"),
+                route: "http://host.invalid/".into(),
+            },
+            executor.clone(),
+            Arc::new(FakeAuthority {
+                initial_state: Some((1, snapshot.encode()?)),
+                ..Default::default()
+            }),
+            Arc::new(FakeStateTransport::default()),
+            Arc::new(EmptySocketPublisher),
+            replication().await,
+        );
+        let result = invoke(&host, "request").await?;
+        if complete {
+            assert!(matches!(
+                result,
+                ActorExecutionResult::Completed {
+                    result: Value::Null,
+                    ..
+                }
+            ));
+            assert_eq!(executor.invocations.load(Ordering::Relaxed), 0);
+        } else {
+            assert_eq!(result, completed(4));
+            assert_eq!(executor.invocations.load(Ordering::Relaxed), 1);
+        }
+        host.drain(Duration::from_secs(1)).await?;
+    }
+    Ok(())
+}

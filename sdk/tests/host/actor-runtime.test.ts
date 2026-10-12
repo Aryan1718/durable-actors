@@ -48,21 +48,22 @@ export class ChatRoom extends Actor<ChatSession, { text: string }> {
     @Persisted private events: string[] = []
 
     async onConnect(socket: ActorSocket<ChatSession>): Promise<void> {
-        this.events.push(`connect:${socket.metadata.userId}:${(await this.getConnections()).length}`)
+        this.events = [...this.events, `connect:${socket.metadata.userId}:${(await this.getConnections()).length}`]
         socket.metadata = { ...socket.metadata, connectedAt: 2 }
         socket.setTags("member")
         socket.send({ text: "ready" })
     }
 
     async onMessage(socket: ActorSocket<ChatSession>, message: { text: string }): Promise<void> {
-        this.events.push(`message:${socket.metadata.userId}:${message.text}`)
+        this.events = [...this.events, `message:${socket.metadata.userId}:${message.text}`]
         this.broadcast(message)
     }
 
     async onDisconnect(socket: ActorSocket<ChatSession>, code: number, reason: string): Promise<void> {
-        this.events.push(
+        this.events = [
+            ...this.events,
             `disconnect:${socket.metadata.userId}:${code}:${reason}:${(await this.getConnections()).length}`
-        )
+        ]
     }
 
     async getEvents(): Promise<readonly string[]> {
@@ -94,6 +95,7 @@ const forwarderIdentity = {
 
 const counterDefinition = registerActorClass(Counter, {
     actorName: "Counter",
+    atomicMethods: ["explode"],
     fields: [{ name: "count", persistence: Persistence.Persisted }]
 })
 const forwarderDefinition = registerActorClass(Forwarder, { actorName: "Forwarder", fields: [] })
@@ -173,7 +175,7 @@ test("invocation does not enforce deployment JSON schemas at runtime", async () 
     assert.equal(reply.type, "invoked")
 })
 
-test("ephemeral caches survive resident calls and reset after failure or reconstruction", async () => {
+test("ephemeral caches survive resident calls and reset after atomic failure or reconstruction", async () => {
     class CachingCounter extends Actor {
         @Persisted count = 0
         @Ephemeral cache = new Map<string, number>()
@@ -191,6 +193,7 @@ test("ephemeral caches survive resident calls and reset after failure or reconst
     }
     const definition = registerActorClass(CachingCounter, {
         actorName: "CachingCounter",
+        atomicMethods: ["fail"],
         fields: [
             { name: "count", persistence: Persistence.Persisted },
             { name: "cache", persistence: Persistence.Ephemeral }
@@ -419,7 +422,7 @@ test("a resident actor rejects another type or ID without changing its state", a
     assertReply(await runtime.handle(command), { type: "invoked", result: 2 })
 })
 
-test("keeps a successful actor instance resident and restores it after failure", async () => {
+test("keeps a successful actor instance resident and restores it after atomic failure", async () => {
     const runtime = new ActorRuntime(counterDefinition, () => {})
     assertReply(
         await runtime.handle({

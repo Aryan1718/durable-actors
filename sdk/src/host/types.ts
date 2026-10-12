@@ -9,6 +9,7 @@ import type {
     InvokeCommand,
     WebSocketEventCommand
 } from "./protocol.js"
+import type { SqlitePersister } from "./sqlite-persistence.js"
 import type { SqliteCommitter } from "./sqlite.js"
 import type { ActorWorkerSupervisor } from "./worker-supervisor.js"
 
@@ -24,6 +25,7 @@ type ActorCommandHandler = (
     command: ActorExecutorCommand,
     allowNextInvocation: () => void,
     commit: SqliteCommitter,
+    persist: SqlitePersister,
     publish?: SocketPublisher,
     connections?: SocketSource
 ) => Promise<ActorExecutorReply>
@@ -55,6 +57,7 @@ interface ActorWorkerHandle {
         command: InvokeCommand | WebSocketEventCommand | HydrateCommand,
         allowNextInvocation: () => void,
         commit: SqliteCommitter,
+        persist: SqlitePersister,
         publish?: SocketPublisher,
         connections?: SocketSource
     ): Promise<ActorExecutorReply>

@@ -67,7 +67,7 @@ pub(crate) struct ActorActivation {
     pub state: Option<bytes::Bytes>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(super) struct CommitOrigin {
     pub connection_id: Option<String>,
     pub interleaved: bool,
@@ -194,6 +194,54 @@ impl ActorRuntime {
             .await
     }
 
+    pub(super) async fn checkpoint(
+        &mut self,
+        invocation: &ActorInvocation,
+        owner_epoch: u64,
+        write: &crate::state_transport::SqliteWrite,
+        origin: CommitOrigin,
+    ) -> Result<crate::state_transport::SqlitePersisted> {
+        self.storage.ensure_authority()?;
+        let txid = write
+            .txid
+            .context("checkpoint requires a captured SQLite transaction")?;
+        let mut cached = self
+            .cached_state
+            .take()
+            .context("checkpoint has no activated state")?;
+        let result = async {
+            ensure!(
+                cached.owner_epoch == owner_epoch,
+                "checkpoint ownership changed"
+            );
+            let mut state = cached
+                .state()
+                .context("checkpoint has no SQLite state")?
+                .as_ref()
+                .clone();
+            ensure!(
+                state.sqlite.path.as_deref().map(std::path::Path::new)
+                    == Some(write.path.as_path()),
+                "checkpoint database does not match activation"
+            );
+            ensure!(
+                txid > state.sqlite.txid,
+                "checkpoint must advance SQLite transaction"
+            );
+            state.sqlite.txid = txid;
+            self.publish_state(invocation, owner_epoch, &mut cached, None, state, origin)
+                .await?;
+            self.storage.ensure_authority()?;
+            Ok(crate::state_transport::SqlitePersisted {
+                txid,
+                state_version: Some(cached.state_version),
+            })
+        }
+        .await;
+        self.cached_state = Some(cached);
+        result
+    }
+
     pub(super) async fn commit_interleaved(
         &mut self,
         invocation: &ActorInvocation,
@@ -214,7 +262,12 @@ impl ActorRuntime {
             cached.owner_epoch == owner_epoch,
             "interleaved ownership changed"
         );
-        let publication = if cached.state.as_deref() != Some(&outcome.state) {
+        // A mid-method checkpoint can already include an earlier completion's changes.
+        let publication = if cached
+            .state
+            .as_ref()
+            .is_none_or(|saved| saved.sqlite.txid < outcome.state.sqlite.txid)
+        {
             self.publish_result(
                 invocation,
                 owner_epoch,
@@ -565,8 +618,7 @@ impl ActorRuntime {
         let mut cached = CachedActorState::new(owner_epoch, capture);
         cached.state_version = state_version;
         cached.state = cached.state();
-        cached.last_request_id = Some(snapshot.request_id);
-        cached.last_result = Some(snapshot.result);
+        cached.set_completion(snapshot.request_id, snapshot.completion);
         Ok(cached)
     }
 
@@ -686,14 +738,40 @@ impl ActorRuntime {
         next_state: ActorState,
         origin: CommitOrigin,
     ) -> Result<ActorExecutionResult> {
+        self.publish_state(
+            invocation,
+            owner_epoch,
+            cached,
+            Some(crate::state_log::RequestCompletion {
+                result: result.clone(),
+            }),
+            next_state,
+            origin,
+        )
+        .await?;
+        Ok(ActorExecutionResult::Completed {
+            result,
+            effects: Vec::new(),
+        })
+    }
+
+    async fn publish_state(
+        &self,
+        invocation: &ActorInvocation,
+        owner_epoch: u64,
+        cached: &mut CachedActorState,
+        completion: Option<crate::state_log::RequestCompletion>,
+        next_state: ActorState,
+        origin: CommitOrigin,
+    ) -> Result<()> {
         let mut timings = StateWriteTimings::new();
         let next_version = cached.state_version.checked_add(1);
         let outcome = self
-            .publish_result_once(
+            .publish_state_once(
                 invocation,
                 owner_epoch,
                 cached,
-                result,
+                completion,
                 next_state,
                 origin,
                 &mut timings,
@@ -703,16 +781,16 @@ impl ActorRuntime {
         outcome
     }
 
-    async fn publish_result_once(
+    async fn publish_state_once(
         &self,
         invocation: &ActorInvocation,
         owner_epoch: u64,
         cached: &mut CachedActorState,
-        result: Value,
+        completion: Option<crate::state_log::RequestCompletion>,
         mut next_state: ActorState,
         origin: CommitOrigin,
         timings: &mut StateWriteTimings,
-    ) -> Result<ActorExecutionResult> {
+    ) -> Result<()> {
         let next_version = cached
             .state_version
             .checked_add(1)
@@ -744,13 +822,14 @@ impl ActorRuntime {
             "write capability belongs to another owner epoch"
         );
         timings.write_ticket_ready_at_ms = Some(timings.elapsed_ms());
-        let mut snapshot = StateSnapshot::new(
-            next_version,
+        let mut snapshot = StateSnapshot {
+            state_version: next_version,
             owner_epoch,
-            invocation.request_id.clone(),
-            cached.capture_sqlite(&mut next_state).await?,
-            result.clone(),
-        )?;
+            request_id: invocation.request_id.clone(),
+            sqlite: cached.capture_sqlite(&mut next_state).await?,
+            completion,
+            attribution: None,
+        };
         snapshot.attribution = Some(crate::state_log::StateAttribution {
             operation: invocation.method.clone(),
             connection_id: origin.connection_id,
@@ -781,10 +860,7 @@ impl ActorRuntime {
         timings.snapshot_uploaded_at_ms = timings.snapshot_persisted_at_ms;
         self.finish_pending_commit(invocation, cached).await?;
         timings.state_finalized_at_ms = Some(timings.elapsed_ms());
-        Ok(ActorExecutionResult::Completed {
-            result,
-            effects: Vec::new(),
-        })
+        Ok(())
     }
 
     fn log_state_write(
@@ -793,7 +869,7 @@ impl ActorRuntime {
         owner_epoch: u64,
         state_version: Option<u64>,
         timings: &StateWriteTimings,
-        outcome: &Result<ActorExecutionResult>,
+        outcome: &Result<()>,
     ) {
         match outcome {
             Ok(_) => info!(
@@ -887,8 +963,7 @@ impl ActorRuntime {
         ));
         cached.state_version = pending.snapshot.state_version;
         cached.state = Some(Arc::new(pending.state));
-        cached.last_request_id = Some(pending.snapshot.request_id);
-        cached.last_result = Some(pending.snapshot.result);
+        cached.set_completion(pending.snapshot.request_id, pending.snapshot.completion);
         cached.next_write = Some(next_write);
         Ok(())
     }
@@ -1043,6 +1118,15 @@ impl CachedActorState {
                 sqlite: self.sqlite.state(),
             })
         }))
+    }
+
+    fn set_completion(
+        &mut self,
+        request_id: String,
+        completion: Option<crate::state_log::RequestCompletion>,
+    ) {
+        self.last_request_id = completion.as_ref().map(|_| request_id);
+        self.last_result = completion.map(|completion| completion.result);
     }
 
     fn replay(&self, request_id: &str) -> Option<Value> {

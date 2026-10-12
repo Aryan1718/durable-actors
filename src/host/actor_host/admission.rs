@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 
@@ -18,12 +18,14 @@ pub(super) async fn run(
     completed: mpsc::Sender<ActorCompletion>,
     accepting: watch::Receiver<bool>,
     mut admission: watch::Receiver<()>,
+    mut checkpoints: mpsc::UnboundedReceiver<Checkpoint>,
 ) {
     let mut mailbox = Mailbox {
         object,
         runtime,
         completed,
         running: FuturesUnordered::new(),
+        active: HashMap::new(),
         ready: BTreeMap::new(),
         next_sequence: 1,
         next_invocation: 0,
@@ -36,6 +38,9 @@ pub(super) async fn run(
             biased;
             Some((id, request, result)) = mailbox.running.next(), if !mailbox.running.is_empty() => {
                 if !mailbox.executed(id, request, result).await { return; }
+            }
+            Some(checkpoint) = checkpoints.recv() => {
+                if !mailbox.checkpoint(checkpoint).await { return; }
             }
             permission = admission.changed(), if mailbox.blocked_on.is_some() => {
                 if permission.is_err() { return; }
@@ -62,6 +67,14 @@ struct Mailbox {
     completed: mpsc::Sender<ActorCompletion>,
     running: FuturesUnordered<BoxFuture<'static, Completion>>,
     ready: BTreeMap<u64, (u64, ActorRequest, ActorInterleavedOutcome)>,
+    active: HashMap<
+        String,
+        (
+            ActorInvocation,
+            u64,
+            super::super::actor_runtime::CommitOrigin,
+        ),
+    >,
     next_invocation: u64,
     blocked_on: Option<u64>,
     interleaved: bool,
@@ -98,6 +111,14 @@ impl Mailbox {
             }
             Err(error) => return self.stop(request, error).await,
         };
+        self.active.insert(
+            invocation.request_id.clone(),
+            (
+                invocation,
+                request.owner_epoch,
+                request.operation.commit_origin(),
+            ),
+        );
         let executor = self.runtime.executor();
         self.next_invocation += 1;
         let id = self.next_invocation;
@@ -110,6 +131,20 @@ impl Mailbox {
             .boxed(),
         );
         true
+    }
+
+    async fn checkpoint(&mut self, checkpoint: Checkpoint) -> bool {
+        let result = match self.active.get(&checkpoint.write.request_id) {
+            Some((invocation, epoch, origin)) => {
+                self.runtime
+                    .checkpoint(invocation, *epoch, &checkpoint.write, origin.clone())
+                    .await
+            }
+            None => Err(anyhow::anyhow!("checkpoint has no active invocation")),
+        };
+        let success = result.is_ok();
+        let _ = checkpoint.reply.send(result);
+        success
     }
 
     async fn activate(&mut self, mut request: ActorRequest) -> bool {
@@ -247,6 +282,8 @@ impl Mailbox {
     }
 
     async fn finish(&mut self, mut request: ActorRequest, result: Result<ActorExecutionResult>) {
+        self.active
+            .remove(&request.operation.invocation().request_id);
         request.tracker.state_version(self.runtime.state_version());
         request.tracker.complete(&result);
         ActorRuntime::log_invocation(

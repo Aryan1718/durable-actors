@@ -2,7 +2,7 @@ import { ActorRuntime as Runtime } from "../../src/host/actor-runtime.js"
 import { SqliteActorDatabase as Database } from "../../src/host/sqlite.js"
 import type { SqliteState } from "../../src/host/sqlite.js"
 
-import { commit } from "./litestream.js"
+import { commit, commitSync } from "./litestream.js"
 
 export type { SqliteState } from "../../src/host/sqlite.js"
 export { SqliteCaptureError } from "../../src/host/sqlite.js"
@@ -11,8 +11,12 @@ export { hydrateActorState, snapshotActorState } from "../../src/host/actor-runt
 export class SqliteActorDatabase extends Database {
     private state: SqliteState | undefined
 
-    constructor(connect?: ConstructorParameters<typeof Database>[1]) {
-        super(() => commit(this.state!), connect)
+    constructor(connect?: ConstructorParameters<typeof Database>[2]) {
+        super(
+            () => commit(this.state!),
+            () => commitSync(this.state!),
+            connect
+        )
     }
 
     override restore(state: SqliteState | undefined): void {

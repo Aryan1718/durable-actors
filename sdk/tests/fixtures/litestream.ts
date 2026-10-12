@@ -1,4 +1,4 @@
-import { execFile, spawn } from "node:child_process"
+import { execFile, execFileSync, spawn } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { request } from "node:http"
 import { createRequire } from "node:module"
@@ -39,6 +39,18 @@ export async function seed(fields: JsonObject | null = {}): Promise<SqliteState>
 export async function commit(state: SqliteState): Promise<number> {
     const reply = await ipc("sync", { path: state.path, wait: true, timeout: 10 })
     return Number(reply.txid)
+}
+
+export function commitSync(state: SqliteState): number {
+    const reply = execFileSync(
+        "litestream",
+        ["sync", "-socket", socket, "-wait", "-timeout", "10", "-json", state.path!],
+        {
+            encoding: "utf8",
+            timeout: 15_000
+        }
+    )
+    return Number(JSON.parse(reply).txid)
 }
 
 export async function recover(source: SqliteState, position: SqliteState): Promise<SqliteState> {

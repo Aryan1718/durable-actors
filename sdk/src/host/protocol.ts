@@ -71,13 +71,21 @@ const executorCommandSchema = z.discriminatedUnion("type", [
 ])
 
 const actorSessionServerMessageSchema = z.discriminatedUnion("type", [
-    z.object({
-        type: z.literal("sqlite_committed"),
-        message_id: z.number().int().nonnegative(),
-        txid: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
-        error: z.string().optional()
-    }),
-    z.object({ type: z.literal("attached"), protocol: z.literal(24), supports_residency: z.boolean().optional() }),
+    z
+        .object({
+            type: z.literal("sqlite_persisted"),
+            message_id: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+            commit_id: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+            txid: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+            state_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+            error: z.string().optional()
+        })
+        .refine(message =>
+            message.error === undefined
+                ? message.txid !== undefined
+                : message.txid === undefined && message.state_version === undefined
+        ),
+    z.object({ type: z.literal("attached"), protocol: z.literal(26), supports_residency: z.boolean().optional() }),
     z.object({
         type: z.literal("socket_connections"),
         message_id: z.number().int().nonnegative(),
@@ -109,7 +117,13 @@ type ActorExecutorReply =
     | { readonly type: "hydrated" }
     | { readonly type: "state_required" }
 type ActorSessionClientMessage =
-    | { readonly type: "commit_sqlite"; readonly message_id: number }
+    | {
+          readonly type: "persist_sqlite"
+          readonly message_id: number
+          readonly commit_id: number
+          readonly mode: "atomic_snapshot" | "durable_write"
+          readonly txid?: number
+      }
     | { readonly type: "residency"; readonly actors: readonly ActorIdentity[] }
     | AttachMessage
     | { readonly type: "ready_for_invocation"; readonly message_id: number }
@@ -119,7 +133,7 @@ type ActorSessionClientMessage =
 
 interface AttachMessage {
     readonly type: "attach"
-    readonly protocol: 24
+    readonly protocol: 26
     readonly actor_names: readonly string[]
 }
 
@@ -175,6 +189,13 @@ type ActorWorkerRequest =
           readonly error?: string
       }
 type ActorWorkerMessage =
+    | {
+          readonly type: "persist_sqlite"
+          readonly messageId: number
+          readonly commitId: number
+          readonly buffer: SharedArrayBuffer
+          readonly txid?: number
+      }
     | { readonly type: "commit_sqlite"; readonly messageId: number }
     | { readonly type: "warm" }
     | {

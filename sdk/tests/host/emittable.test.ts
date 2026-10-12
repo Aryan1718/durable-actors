@@ -16,11 +16,11 @@ class ObservableRoom extends Actor {
     @Persisted status?: string = "online"
 
     async change() {
-        this.messages.push("first")
-        this.messages.push("second")
+        this.messages = [...this.messages, "first"]
+        this.messages = [...this.messages, "second"]
         this.title = "Renamed"
         this.secret = "changed"
-        delete this.status
+        this.status = undefined
     }
 
     async unchanged() {
@@ -29,7 +29,7 @@ class ObservableRoom extends Actor {
     }
 
     async fail() {
-        this.messages.push("failed")
+        this.messages = [...this.messages, "failed"]
         throw new Error("failed")
     }
 }
@@ -74,7 +74,7 @@ test("initial snapshots expose only emittable fields while still saving all pers
     ])
 })
 
-test("coalesces nested mutations and removals into one final update without live publication", async () => {
+test("coalesces assignments and removals into one final update without live publication", async () => {
     const runtime = new ActorRuntime(
         definition,
         () => {},

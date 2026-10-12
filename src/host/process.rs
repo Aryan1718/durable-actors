@@ -215,12 +215,19 @@ pub(super) async fn serve_assigned_host(
 async fn initialize_executor(
     config: &ActorHostConfig,
     connection: &ActorExecutorConnection,
-    host: &ActorHost,
+    host: &Arc<ActorHost>,
     sockets: &Arc<super::sockets::HostSockets>,
     replication: Arc<dyn crate::litestream::Replicator>,
 ) -> Result<u64> {
     connection
-        .mark_ready(Some(sockets.clone()), Some(sockets.clone()), replication)
+        .mark_ready(
+            Some(sockets.clone()),
+            Some(sockets.clone()),
+            Arc::new(super::persistence::SqlitePersistence::new(
+                replication,
+                host.clone(),
+            )),
+        )
         .await?;
     let owner_epoch = match &config.actor {
         Some(actor) => host.activate_actor(actor.clone()).await?.owner_epoch,
@@ -452,12 +459,13 @@ async fn prepare_actor_host(
         storage.clone(),
         control_plane.clone(),
     ));
+    let persistence = super::persistence::ActorPersistence::new(storage.clone());
     let host = Arc::new(
         ActorHost::new(
             endpoint,
             executor_connection.executor(),
             storage.clone(),
-            super::persistence::ActorPersistence::new(storage.clone()),
+            persistence.clone(),
             sockets.clone(),
             replication.clone(),
         )

@@ -1,6 +1,37 @@
 use super::*;
 
 #[tokio::test]
+async fn state_writes_require_local_ownership_and_a_matching_lease() -> Result<()> {
+    let f = Fixture::new()?;
+    let active = f
+        .runtime
+        .register_activation(&f.actor, &request("first"), "us-east", true, None)
+        .await?;
+    let lease = active.placement.lease;
+    let mut other_host = lease.clone();
+    other_host.id = HostId::new("other-host");
+    let mut other_session = lease.clone();
+    other_session.session_id = "other-session".into();
+    for mismatched in [other_host, other_session] {
+        let error = f
+            .runtime
+            .prepare_actor_write(&f.actor, &mismatched, 1, 1)
+            .await
+            .unwrap_err();
+        assert_eq!(error.to_string(), "actor ownership changed");
+    }
+    let mut other_actor = f.actor.clone();
+    other_actor.actor_id = "not-activated".into();
+    let error = f
+        .runtime
+        .prepare_actor_write(&other_actor, &lease, 1, 1)
+        .await
+        .unwrap_err();
+    assert_eq!(error.to_string(), "actor is not locally activated");
+    Ok(())
+}
+
+#[tokio::test]
 async fn sqlite_dependencies_must_exist_in_the_snapshot_backend_before_publication() -> Result<()> {
     use crate::litestream::{Litestream, Replicator, storage::SqliteCapture};
     use crate::state_log::{SqliteSnapshot, StateSnapshot};

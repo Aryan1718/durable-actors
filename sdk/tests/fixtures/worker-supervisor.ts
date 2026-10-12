@@ -11,20 +11,20 @@ export function handle(
     host: ActorWorkerSupervisor,
     command: Arguments[0],
     allowNext: Arguments[1],
-    publish?: Arguments[3],
-    connections?: Arguments[4]
+    publish?: Arguments[4],
+    connections?: Arguments[5]
 ): Promise<ActorExecutorReply> {
-    return host.handle(command, allowNext, capture(host, command), publish, connections)
+    return host.handle(command, allowNext, capture(host, command), persist, publish, connections)
 }
 
 export function execute(
     worker: ActorWorker,
     command: Parameters<ActorWorker["execute"]>[0],
     allowNext: Arguments[1],
-    publish?: Arguments[3],
-    connections?: Arguments[4]
+    publish?: Arguments[4],
+    connections?: Arguments[5]
 ): Promise<ActorExecutorReply> {
-    return worker.execute(command, allowNext, capture(worker, command), publish, connections)
+    return worker.execute(command, allowNext, capture(worker, command), persist, publish, connections)
 }
 
 function capture(host: object, command: ActorExecutorCommand): () => Promise<number> {
@@ -35,4 +35,8 @@ function capture(host: object, command: ActorExecutorCommand): () => Promise<num
         if (!state) throw new Error("host has no registered SQLite database")
         return commit(state)
     }
+}
+
+async function persist(_commitId: number, txid: number): Promise<{ txid: number }> {
+    return { txid }
 }
