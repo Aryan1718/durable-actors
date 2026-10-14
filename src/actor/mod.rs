@@ -1,14 +1,14 @@
-pub use crate::litestream::storage::SqliteState;
+mod database;
 mod executor_connection;
 mod protocol;
 mod socket;
 
 pub use self::{
+    database::{ActorDatabase, DatabaseCall, DatabaseResult, SqlValue},
     executor_connection::{
         ActorExecutor, ActorInterleavedOutcome, ActorMethodEviction, ActorMethodInvocation,
         ActorMethodOutcome, ActorSocketConnection, ActorSocketEffect, ActorSocketEvent,
         ActorSocketInvocation, ActorSocketMessage, ActorSocketOutcome, ActorSocketTagMatch,
-        ActorState,
     },
     protocol::{ActorExecutionResult, ActorInvocation, ActorInvocationFailure, ActorKey},
 };

@@ -53,7 +53,7 @@ fn diagnostic_logs_use_finalized_request_timing() -> Result<()> {
     let metadata: Value =
         serde_json::from_str(&serde_json::to_string(&response.blocking_recv()?)?)?;
     let reply = json!({"metadata": metadata});
-    ActorRuntime::log_invocation(
+    log_invocation(
         &HostEndpoint {
             id: crate::host::HostId::new("host"),
             route: "http://host.invalid".into(),
@@ -254,7 +254,7 @@ impl HttpHost {
             Arc::new(crate::sockets::SocketRegistry::default()),
         ));
         let host = Arc::new(
-            ActorHost::new(
+            create_host(
                 HostEndpoint {
                     id: crate::host::HostId::new("host.v3.revision-1.host-1"),
                     route: "http://host.invalid".into(),

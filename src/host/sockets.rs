@@ -1,4 +1,4 @@
-use super::actor_runtime::ActorStorage;
+use super::actor_database::ActorStorage;
 use crate::{
     actor::{
         ActorKey, ActorSocketEffect, ActorSocketPublisher, ActorSocketSource, SocketLookup,

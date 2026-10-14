@@ -5,11 +5,11 @@ from threading import Event
 
 import pytest
 from fixtures.effects import Effects
-from fixtures.sqlite import ActorRuntime, HostStorage, seed
+from fixtures.host_database import HostDatabase
+from fixtures.runtime import ActorRuntime
 from pydantic import BaseModel
 
 from durable_actors import Actor, AsyncActor, ephemeral, interleave, persisted
-from durable_actors.runtime import ActorRuntime as Runtime
 
 
 class Value(BaseModel):
@@ -58,7 +58,6 @@ async def test_socket_handlers_load_connections_only_on_demand():
                 "type": "websocket_event",
                 "request_id": "lookup",
                 "actor": {**ACTOR, "actor_name": "Room"},
-                "sqlite": seed(),
                 "connections": effects.connections[:1],
                 "event": {
                     "type": "message",
@@ -79,16 +78,15 @@ def command(method="increment", args=None, **extra):
         "actor": ACTOR,
         "method": method,
         "args": args or [],
-        "sqlite": seed(),
         **extra,
     }
 
 
 async def test_hydrates_validates_and_snapshots_typed_state():
-    runtime = ActorRuntime(Counter, Effects())
-    reply = await runtime.handle(command(args=[2], sqlite=seed({"value": {"count": 3}})))
+    runtime = ActorRuntime(Counter, Effects(), HostDatabase.seeded({"value": {"count": 3}}))
+    reply = await runtime.handle(command(args=[2]))
     assert reply["result"] == {"count": 5}
-    assert runtime.database.fields() == {"value": {"count": 5}}
+    assert runtime.host.fields() == {"value": {"count": 5}}
     assert (await runtime.handle(command()))["result"] == {"count": 6}
 
 
@@ -109,14 +107,6 @@ async def test_replaced_and_evicted_instances_are_released():
     await runtime.handle({"type": "evict", "actor": ACTOR})
     gc.collect()
     assert [instance() for instance in instances] == [None, None, None]
-
-
-async def test_residency_and_eviction_require_explicit_hydration():
-    runtime = ActorRuntime(Counter, Effects())
-    assert (await runtime.handle(command(resident_only=True)))["type"] == "state_required"
-    await runtime.handle(command())
-    assert (await runtime.handle({"type": "evict", "actor": ACTOR}))["type"] == "evicted"
-    assert (await runtime.handle(command(resident_only=True)))["type"] == "state_required"
 
 
 async def test_argument_validation_precedes_actor_execution():
@@ -160,22 +150,17 @@ async def test_reentrant_failure_does_not_erase_overlapping_success():
         await asyncio.gather(pending, return_exceptions=True)
 
 
-async def test_completion_waits_for_an_interleaved_sql_statement_off_the_event_loop():
-    entered, persisting = asyncio.Event(), asyncio.Event()
-    release = Event()
-    loop = asyncio.get_running_loop()
+async def test_a_pending_sql_statement_does_not_block_other_completions():
+    entered, persisting, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
 
-    class ContendedStorage(HostStorage):
-        def exec(self, sql, *bindings):
-            with self.lock:
-                loop.call_soon_threadsafe(entered.set)
-                if not release.wait(3):
-                    raise TimeoutError("the event loop stalled behind the database lock")
-                return super().exec(sql, *bindings)
-
-        def persist_fields(self, fields):
-            loop.call_soon_threadsafe(persisting.set)
-            super().persist_fields(fields)
+    class ContendedDatabase(HostDatabase):
+        async def call(self, call):
+            if call["op"] == "exec":
+                entered.set()
+                await release.wait()
+            if call["op"] == "replace_fields":
+                persisting.set()
+            return await super().call(call)
 
     class Ledger(Actor):
         count: int = persisted(0)
@@ -188,7 +173,7 @@ async def test_completion_waits_for_an_interleaved_sql_statement_off_the_event_l
             self.count += 1
             return self.count
 
-    runtime = Runtime(Ledger, Effects(), ContendedStorage())
+    runtime = ActorRuntime(Ledger, Effects(), ContendedDatabase())
     actor = {**ACTOR, "actor_name": "Ledger"}
     tasks = [asyncio.create_task(runtime.handle(command("record", actor=actor)))]
     try:
@@ -223,7 +208,6 @@ async def test_socket_messages_are_typed_and_emit_persisted_changes():
             "type": "websocket_event",
             "request_id": "s1",
             "actor": {**ACTOR, "actor_name": "Room"},
-            "sqlite": seed(),
             "connections": [{"id": "s1", "metadata": {"count": 2}, "tags": []}],
             "event": {
                 "type": "message",
@@ -282,9 +266,7 @@ async def test_sync_handlers_keep_order_and_drain_before_eviction(evict):
         if evict:
             assert [reply["code"] for reply in results[:2]] == ["actor_evicted"] * 2
             assert results[2] == {"type": "evicted"}
-            assert (await runtime.handle(command(actor=actor, sqlite=seed({"count": 10}))))[
-                "result"
-            ] == 11
+            assert (await runtime.handle(command(actor=actor)))["result"] == 1
         else:
             assert [reply["result"] for reply in results] == [1, 2]
     finally:
@@ -404,8 +386,8 @@ async def test_eviction_drains_all_sync_reentrant_handlers_before_rehydrating():
         assert [reply["code"] for reply in replies[:2]] == ["actor_evicted"] * 2
         assert replies[2] == {"type": "evicted"}
         assert effects.published == []
-        reply = await runtime.handle(command(actor=actor, sqlite=seed({"count": 10})))
-        assert reply["result"] == 11
+        reply = await runtime.handle(command(actor=actor))
+        assert reply["result"] == 1
         assert reply["sequence"] == 1
     finally:
         for release in releases:
@@ -413,9 +395,7 @@ async def test_eviction_drains_all_sync_reentrant_handlers_before_rehydrating():
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
-async def test_sql_commits_with_fields_and_rolls_back_when_the_call_fails(tmp_path):
-    from durable_actors.sqlite import SqliteStorage
-
+async def test_sql_commits_with_fields_and_rolls_back_when_the_call_fails():
     captured: list[object] = []
 
     class Account(Actor):
@@ -439,18 +419,8 @@ async def test_sql_commits_with_fields_and_rolls_back_when_the_call_fails(tmp_pa
             captured.append(self.db)
             return self.db.exec("SELECT amount FROM ledger ORDER BY rowid")
 
-    path = tmp_path / "actor.sqlite"
-    path.touch()
-    commits = 1
-
-    async def sync() -> int:
-        nonlocal commits
-        commits += 1
-        return commits
-
-    runtime = Runtime(Account, Effects(), SqliteStorage(sync))
+    runtime = ActorRuntime(Account, Effects())
     actor = {**ACTOR, "actor_name": "Account"}
-    state = {"path": str(path), "txid": 1}
 
     def invoke(method: str, args: list[int] | None = None):
         return {
@@ -459,7 +429,6 @@ async def test_sql_commits_with_fields_and_rolls_back_when_the_call_fails(tmp_pa
             "actor": actor,
             "method": method,
             "args": args or [],
-            "sqlite": state,
         }
 
     assert (await runtime.handle(invoke("deposit", [5])))["result"] == 5
@@ -491,9 +460,9 @@ async def test_async_actor_serializes_across_awaits_and_persists_results():
             self.count = before + amount
             return self.count
 
-    runtime = ActorRuntime(Counter, Effects())
-    reply = await runtime.handle(command(args=[2], sqlite=seed({"count": 3})))
+    runtime = ActorRuntime(Counter, Effects(), HostDatabase.seeded({"count": 3}))
+    reply = await runtime.handle(command(args=[2]))
     assert reply["result"] == 5
     replies = await asyncio.gather(*(runtime.handle(command()) for _ in range(3)))
     assert [reply["result"] for reply in replies] == [6, 7, 8]
-    assert runtime.database.fields() == {"count": 8}
+    assert runtime.host.fields() == {"count": 8}

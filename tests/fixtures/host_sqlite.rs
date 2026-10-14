@@ -1,9 +1,9 @@
 use crate::{
-    actor::ActorState,
-    litestream::{Litestream, Replicator, storage::read_fields},
+    actor::{ActorDatabase, DatabaseCall, DatabaseResult, SqlValue},
+    litestream::{Litestream, Replicator},
 };
 use anyhow::{Context, Result};
-use serde_json::Value;
+use serde_json::{Value, value::RawValue};
 use std::sync::{Arc, LazyLock};
 
 static CAPTURE: LazyLock<Arc<Litestream>> = LazyLock::new(|| Arc::new(Litestream::default()));
@@ -12,33 +12,46 @@ pub async fn replication() -> Arc<dyn Replicator> {
     CAPTURE.clone()
 }
 
-pub fn fields(state: Option<&ActorState>) -> Result<Value> {
-    let state = state.context("executor hydration")?;
-    let database = rusqlite::Connection::open(state.sqlite.path.as_ref().context("SQLite path")?)?;
-    read_fields(&database)
-}
-
-pub async fn write_fields(state: Option<&ActorState>, fields: Value) -> Result<ActorState> {
-    let state = state.context("executor hydration")?;
-    commit_fields(state, fields)?;
-    sync(state).await
-}
-
-fn commit_fields(state: &ActorState, fields: Value) -> Result<()> {
-    let mut database =
-        rusqlite::Connection::open(state.sqlite.path.as_ref().context("SQLite path")?)?;
-    database.execute_batch("PRAGMA wal_autocheckpoint=0")?;
-    let transaction = database.transaction()?;
-    for (name, value) in fields.as_object().context("object fields")? {
-        transaction.execute("INSERT INTO __terse_fields VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value=excluded.value WHERE value<>excluded.value", [name.as_str(), &value.to_string()])?;
+pub async fn fields(database: &dyn ActorDatabase) -> Result<Value> {
+    match database.call(DatabaseCall::Fields).await? {
+        DatabaseResult::Fields { fields } => Ok(serde_json::to_value(fields)?),
+        other => anyhow::bail!("unexpected fields result {other:?}"),
     }
-    transaction.commit()?;
+}
+
+pub async fn write_fields(database: &dyn ActorDatabase, fields: Value) -> Result<()> {
+    persist_fields(database, fields, false).await?;
+    database.call(DatabaseCall::Commit).await?;
     Ok(())
 }
 
-pub async fn sync(state: &ActorState) -> Result<ActorState> {
-    let mut state = state.clone();
-    let path = state.sqlite.path.as_ref().context("SQLite path")?;
-    state.sqlite.txid = replication().await.sync(std::path::Path::new(path)).await?;
-    Ok(state)
+pub async fn persist_fields(
+    database: &dyn ActorDatabase,
+    fields: Value,
+    immediate: bool,
+) -> Result<()> {
+    for (name, value) in fields.as_object().context("object fields")? {
+        database
+            .call(DatabaseCall::PersistField {
+                name: name.clone(),
+                value: RawValue::from_string(value.to_string())?,
+                immediate,
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn exec(database: &dyn ActorDatabase, sql: &str) -> Result<Vec<Vec<SqlValue>>> {
+    match database
+        .call(DatabaseCall::Exec {
+            sql: sql.into(),
+            bindings: vec![],
+            immediate: false,
+        })
+        .await?
+    {
+        DatabaseResult::Rows { rows, .. } => Ok(rows),
+        other => anyhow::bail!("unexpected exec result {other:?}"),
+    }
 }

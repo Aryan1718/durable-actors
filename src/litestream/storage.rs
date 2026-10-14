@@ -9,26 +9,6 @@ use std::{
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SqliteState {
-    pub txid: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-}
-
-impl PartialEq for SqliteState {
-    fn eq(&self, other: &Self) -> bool {
-        self.txid == other.txid
-    }
-}
-
-impl SqliteState {
-    #[cfg(test)]
-    pub(crate) fn position(txid: u64) -> Self {
-        Self { txid, path: None }
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LtxFile {
     pub level: u8,
     pub first: u64,
@@ -97,21 +77,14 @@ impl SqliteCapture {
         self.txid
     }
 
-    pub(crate) fn state(&self) -> SqliteState {
-        SqliteState {
-            txid: self.txid,
-            path: Some(self.path().to_string_lossy().into_owned()),
-        }
-    }
-
-    pub(crate) async fn capture(&mut self, state: &SqliteState) -> Result<Vec<LtxFile>> {
-        ensure!(state.txid >= self.txid, "SQLite transaction went backwards");
-        let files = collect_ltx_files(&self.path(), self.published, state.txid).await?;
+    pub(crate) async fn capture(&mut self, txid: u64) -> Result<Vec<LtxFile>> {
+        ensure!(txid >= self.txid, "SQLite transaction went backwards");
+        let files = collect_ltx_files(&self.path(), self.published, txid).await?;
         if let Some(snapshot) = files.iter().find(|file| file.level == 9) {
             self.prune(snapshot.last).await?;
         }
-        self.txid = state.txid;
-        self.published = state.txid;
+        self.txid = txid;
+        self.published = txid;
         Ok(files)
     }
 

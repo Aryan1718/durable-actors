@@ -4,7 +4,6 @@ import { test } from "node:test"
 import { Actor, type ActorClass, registerActorClass } from "../../src/actor/actor.js"
 import { Persistence } from "../../src/actor/schema.js"
 import { ActorRuntime } from "../fixtures/actor-runtime.js"
-import { seed } from "../fixtures/litestream.js"
 
 function deferred() {
     let resolve!: () => void
@@ -21,15 +20,13 @@ async function setup(actorClass: ActorClass, interleaveMethods: string[], allowN
         ...{ interleaveMethods }
     })
     const runtime = new ActorRuntime(definition, allowNextInvocation)
-    const sqlite = await seed()
     const invoke = (method: string) =>
         runtime.handle({
             type: "invoke",
             request_id: method,
             actor: { project_id: "test", actor_name: actorClass.name, actor_id: "one" },
             method,
-            args: [],
-            sqlite
+            args: []
         })
     return { runtime, invoke }
 }
@@ -251,8 +248,7 @@ test("emittable changes compare consecutive completed snapshots, including a val
         type: "invoke" as const,
         request_id: "hold",
         actor: { project_id: "test", actor_name: "ReentrantEmission", actor_id: "one" },
-        args: [],
-        sqlite: await seed()
+        args: []
     }
     const holding = runtime.handle({ ...command, method: "hold" })
     await runtime.handle({ ...command, method: "increment" })

@@ -1,4 +1,3 @@
-import { Database } from "bun:sqlite"
 import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { once } from "node:events"
@@ -32,10 +31,6 @@ try {
         export const version = 1;
     `
     )
-    const databasePath = path.join(directory, "actor.sqlite")
-    const database = new Database(databasePath)
-    database.exec("PRAGMA journal_mode=WAL; CREATE TABLE __terse_fields(name TEXT PRIMARY KEY, value TEXT NOT NULL CHECK(json_valid(value)))")
-    database.close()
     const socketPath = path.join(directory, "executor.sock")
     server.listen(socketPath)
     await once(server, "listening")
@@ -53,23 +48,43 @@ try {
     ])
     const lines = createInterface({ input: socket })[Symbol.asyncIterator]()
     const send = message => socket.write(JSON.stringify(message) + "\n")
-    let txid = 1
+    let committed = {}
+    let pending = {}
+    const call = request => {
+        switch (request.op) {
+            case "fields":
+                return { type: "fields", fields: pending }
+            case "initialize_fields":
+                pending = { ...request.fields, ...pending }
+                break
+            case "persist_field":
+                pending = { ...pending, [request.name]: request.value }
+                if (request.immediate) committed = pending
+                break
+            case "commit":
+                committed = pending
+                break
+            case "rollback":
+                pending = committed
+                break
+            default:
+                throw new Error(`unexpected database call ${request.op}`)
+        }
+        return { type: "done" }
+    }
     const receive = async () => {
         for (;;) {
             const { value, done } = await lines.next()
             assert.equal(done, false, "executor closed its connection")
             const message = JSON.parse(value)
-            if (message.type !== "persist_sqlite") return message
-            assert.ok(["atomic_snapshot", "durable_write"].includes(message.mode))
-            if (message.mode === "atomic_snapshot") txid++
-            else assert.equal(message.txid, txid)
-            send({ type: "sqlite_persisted", message_id: message.message_id, commit_id: message.commit_id, txid })
+            if (message.type !== "database_call") return message
+            send({ type: "database_result", message_id: message.message_id, result: call(message.call) })
         }
     }
-    assert.deepEqual(await receive(), { type: "warm", protocol: 26 })
+    assert.deepEqual(await receive(), { type: "warm", protocol: 27 })
     send({ type: "load", entrypoint, environment: {} })
-    assert.deepEqual(await receive(), { type: "attach", protocol: 26, actor_names: ["Counter"] })
-    send({ type: "attached", protocol: 26 })
+    assert.deepEqual(await receive(), { type: "attach", protocol: 27, actor_names: ["Counter"] })
+    send({ type: "attached", protocol: 27 })
     const actor = { project_id: "default", actor_name: "Counter", actor_id: "one" }
     for (let expected = 1; expected <= 2; expected++) {
         send({
@@ -80,8 +95,7 @@ try {
                 request_id: `request-${expected}`,
                 actor,
                 method: "add",
-                args: [],
-                sqlite: { txid, path: databasePath }
+                args: []
             }
         })
         const result = await receive()
@@ -92,7 +106,7 @@ try {
     }
     child.kill()
     await exited
-    console.log("TypeScript image: generic warmup, actor invocation, and SQLite recovery passed")
+    console.log("TypeScript image: generic warmup, actor invocation, and database recovery passed")
 } finally {
     clearTimeout(timeout)
     child?.kill()

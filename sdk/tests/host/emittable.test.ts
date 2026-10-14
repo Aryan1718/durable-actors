@@ -5,8 +5,8 @@ import { Actor, registerActorClass } from "../../src/actor/actor.js"
 import { Persisted } from "../../src/actor/decorators.js"
 import { Persistence } from "../../src/actor/schema.js"
 import type { InvokeCommand } from "../../src/host/protocol.js"
-import { ActorRuntime } from "../fixtures/actor-runtime.js"
-import { seed, fields as storedFields } from "../fixtures/litestream.js"
+import { ActorRuntime, DatabaseProxy } from "../fixtures/actor-runtime.js"
+import { HostDatabase } from "../fixtures/host-database.js"
 
 class ObservableRoom extends Actor {
     @Persisted messages: string[] = []
@@ -45,20 +45,19 @@ const definition = registerActorClass(ObservableRoom, { actorName: "ObservableRo
 const actor = { project_id: "default", actor_name: "ObservableRoom", actor_id: "room" }
 
 test("initial snapshots expose only emittable fields while still saving all persisted state", async () => {
-    const runtime = new ActorRuntime(definition, () => {})
-    const sqlite = await seed()
+    const host = new HostDatabase()
+    const runtime = new ActorRuntime(definition, () => {}, undefined, undefined, new DatabaseProxy(host.call))
     const connection = { id: "connection", metadata: {}, tags: [] }
     const reply = await runtime.handle({
         type: "websocket_event",
         request_id: "connect",
         actor,
-        sqlite,
         connections: [connection],
         event: { type: "connect", connection }
     })
     assert.equal(reply.type, "websocket_handled")
     if (reply.type !== "websocket_handled") return
-    assert.deepEqual(storedFields(sqlite), {
+    assert.deepEqual(host.fields(), {
         messages: [],
         title: "Room",
         secret: "secret",
@@ -75,13 +74,15 @@ test("initial snapshots expose only emittable fields while still saving all pers
 })
 
 test("coalesces assignments and removals into one final update without live publication", async () => {
+    const host = new HostDatabase()
     const runtime = new ActorRuntime(
         definition,
         () => {},
-        async () => assert.fail("automatic changes must wait for commit")
+        async () => assert.fail("automatic changes must wait for commit"),
+        undefined,
+        new DatabaseProxy(host.call)
     )
-    const command = await invocation("change")
-    const reply = await runtime.handle(command)
+    const reply = await runtime.handle(invocation("change"))
     assert.equal(reply.type, "invoked")
     if (reply.type !== "invoked") return
     assert.deepEqual(reply.effects, [
@@ -91,7 +92,7 @@ test("coalesces assignments and removals into one final update without live publ
             removed: ["status"]
         }
     ])
-    assert.deepEqual(storedFields(command.sqlite!), {
+    assert.deepEqual(host.fields(), {
         messages: ["first", "second"],
         title: "Renamed",
         secret: "changed",
@@ -105,14 +106,14 @@ test("does not emit intermediate values, unchanged fields, or failed operations"
         () => {},
         async () => assert.fail("unexpected live output")
     )
-    const unchanged = await runtime.handle(await invocation("unchanged"))
+    const unchanged = await runtime.handle(invocation("unchanged"))
     assert.equal(unchanged.type, "invoked")
     if (unchanged.type === "invoked") assert.equal(unchanged.effects, undefined)
-    const failed = await runtime.handle(await invocation("fail"))
+    const failed = await runtime.handle(invocation("fail"))
     assert.equal(failed.type, "failed")
     assert.equal("effects" in failed, false)
 })
 
-async function invocation(method: string): Promise<InvokeCommand> {
-    return { type: "invoke", request_id: method, actor, sqlite: await seed(null), method, args: [] }
+function invocation(method: string): InvokeCommand {
+    return { type: "invoke", request_id: method, actor, method, args: [] }
 }

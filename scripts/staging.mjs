@@ -124,6 +124,9 @@ export class Staging {
     async build() {
         console.log(`Building this checkout's runtime and ${this.example} actor bundle…`)
         await this.command("bun", ["run", "--bun", "--cwd", "sdk", "build"], { stream: true })
+        const project = JSON.parse(await readFile(path.join(this.examplePath, "package.json"), "utf8"))
+        if (project.dependencies?.["@durable-actors/pi-durable"])
+            await this.command("bun", ["run", "--bun", "--cwd", "packages/pi-durable", "build"], { stream: true })
         await this.command("cargo", ["build", "--locked", "--bin", "durable-actors"], { stream: true })
         this.env.DURABLE_ACTORS_BINARY = path.join(this.root, "target/debug/durable-actors")
         const contract = JSON.parse(await this.command(process.execPath, [path.join(this.root, "sdk/dist/compiler/deployment-build.js"), this.examplePath, "src/actors.ts", this.work]))
@@ -378,12 +381,17 @@ function runCommand(command, args, { cwd, env, input, stream = false }) {
     })
 }
 
+export function stagingExamplePath(root, example) {
+    if (!example || !example.split("/").every(segment => /^[a-z0-9][a-z0-9-]{0,54}$/.test(segment))) throw new Error("Usage: node scripts/staging.mjs <example-folder>")
+    return path.join(root, "examples", example)
+}
+
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
     try {
         const root = fileURLToPath(new URL("../", import.meta.url))
         const [example, ...extra] = process.argv.slice(2)
-        if (!example || !/^[a-z0-9][a-z0-9-]{0,54}$/.test(example) || extra.length) throw new Error("Usage: node scripts/staging.mjs <example-folder>")
-        const examplePath = path.join(root, "examples", example)
+        if (extra.length) throw new Error("Usage: node scripts/staging.mjs <example-folder>")
+        const examplePath = stagingExamplePath(root, example)
         const env = stagingEnvironment(await readFile(path.join(root, ".env.staging"), "utf8"))
         const launcher = new Staging(root, env, examplePath)
         await launcher.start()

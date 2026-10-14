@@ -3,23 +3,24 @@ import { isDeepStrictEqual } from "node:util"
 import type { ActorDefinition, AnyActor } from "../actor/actor.js"
 import { Actor, bindActorIdentity } from "../actor/actor.js"
 import { constructWithActorDatabase, runWithActorDatabase } from "../actor/database.js"
-import { actorKey } from "../actor/identity.js"
 import type { ActorIdentity } from "../actor/identity.js"
-import { Persistence } from "../actor/schema.js"
+import { actorKey } from "../actor/identity.js"
+import { ActorResource } from "../actor/resource.js"
 import type { ActorSchema } from "../actor/schema.js"
+import { Persistence } from "../actor/schema.js"
 import type { ActorSocketScope } from "../actor/socket.js"
 import { decodeSocketMessage, runWithActorSockets } from "../actor/socket.js"
 import type { SocketEffect } from "../actor/socketProtocol.js"
 import type { ActorSchemas } from "../actor/socketValidation.js"
 import { ActorDefinitionError, ActorProtocolError, ActorSerializationError, errorMessage } from "../errors.js"
-import { cloneJson, cloneJsonObject, isJsonObject } from "../json.js"
 import type { JsonObject, JsonValue } from "../json.js"
+import { cloneJson, cloneJsonObject, isJsonObject } from "../json.js"
 
+import type { DatabaseProxy } from "./database.js"
+import { DatabaseCommitError } from "./database.js"
 import { bindPersistedFields, isPersistedField } from "./persisted-fields.js"
-import { failedReply } from "./protocol.js"
 import type { ActorExecutorReply, HydrateCommand, InvokeCommand, WebSocketEventCommand } from "./protocol.js"
-import { SqliteCaptureError } from "./sqlite.js"
-import type { ActorDatabaseStorage } from "./sqlite.js"
+import { failedReply } from "./protocol.js"
 import type { SocketPublisher, SocketSource } from "./types.js"
 
 class ActorRuntime {
@@ -35,7 +36,7 @@ class ActorRuntime {
     constructor(
         private readonly definition: ActorDefinition,
         private readonly allowNextInvocation: () => void,
-        private readonly database: ActorDatabaseStorage,
+        private readonly database: DatabaseProxy,
         private readonly publish?: SocketPublisher,
         private readonly connections: SocketSource = async () => {
             throw new Error("actor connection lookup is unavailable")
@@ -53,8 +54,22 @@ class ActorRuntime {
         return operation
     }
 
-    close(): void {
+    async close(): Promise<void> {
+        await this.shutdown()
         this.reset()
+    }
+
+    async shutdown(): Promise<void> {
+        if (this.instance === undefined) return
+
+        const fields = this.definition.state.fields.filter(field => field.resource).reverse()
+
+        await runWithActorDatabase(this.instance, "immediate", async () => {
+            for (const field of fields) {
+                const resource = Reflect.get(this.instance!, field.name) as ActorResource
+                await resource.onGracefulShutdown({ db: this.database })
+            }
+        })
     }
 
     private async execute(
@@ -63,7 +78,7 @@ class ActorRuntime {
         if (this.fatal !== undefined) return this.fatal
         try {
             if (command.type === "hydrate") {
-                const prepared = this.prepare(command)
+                const prepared = await this.prepare(command)
                 return prepared instanceof Actor ? { type: "hydrated" } : prepared
             }
             return await (command.type === "invoke" ? this.invoke(command) : this.handleSocketEvent(command))
@@ -84,7 +99,7 @@ class ActorRuntime {
     }
 
     private async invoke(command: InvokeCommand): Promise<ActorExecutorReply> {
-        const prepared = this.prepare(command)
+        const prepared = await this.prepare(command)
         if (!(prepared instanceof Actor)) return prepared
         const instance = prepared
         if (!this.definition.methods.has(command.method)) {
@@ -121,26 +136,26 @@ class ActorRuntime {
                 validateActorState(instance, this.definition.state)
                 const state = this.database.fields()
                 const effects = [...operation.effects, ...this.stateUpdates(before, state)]
+                this.database.commit()
                 return {
                     type: "invoked",
                     result,
-                    sqlite: await this.database.snapshot(),
                     ...this.completionOrder(),
                     ...(effects.length === 0 ? {} : { effects })
                 }
             })
         } catch (error) {
-            if (error instanceof SqliteCaptureError) {
+            if (error instanceof DatabaseCommitError) {
                 this.fatal = failedReply("actor_database_failed", errorMessage(error))
                 return this.fatal
             }
-            if (!this.interleaved) this.restoreInstance(command.actor)
+            if (!this.interleaved) await this.restoreInstance(command.actor)
             return failedReply("actor_method_failed", errorMessage(error))
         }
     }
 
     private async handleSocketEvent(command: WebSocketEventCommand): Promise<ActorExecutorReply> {
-        const prepared = this.prepare(command)
+        const prepared = await this.prepare(command)
         if (!(prepared instanceof Actor)) return prepared
         const instance = prepared
         const methodName = lifecycleMethod(command)
@@ -179,19 +194,19 @@ class ActorRuntime {
                         command.event.type === "connect" ? command.event.connection.id : undefined
                     )
                 ]
+                this.database.commit()
                 return {
                     type: "websocket_handled",
-                    sqlite: await this.database.snapshot(),
                     ...this.completionOrder(),
                     effects: socketEffects(command, state, effects, this.definition.state)
                 }
             })
         } catch (error) {
-            if (error instanceof SqliteCaptureError) {
+            if (error instanceof DatabaseCommitError) {
                 this.fatal = failedReply("actor_database_failed", errorMessage(error))
                 return this.fatal
             }
-            if (!this.interleaved) this.restoreInstance(command.actor)
+            if (!this.interleaved) await this.restoreInstance(command.actor)
             return failedReply("actor_socket_failed", errorMessage(error))
         }
     }
@@ -200,7 +215,9 @@ class ActorRuntime {
         if (this.definition.state.interleaveMethods?.includes(method)) this.allowNextInvocation()
     }
 
-    private prepare(command: InvokeCommand | WebSocketEventCommand | HydrateCommand): AnyActor | ActorExecutorReply {
+    private async prepare(
+        command: InvokeCommand | WebSocketEventCommand | HydrateCommand
+    ): Promise<AnyActor | ActorExecutorReply> {
         const identity = command.actor
         if (identity.actor_name !== this.definition.actorName) {
             return failedReply(
@@ -215,9 +232,7 @@ class ActorRuntime {
             )
         }
         if (this.instance !== undefined) return this.instance
-        if (command.resident_only) return { type: "state_required" }
-        this.database.restore(command.sqlite)
-        return this.createInstance(identity, this.database.fields())
+        return await this.createInstance(identity, this.database.fields())
     }
 
     private complete(operation: () => Promise<ActorExecutorReply>): Promise<ActorExecutorReply> {
@@ -226,7 +241,7 @@ class ActorRuntime {
             try {
                 return await operation()
             } catch (error) {
-                if (error instanceof SqliteCaptureError)
+                if (error instanceof DatabaseCommitError)
                     this.fatal = failedReply("actor_database_failed", errorMessage(error))
                 throw error
             }
@@ -235,9 +250,9 @@ class ActorRuntime {
         return completed
     }
 
-    private restoreInstance(identity: ActorIdentity): void {
+    private async restoreInstance(identity: ActorIdentity): Promise<void> {
         this.database.rollback()
-        this.createInstance(identity, this.database.fields())
+        await this.createInstance(identity, this.database.fields())
     }
 
     private stateUpdates(before: JsonObject, state: JsonObject, except?: string): SocketEffect[] {
@@ -247,12 +262,11 @@ class ActorRuntime {
     }
 
     private reset(): void {
-        this.database.close()
         this.instance = undefined
         this.identity = undefined
     }
 
-    private createInstance(identity: ActorIdentity, state: JsonValue | null): AnyActor {
+    private async createInstance(identity: ActorIdentity, state: JsonValue | null): Promise<AnyActor> {
         const instance = constructWithActorDatabase(
             this.database,
             () => Reflect.construct(this.definition.actorClass, []) as AnyActor
@@ -265,6 +279,14 @@ class ActorRuntime {
         if (this.interleaved) this.lastCompletedState = this.database.fields()
         this.identity = { ...identity }
         this.instance = instance
+
+        const resources = this.definition.state.fields.filter(field => field.resource)
+        await runWithActorDatabase(instance, "immediate", async () => {
+            for (const field of resources) {
+                const resource = Reflect.get(instance, field.name) as ActorResource
+                await resource.onResume({ db: this.database })
+            }
+        })
         return instance
     }
 }

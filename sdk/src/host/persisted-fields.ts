@@ -3,11 +3,11 @@ import { Persistence } from "../actor/schema.js"
 import type { ActorSchema } from "../actor/schema.js"
 import { cloneJsonObject } from "../json.js"
 
-import type { ActorDatabaseStorage } from "./sqlite.js"
+import type { DatabaseProxy } from "./database.js"
 
 const bindings = new WeakMap<object, Map<string, PropertyDescriptor>>()
 
-function bindPersistedFields(instance: object, schema: ActorSchema, database: ActorDatabaseStorage): void {
+function bindPersistedFields(instance: object, schema: ActorSchema, database: DatabaseProxy): void {
     const fields = new Map<string, PropertyDescriptor>()
     for (const field of schema.fields) {
         if (field.persistence !== Persistence.Persisted || !Object.hasOwn(instance, field.name)) continue

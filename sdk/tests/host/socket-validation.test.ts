@@ -8,7 +8,6 @@ import { Persistence } from "../../src/actor/schema.js"
 import type { SocketConnection } from "../../src/actor/socketProtocol.js"
 import type { WebSocketEventCommand } from "../../src/host/protocol.js"
 import { ActorRuntime } from "../fixtures/actor-runtime.js"
-import { seed } from "../fixtures/litestream.js"
 import { assertReply } from "../fixtures/reply.js"
 
 const metadata = z.object({ userId: z.string().min(1) })
@@ -117,7 +116,6 @@ test("deployment contracts do not impose runtime AJV validation", async () => {
             type: "invoke",
             request_id: "invalid",
             actor: identity,
-            sqlite: await seed(null),
             method: method!,
             args: []
         })
@@ -189,8 +187,7 @@ test("invalid actor output, metadata, and tags cannot reach the gateway", async 
             request_id: method,
             actor,
             method,
-            args: [],
-            sqlite: await seed(null)
+            args: []
         })
         assert.equal(reply.type, "failed")
     }
@@ -209,8 +206,7 @@ test("schema-validated tags persist and select broadcast recipients", async () =
         request_id: "join",
         actor,
         method: "joinMembers",
-        args: [],
-        sqlite: await seed(null)
+        args: []
     })
     assert.equal(reply.type, "invoked")
     if (reply.type !== "invoked") return
@@ -248,5 +244,5 @@ async function event(
     value: WebSocketEventCommand["event"],
     connections = [connection]
 ): Promise<WebSocketEventCommand> {
-    return { type: "websocket_event", request_id: "event", actor, event: value, connections, sqlite: await seed(null) }
+    return { type: "websocket_event", request_id: "event", actor, event: value, connections }
 }

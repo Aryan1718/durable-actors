@@ -2,6 +2,7 @@ from dataclasses import MISSING, field
 from typing import Annotated, ClassVar, Literal
 
 import pytest
+from fixtures.typecheck import checker_command
 from pydantic import BaseModel
 
 from durable_actors import Actor, emitted, ephemeral, interleave, persisted
@@ -256,7 +257,6 @@ def test_emitted_fields_must_be_public():
 
 def test_field_helpers_preserve_static_value_types(tmp_path):
     import subprocess
-    import sys
     from pathlib import Path
 
     source = Path(__file__).with_name("fixtures").joinpath("field_types.py").read_text()
@@ -278,7 +278,7 @@ def misuse(actor: TypedActor) -> None:
     for checker, flags in (("mypy", ["--strict"]), ("pyright", [])):
         for target, expected_errors in ((actors, 0), (invalid, 6)):
             result = subprocess.run(
-                [sys.executable, "-m", checker, *flags, str(target)],
+                checker_command(checker, target, *flags),
                 cwd=tmp_path,
                 capture_output=True,
                 text=True,

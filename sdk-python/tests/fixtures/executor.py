@@ -6,6 +6,8 @@ import tempfile
 from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 
+from fixtures.host_database import HostDatabase
+
 from durable_actors.build import build_actor
 
 
@@ -18,18 +20,36 @@ def build(tmp_path, module, source):
 
 
 class ExecutorHost:
-    def __init__(self, reader, writer):
+    """Plays the Rust host, answering database calls from its own SQLite database."""
+
+    def __init__(self, reader, writer, database):
         self.reader = reader
         self.writer = writer
+        self.database = database
 
     def send(self, message):
         self.writer.write((json.dumps(message) + "\n").encode())
 
     async def receive(self):
+        while True:
+            message = await self.read()
+            if message["type"] != "database_call":
+                return message
+            await self.answer(message)
+
+    async def read(self):
         line = await self.reader.readline()
         if not line:
             raise EOFError("executor disconnected")
         return json.loads(line)
+
+    async def answer(self, message):
+        reply = {"type": "database_result", "message_id": message["message_id"]}
+        try:
+            reply["result"] = await self.database.call(message["call"])
+        except Exception as error:
+            reply["error"] = str(error)
+        self.send(reply)
 
 
 @asynccontextmanager
@@ -37,7 +57,7 @@ async def warm_executor(entrypoint, environment):
     connected = asyncio.get_running_loop().create_future()
 
     async def accepted(reader, writer):
-        connected.set_result(ExecutorHost(reader, writer))
+        connected.set_result(ExecutorHost(reader, writer, HostDatabase()))
 
     with tempfile.TemporaryDirectory(dir="/tmp") as short:
         socket = str(Path(short) / "executor.sock")
@@ -54,10 +74,10 @@ async def warm_executor(entrypoint, environment):
         try:
             async with asyncio.timeout(10):
                 host = await connected
-                assert await host.receive() == {"type": "warm", "protocol": 26}
+                assert await host.receive() == {"type": "warm", "protocol": 27}
                 host.send({"type": "load", "entrypoint": entrypoint, "environment": environment})
                 assert (await host.receive())["type"] == "attach"
-                host.send({"type": "attached", "protocol": 26})
+                host.send({"type": "attached", "protocol": 27})
             yield host
         finally:
             if process.returncode is None:

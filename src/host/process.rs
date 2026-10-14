@@ -115,7 +115,6 @@ pub(super) async fn serve_assigned_host(
         sockets,
         credentials: _credentials,
         storage,
-        replication,
     } = prepared;
     let mut lease_lost = renewal.lease_lost();
     let mut activity = host.activity();
@@ -130,8 +129,7 @@ pub(super) async fn serve_assigned_host(
     .router();
     let initialized = async {
         let owner_epoch =
-            initialize_executor(&config, &executor_connection, &host, &sockets, replication)
-                .await?;
+            initialize_executor(&config, &executor_connection, &host, &sockets).await?;
         let ready = HostReadiness {
             host_id: config.host_id.clone(),
             session_id: config.session_id.clone(),
@@ -217,17 +215,9 @@ async fn initialize_executor(
     connection: &ActorExecutorConnection,
     host: &Arc<ActorHost>,
     sockets: &Arc<super::sockets::HostSockets>,
-    replication: Arc<dyn crate::litestream::Replicator>,
 ) -> Result<u64> {
     connection
-        .mark_ready(
-            Some(sockets.clone()),
-            Some(sockets.clone()),
-            Arc::new(super::persistence::SqlitePersistence::new(
-                replication,
-                host.clone(),
-            )),
-        )
+        .mark_ready(Some(sockets.clone()), Some(sockets.clone()))
         .await?;
     let owner_epoch = match &config.actor {
         Some(actor) => host.activate_actor(actor.clone()).await?.owner_epoch,
@@ -354,7 +344,6 @@ impl HostMetadataFile {
 }
 
 struct PreparedActorHost {
-    replication: Arc<dyn crate::litestream::Replicator>,
     storage: Arc<super::storage::HostStorage>,
     credentials: DropGuard,
     sockets: Arc<super::sockets::HostSockets>,
@@ -460,14 +449,14 @@ async fn prepare_actor_host(
         control_plane.clone(),
     ));
     let persistence = super::persistence::ActorPersistence::new(storage.clone());
+    let database =
+        super::HostDatabase::new(endpoint.clone(), storage.clone(), persistence, replication);
     let host = Arc::new(
         ActorHost::new(
             endpoint,
             executor_connection.executor(),
-            storage.clone(),
-            persistence.clone(),
+            database,
             sockets.clone(),
-            replication.clone(),
         )
         .with_traces(crate::request_traces::TraceSender::start(
             control_plane.clone(),
@@ -476,7 +465,6 @@ async fn prepare_actor_host(
     );
     timings.lease_registered_at_ms = Some(timings.elapsed_ms());
     Ok(PreparedActorHost {
-        replication,
         storage,
         credentials,
         sockets,

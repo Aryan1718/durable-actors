@@ -24,5 +24,5 @@ test("execution package runs actors and recovers SQLite state without the develo
         cwd: directory,
         timeout: 30000
     })
-    assert.match(stdout, /SQLite recovery passed/u)
+    assert.match(stdout, /database recovery passed/u)
 })

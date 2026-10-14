@@ -4,16 +4,22 @@ import importlib
 import inspect
 import json
 import subprocess
-import sys
 
 import httpx
-from fixtures.sqlite import seed
+import pytest
+from fixtures.typecheck import checker_command
 from test_authoring import Chat, Message
 from test_client import TARGET
 
 from durable_actors import AsyncActor, AsyncClient
 from durable_actors.codegen import generate_client
 from durable_actors.contract import public_contract
+
+
+@pytest.fixture
+def runner():
+    with asyncio.Runner() as runner:
+        yield runner
 
 
 class Transport:
@@ -57,7 +63,7 @@ def check(client: Client) -> None:
 """)
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, str(source)],
+            checker_command(checker, source),
             capture_output=True,
             text=True,
             cwd=tmp_path,
@@ -135,19 +141,19 @@ def test_generated_names_cannot_shadow_client_runtime(tmp_path, monkeypatch):
     assert module.actors.Connection.get("one", Calls()).call("value", 42, True) == "value"
 
 
-def test_generated_recursive_unions_dates_and_tuples(tmp_path, monkeypatch):
+def test_generated_recursive_unions_dates_and_tuples(tmp_path, monkeypatch, runner):
     from datetime import datetime, timezone
     from uuid import uuid4
 
     from fixtures.effects import Effects
-    from fixtures.sqlite import ActorRuntime
+    from fixtures.runtime import ActorRuntime
     from fixtures.types import Trees
 
     generate_client(public_contract([Trees]), tmp_path / "tree_client")
     monkeypatch.syspath_prepend(str(tmp_path))
     remote = importlib.import_module("tree_client")
     models = remote.actors.Trees
-    runtime = ActorRuntime(Trees, Effects())
+    runtime = ActorRuntime(Trees, Effects(), loop=runner.get_loop())
 
     class Calls:
         def broadcast(self, actor_name, actor_id, message):
@@ -164,7 +170,7 @@ def test_generated_recursive_unions_dates_and_tuples(tmp_path, monkeypatch):
             raise AssertionError("not used")
 
         def invoke(self, actor_name, actor_id, method, args):
-            reply = asyncio.run(
+            reply = runner.run(
                 runtime.handle(
                     {
                         "type": "invoke",
@@ -174,7 +180,6 @@ def test_generated_recursive_unions_dates_and_tuples(tmp_path, monkeypatch):
                             "actor_name": actor_name,
                             "actor_id": actor_id,
                         },
-                        "sqlite": seed(),
                         "method": method,
                         "args": args,
                     }
@@ -209,7 +214,7 @@ def check(client: Client, node: actors.Trees.NodeInput) -> None:
 """)
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, str(source)],
+            checker_command(checker, source),
             cwd=tmp_path,
             capture_output=True,
             text=True,
@@ -217,12 +222,12 @@ def check(client: Client, node: actors.Trees.NodeInput) -> None:
         assert result.returncode == 0, result.stdout + result.stderr
 
 
-def test_generated_models_preserve_omitted_typed_dict_fields(tmp_path, monkeypatch):
+def test_generated_models_preserve_omitted_typed_dict_fields(tmp_path, monkeypatch, runner):
     from fixtures.effects import Effects
-    from fixtures.sqlite import ActorRuntime
+    from fixtures.runtime import ActorRuntime
     from fixtures.types import OptionActor
 
-    runtime = ActorRuntime(OptionActor, Effects())
+    runtime = ActorRuntime(OptionActor, Effects(), loop=runner.get_loop())
     generate_client(public_contract([OptionActor]), tmp_path / "options_client")
     monkeypatch.syspath_prepend(str(tmp_path))
     remote = importlib.import_module("options_client")
@@ -243,7 +248,7 @@ def test_generated_models_preserve_omitted_typed_dict_fields(tmp_path, monkeypat
             raise AssertionError("not used")
 
         def invoke(self, actor_name, actor_id, method, args):
-            reply = asyncio.run(
+            reply = runner.run(
                 runtime.handle(
                     {
                         "type": "invoke",
@@ -252,7 +257,6 @@ def test_generated_models_preserve_omitted_typed_dict_fields(tmp_path, monkeypat
                             "actor_name": actor_name,
                             "actor_id": actor_id,
                         },
-                        "sqlite": seed(),
                         "method": method,
                         "args": args,
                     }
@@ -416,7 +420,7 @@ def check(transport: ActorTransport) -> None:
 """)
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, str(source)],
+            checker_command(checker, source),
             cwd=tmp_path,
             capture_output=True,
             text=True,
@@ -428,7 +432,7 @@ def check(transport: ActorTransport) -> None:
     )
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, str(source)],
+            checker_command(checker, source),
             cwd=tmp_path,
             capture_output=True,
             text=True,
@@ -476,7 +480,7 @@ def check() -> None:
 """)
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, builtins.str(source)],
+            checker_command(checker, builtins.str(source)),
             cwd=tmp_path,
             capture_output=True,
             text=True,
@@ -542,7 +546,7 @@ def check() -> None:
 """)
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, str(source)],
+            checker_command(checker, source),
             cwd=tmp_path,
             capture_output=True,
             text=True,

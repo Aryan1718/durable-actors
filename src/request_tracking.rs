@@ -53,10 +53,14 @@ impl RequestTracker {
     }
 
     pub(crate) fn mark(&mut self, stage: RequestStage) {
+        self.mark_at(stage, Instant::now());
+    }
+
+    pub(crate) fn mark_at(&mut self, stage: RequestStage, at: Instant) {
         if self.completion.is_some() {
             return;
         }
-        let elapsed = Some(self.elapsed_ms());
+        let elapsed = Some(at.saturating_duration_since(self.started).as_secs_f64() * 1000.0);
         match stage {
             RequestStage::StateCacheChecked => self.checkpoints.state_cache_checked_at_ms = elapsed,
             RequestStage::StateDownloaded => self.checkpoints.state_downloaded_at_ms = elapsed,

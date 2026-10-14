@@ -1,8 +1,8 @@
 use crate::request_tracking::HostState;
 use crate::{
     actor::{
-        ActorMethodInvocation, ActorMethodOutcome, ActorSocketEffect, ActorSocketOutcome,
-        ActorState,
+        ActorDatabase, ActorMethodInvocation, ActorMethodOutcome, ActorSocketEffect,
+        ActorSocketOutcome, DatabaseCall, SqlValue,
     },
     state_log::StateSnapshot,
     state_transport::StateWrite,
@@ -19,6 +19,7 @@ use serde_json::json;
 
 use super::*;
 use crate::actor::ActorKey;
+use crate::host::actor_database::ActorStorage;
 
 struct EmptySocketPublisher;
 
@@ -35,12 +36,26 @@ struct IncrementingExecutor {
 
 #[path = "../../fixtures/host_sqlite.rs"]
 mod sqlite;
-use sqlite::{fields, replication, write_fields};
+use sqlite::{exec, fields, persist_fields, replication, write_fields};
+
+fn create_host(
+    endpoint: HostEndpoint,
+    executor: Arc<dyn ActorExecutor>,
+    storage: Arc<dyn ActorStorage>,
+    writer: Arc<dyn crate::state_transport::SnapshotWriter>,
+    publisher: Arc<dyn ActorSocketPublisher>,
+    replication: Arc<dyn crate::litestream::Replicator>,
+) -> ActorHost {
+    let database = HostDatabase::new(endpoint.clone(), storage, writer, replication);
+    ActorHost::new(endpoint, executor, database, publisher)
+}
+
+type RestoredDatabase = (Value, Vec<Vec<SqlValue>>);
 
 #[tokio::test]
 async fn commits_fields_and_sql_and_recovers_them_at_one_version() -> Result<()> {
     struct Executor {
-        restored: Mutex<Option<ActorState>>,
+        restored: Mutex<Option<RestoredDatabase>>,
     }
     #[async_trait]
     impl ActorExecutor for Executor {
@@ -50,21 +65,29 @@ async fn commits_fields_and_sql_and_recovers_them_at_one_version() -> Result<()>
         async fn invoke(
             &self,
             invocation: ActorMethodInvocation,
-            state: Option<&ActorState>,
+            database: Arc<dyn ActorDatabase>,
         ) -> Result<ActorMethodOutcome> {
-            let current = state.unwrap();
-            *self.restored.lock().unwrap() = Some(current.clone());
-            let database = rusqlite::Connection::open(current.sqlite.path.as_ref().unwrap())?;
-            database.execute_batch("PRAGMA wal_autocheckpoint=0")?;
             match invocation.request_id.as_str() {
-                "sql" => database.execute_batch(
-                    "CREATE TABLE entries(value TEXT); INSERT INTO entries VALUES ('retained')",
-                )?,
-                "schema" => database
-                    .execute_batch("ALTER TABLE entries ADD COLUMN enabled INTEGER DEFAULT 1")?,
+                "sql" => {
+                    exec(&*database, "CREATE TABLE entries(value TEXT)").await?;
+                    exec(&*database, "INSERT INTO entries VALUES ('retained')").await?;
+                }
+                "schema" => {
+                    exec(
+                        &*database,
+                        "ALTER TABLE entries ADD COLUMN enabled INTEGER DEFAULT 1",
+                    )
+                    .await?;
+                }
+                "read-restored" => {
+                    *self.restored.lock().unwrap() = Some((
+                        fields(&*database).await?,
+                        exec(&*database, "SELECT value, enabled FROM entries").await?,
+                    ));
+                }
                 _ => {}
             }
-            let mut values = fields(state)?;
+            let mut values = fields(&*database).await?;
             if invocation.request_id == "initial" {
                 values["count"] = json!(0);
             }
@@ -72,10 +95,9 @@ async fn commits_fields_and_sql_and_recovers_them_at_one_version() -> Result<()>
                 values["count"] = json!(1);
             }
             let result = values["count"].clone();
-            let state = write_fields(state, values).await?;
+            write_fields(&*database, values).await?;
             Ok(ActorMethodOutcome::Completed {
                 result,
-                state,
                 effects: vec![],
             })
         }
@@ -88,7 +110,7 @@ async fn commits_fields_and_sql_and_recovers_them_at_one_version() -> Result<()>
         id: super::super::HostId::new("host-1"),
         route: "http://host.invalid/".into(),
     };
-    let host = ActorHost::new(
+    let host = create_host(
         endpoint.clone(),
         executor.clone(),
         Arc::new(FakeAuthority::default()),
@@ -135,7 +157,7 @@ async fn commits_fields_and_sql_and_recovers_them_at_one_version() -> Result<()>
             )
         })
         .collect();
-    let restored = ActorHost::new(
+    let restored = create_host(
         endpoint,
         executor.clone(),
         Arc::new(FakeAuthority {
@@ -148,15 +170,15 @@ async fn commits_fields_and_sql_and_recovers_them_at_one_version() -> Result<()>
         replication().await,
     );
     assert_eq!(invoke(&restored, "read-restored").await?, completed(1));
-    let recovered = executor.restored.lock().unwrap().clone().unwrap();
-    assert_eq!(fields(Some(&recovered))?, json!({"count": 1}));
-    let database = rusqlite::Connection::open(recovered.sqlite.path.unwrap())?;
     assert_eq!(
-        database.query_row("SELECT value, enabled FROM entries", [], |row| Ok((
-            row.get::<_, String>(0)?,
-            row.get::<_, u32>(1)?
-        )))?,
-        ("retained".into(), 1)
+        executor.restored.lock().unwrap().clone().unwrap(),
+        (
+            json!({"count": 1}),
+            vec![vec![
+                SqlValue::Text("retained".into()),
+                SqlValue::Integer(1)
+            ]]
+        )
     );
     assert_eq!(writes.writes.lock().unwrap().len(), 5);
     restored.drain(Duration::from_secs(1)).await?;
@@ -169,7 +191,7 @@ async fn ordinary_methods_execute_and_commit_without_a_socket_gateway() -> Resul
         invocations: AtomicU64::new(0),
     });
     let state = Arc::new(FakeStateTransport::default());
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -221,9 +243,9 @@ impl ActorExecutor for SerialAdmissionExecutor {
     async fn invoke(
         &self,
         invocation: ActorMethodInvocation,
-        state: Option<&ActorState>,
+        database: Arc<dyn ActorDatabase>,
     ) -> Result<ActorMethodOutcome> {
-        self.inner.invoke(invocation, state).await
+        self.inner.invoke(invocation, database).await
     }
 }
 
@@ -258,13 +280,14 @@ async fn assert_reentrant_commit_order(fail_write: bool) -> Result<()> {
         async fn invoke(
             &self,
             invocation: ActorMethodInvocation,
-            state: Option<&ActorState>,
+            database: Arc<dyn ActorDatabase>,
         ) -> Result<ActorMethodOutcome> {
-            let committed = if invocation.request_id == "first" {
-                write_fields(state, json!({"count": 1})).await?
+            let count = if invocation.request_id == "first" {
+                1
             } else {
-                write_fields(state, json!({"count": 2})).await?
+                2
             };
+            write_fields(&*database, json!({ "count": count })).await?;
             let sequence = if invocation.request_id == "first" {
                 self.admission.send_replace(());
                 self.first_started.notify_one();
@@ -279,7 +302,6 @@ async fn assert_reentrant_commit_order(fail_write: bool) -> Result<()> {
                 crate::actor::ActorInterleavedOutcome {
                     sequence,
                     result: json!(sequence),
-                    state: committed,
                     effects: vec![],
                 },
             ))
@@ -294,7 +316,7 @@ async fn assert_reentrant_commit_order(fail_write: bool) -> Result<()> {
     if fail_write {
         state.failures.store(1, Ordering::SeqCst);
     }
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -370,7 +392,7 @@ async fn a_reentrant_completion_cannot_open_an_ordinary_invocations_gate() -> Re
         async fn invoke(
             &self,
             invocation: ActorMethodInvocation,
-            state: Option<&ActorState>,
+            database: Arc<dyn ActorDatabase>,
         ) -> Result<ActorMethodOutcome> {
             self.started.send(invocation.request_id.clone())?;
             let sequence = match invocation.request_id.as_str() {
@@ -386,11 +408,11 @@ async fn a_reentrant_completion_cannot_open_an_ordinary_invocations_gate() -> Re
                 "next" => 3,
                 _ => unreachable!(),
             };
+            write_fields(&*database, json!({ "count": sequence })).await?;
             Ok(ActorMethodOutcome::Interleaved(
                 crate::actor::ActorInterleavedOutcome {
                     sequence,
                     result: json!(sequence),
-                    state: write_fields(state, json!({"count": sequence})).await?,
                     effects: vec![],
                 },
             ))
@@ -403,7 +425,7 @@ async fn a_reentrant_completion_cannot_open_an_ordinary_invocations_gate() -> Re
         release_background: Default::default(),
         release_ordinary: Default::default(),
     });
-    let host = Arc::new(ActorHost::new(
+    let host = Arc::new(create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -456,13 +478,12 @@ async fn application_errors_preserve_the_worker_and_committed_state() -> Result<
         async fn invoke(
             &self,
             invocation: ActorMethodInvocation,
-            state: Option<&ActorState>,
+            database: Arc<dyn ActorDatabase>,
         ) -> Result<ActorMethodOutcome> {
             if invocation.request_id.starts_with("fail") {
                 if invocation.request_id == "fail-fatal" {
-                    let database =
-                        rusqlite::Connection::open(state.unwrap().sqlite.path.as_ref().unwrap())?;
-                    database.execute_batch("BEGIN; UPDATE __terse_fields SET value='999' WHERE name='count'; CREATE TABLE abandoned(value INTEGER); COMMIT")?;
+                    persist_fields(&*database, json!({"count": 999}), false).await?;
+                    exec(&*database, "CREATE TABLE abandoned(value INTEGER)").await?;
                 }
                 return Ok(ActorMethodOutcome::Failed(ActorInvocationFailure {
                     code: if invocation.request_id == "fail-application" {
@@ -475,23 +496,16 @@ async fn application_errors_preserve_the_worker_and_committed_state() -> Result<
                 }));
             }
             if invocation.request_id == "after-failure" {
-                let database =
-                    rusqlite::Connection::open(state.unwrap().sqlite.path.as_ref().unwrap())?;
                 assert_eq!(
-                    database.query_row(
-                        "SELECT COUNT(*) FROM sqlite_schema WHERE name='abandoned'",
-                        [],
-                        |row| row.get::<_, i64>(0)
-                    )?,
-                    0
+                    exec(
+                        &*database,
+                        "SELECT COUNT(*) FROM sqlite_schema WHERE name='abandoned'"
+                    )
+                    .await?,
+                    vec![vec![SqlValue::Integer(0)]]
                 );
             }
-            let count = fields(state)?["count"].as_u64().unwrap_or(0) + 1;
-            Ok(ActorMethodOutcome::Completed {
-                result: json!(count),
-                state: write_fields(state, json!({"count": count})).await?,
-                effects: vec![],
-            })
+            increment(&*database).await
         }
 
         async fn evict(&self, _: crate::actor::ActorMethodEviction) -> Result<()> {
@@ -504,7 +518,7 @@ async fn application_errors_preserve_the_worker_and_committed_state() -> Result<
         evictions: AtomicUsize::new(0),
     });
     let state = Arc::new(FakeStateTransport::default());
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -550,7 +564,7 @@ impl ActorExecutor for ControlledExecutor {
     async fn invoke(
         &self,
         invocation: ActorMethodInvocation,
-        state: Option<&ActorState>,
+        database: Arc<dyn ActorDatabase>,
     ) -> Result<ActorMethodOutcome> {
         self.started.send(invocation.request_id.clone())?;
         if invocation.request_id == "panic" {
@@ -559,18 +573,13 @@ impl ActorExecutor for ControlledExecutor {
         if invocation.request_id == "first" {
             self.release.acquire().await?.forget();
         }
-        let count = fields(state)?["count"].as_u64().unwrap_or(0) + 1;
-        Ok(ActorMethodOutcome::Completed {
-            result: json!(count),
-            state: write_fields(state, json!({"count": count})).await?,
-            effects: Vec::new(),
-        })
+        increment(&*database).await
     }
 
     async fn handle_socket(
         &self,
         invocation: ActorSocketInvocation,
-        state: Option<&ActorState>,
+        database: Arc<dyn ActorDatabase>,
     ) -> Result<ActorSocketOutcome> {
         let result = self
             .invoke(
@@ -580,15 +589,15 @@ impl ActorExecutor for ControlledExecutor {
                     method: "onMessage".into(),
                     args: Vec::new(),
                 },
-                state,
+                database,
             )
             .await?;
         match result {
             ActorMethodOutcome::Interleaved(outcome) => {
                 Ok(ActorSocketOutcome::Interleaved(outcome))
             }
-            ActorMethodOutcome::Completed { state, effects, .. } => {
-                Ok(ActorSocketOutcome::Handled { state, effects })
+            ActorMethodOutcome::Completed { effects, .. } => {
+                Ok(ActorSocketOutcome::Handled { effects })
             }
             ActorMethodOutcome::Failed(failure) => Ok(ActorSocketOutcome::Failed(failure)),
         }
@@ -602,7 +611,7 @@ async fn controlled_host() -> (
 ) {
     let (started, receiver) = tokio::sync::mpsc::unbounded_channel();
     let release = Arc::new(tokio::sync::Semaphore::new(0));
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -655,6 +664,149 @@ async fn a_failed_actor_task_releases_admission_and_does_not_restart_unknown_sta
 }
 
 #[tokio::test]
+async fn interleaved_actors_replay_durable_results_without_reexecution() -> Result<()> {
+    struct Executor(AtomicU64);
+    #[async_trait]
+    impl ActorExecutor for Executor {
+        fn supports(&self, _: &str) -> bool {
+            true
+        }
+        async fn invoke(
+            &self,
+            _: ActorMethodInvocation,
+            database: Arc<dyn ActorDatabase>,
+        ) -> Result<ActorMethodOutcome> {
+            let sequence = self.0.fetch_add(1, Ordering::Relaxed) + 1;
+            write_fields(&*database, json!({"count": sequence})).await?;
+            Ok(ActorMethodOutcome::Interleaved(
+                crate::actor::ActorInterleavedOutcome {
+                    sequence,
+                    result: json!(sequence),
+                    effects: vec![],
+                },
+            ))
+        }
+    }
+    let executor = Arc::new(Executor(AtomicU64::new(0)));
+    let host = create_host(
+        HostEndpoint {
+            id: super::super::HostId::new("host-1"),
+            route: "http://host.invalid/".into(),
+        },
+        executor.clone(),
+        Arc::new(FakeAuthority::default()),
+        Arc::new(FakeStateTransport::default()),
+        Arc::new(EmptySocketPublisher),
+        replication().await,
+    );
+    assert_eq!(invoke(&host, "first").await?, completed(1));
+    assert_eq!(invoke(&host, "first").await?, completed(1));
+    assert_eq!(executor.0.load(Ordering::Relaxed), 1);
+    assert_eq!(invoke(&host, "second").await?, completed(2));
+    host.drain(Duration::from_secs(1)).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn interleaved_admission_continues_while_database_publication_is_pending() -> Result<()> {
+    struct Executor {
+        admission: watch::Sender<()>,
+        immediate: bool,
+    }
+    #[async_trait]
+    impl ActorExecutor for Executor {
+        fn supports(&self, _: &str) -> bool {
+            true
+        }
+        fn invocation_admission(&self) -> Option<watch::Receiver<()>> {
+            Some(self.admission.subscribe())
+        }
+        async fn invoke(
+            &self,
+            invocation: ActorMethodInvocation,
+            database: Arc<dyn ActorDatabase>,
+        ) -> Result<ActorMethodOutcome> {
+            let sequence = if invocation.request_id == "first" {
+                1
+            } else {
+                2
+            };
+            persist_fields(&*database, json!({"count": sequence}), self.immediate).await?;
+            database.call(DatabaseCall::Commit).await?;
+            Ok(ActorMethodOutcome::Interleaved(
+                crate::actor::ActorInterleavedOutcome {
+                    sequence,
+                    result: json!(sequence),
+                    effects: vec![],
+                },
+            ))
+        }
+    }
+
+    for immediate in [false, true] {
+        let (started, mut saving) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Semaphore::new(0));
+        let executor = Arc::new(Executor {
+            admission: watch::channel(()).0,
+            immediate,
+        });
+        let host = Arc::new(create_host(
+            HostEndpoint {
+                id: super::super::HostId::new("host-1"),
+                route: "http://host.invalid/".into(),
+            },
+            executor.clone(),
+            Arc::new(FakeAuthority::default()),
+            Arc::new(FakeStateTransport {
+                paused_commit: Some((started, release.clone())),
+                ..Default::default()
+            }),
+            Arc::new(EmptySocketPublisher),
+            replication().await,
+        ));
+        let caller = host.clone();
+        let first = tokio::spawn(async move { invoke(&caller, "first").await });
+        tokio::time::timeout(Duration::from_secs(2), saving.recv())
+            .await?
+            .unwrap();
+        let mut queues = host.queues().changes();
+        let caller = host.clone();
+        let second = tokio::spawn(async move { invoke(&caller, "second").await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while queues.borrow_and_update().is_empty() {
+                queues.changed().await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await??;
+        executor.admission.send_replace(());
+        let admitted = tokio::time::timeout(Duration::from_secs(1), async {
+            while !queues.borrow_and_update().is_empty() {
+                queues.changed().await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        })
+        .await;
+        assert!(!first.is_finished(), "write acknowledged before storage");
+        release.add_permits(1);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), first).await???,
+            completed(1)
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(2), second).await???,
+            completed(2)
+        );
+        assert!(
+            admitted.is_ok(),
+            "pending database publication blocked mailbox admission (immediate={immediate})"
+        );
+        host.drain(Duration::from_secs(1)).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn caller_cancellation_cannot_release_an_actor_during_its_commit() -> Result<()> {
     let (commit_started, mut committing) = mpsc::unbounded_channel();
     let release = Arc::new(tokio::sync::Semaphore::new(0));
@@ -664,7 +816,7 @@ async fn caller_cancellation_cannot_release_an_actor_during_its_commit() -> Resu
         ..Default::default()
     });
     let executor = Arc::new(SerialAdmissionExecutor::new());
-    let host = Arc::new(ActorHost::new(
+    let host = Arc::new(create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -856,25 +1008,20 @@ impl ActorExecutor for IncrementingExecutor {
     async fn invoke(
         &self,
         _invocation: ActorMethodInvocation,
-        state: Option<&ActorState>,
+        database: Arc<dyn ActorDatabase>,
     ) -> Result<ActorMethodOutcome> {
         self.invocations.fetch_add(1, Ordering::Relaxed);
-        let count = fields(state)?["count"].as_u64().unwrap_or(0) + 1;
-        Ok(ActorMethodOutcome::Completed {
-            result: json!(count),
-            state: write_fields(state, json!({ "count": count })).await?,
-            effects: Vec::new(),
-        })
+        increment(&*database).await
     }
 
     async fn handle_socket(
         &self,
         _invocation: ActorSocketInvocation,
-        state: Option<&ActorState>,
+        database: Arc<dyn ActorDatabase>,
     ) -> Result<ActorSocketOutcome> {
-        let count = fields(state)?["count"].as_u64().unwrap_or(0) + 1;
+        let count = fields(&*database).await?["count"].as_u64().unwrap_or(0) + 1;
+        write_fields(&*database, json!({ "count": count })).await?;
         Ok(ActorSocketOutcome::Handled {
-            state: write_fields(state, json!({ "count": count })).await?,
             effects: vec![ActorSocketEffect::Send {
                 connection_id: "socket-1".into(),
                 message: crate::actor::ActorSocketMessage::Text {
@@ -894,7 +1041,7 @@ impl ActorExecutor for ExhaustedExecutor {
     async fn invoke(
         &self,
         _invocation: ActorMethodInvocation,
-        _state: Option<&ActorState>,
+        _database: Arc<dyn ActorDatabase>,
     ) -> Result<ActorMethodOutcome> {
         Ok(ActorMethodOutcome::Failed(ActorInvocationFailure {
             code: "resource_exhausted".into(),
@@ -912,11 +1059,11 @@ impl ActorExecutor for InvalidEffectsExecutor {
     async fn invoke(
         &self,
         _invocation: ActorMethodInvocation,
-        state: Option<&ActorState>,
+        database: Arc<dyn ActorDatabase>,
     ) -> Result<ActorMethodOutcome> {
+        write_fields(&*database, json!({ "count": 1 })).await?;
         Ok(ActorMethodOutcome::Completed {
             result: Value::Null,
-            state: write_fields(state, json!({ "count": 1 })).await?,
             effects: vec![ActorSocketEffect::Close {
                 connection_id: "socket-1".into(),
                 code: 1001,
@@ -936,7 +1083,7 @@ async fn activation_acquires_on_host_without_preparing_a_write() -> Result<()> {
         actor_name: "Counter".into(),
         actor_id: "one".into(),
     };
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host".into(),
@@ -979,6 +1126,130 @@ async fn activation_acquires_on_host_without_preparing_a_write() -> Result<()> {
 }
 
 #[tokio::test]
+async fn activation_services_immediate_writes_during_hydration() -> Result<()> {
+    struct HydratingExecutor {
+        admission: watch::Sender<()>,
+        hydrated: mpsc::UnboundedSender<oneshot::Sender<()>>,
+        started: mpsc::UnboundedSender<String>,
+    }
+
+    #[async_trait]
+    impl ActorExecutor for HydratingExecutor {
+        fn supports(&self, _: &str) -> bool {
+            true
+        }
+
+        fn invocation_admission(&self) -> Option<watch::Receiver<()>> {
+            Some(self.admission.subscribe())
+        }
+
+        async fn hydrate(
+            &self,
+            _: ActorKey,
+            request_id: String,
+            database: Arc<dyn ActorDatabase>,
+        ) -> Result<()> {
+            assert_eq!(request_id, "activate");
+            self.admission.send_replace(());
+            persist_fields(&*database, json!({"resumed": true}), true).await?;
+            let (reply, acknowledged) = oneshot::channel();
+            self.hydrated.send(reply)?;
+            acknowledged.await?;
+            Ok(())
+        }
+
+        async fn invoke(
+            &self,
+            invocation: ActorMethodInvocation,
+            _: Arc<dyn ActorDatabase>,
+        ) -> Result<ActorMethodOutcome> {
+            self.started.send(invocation.request_id)?;
+            Ok(ActorMethodOutcome::Failed(ActorInvocationFailure {
+                code: "actor_method_failed".into(),
+                message: "finished".into(),
+            }))
+        }
+    }
+
+    let (hydrated, mut captured) = mpsc::unbounded_channel();
+    let (started, mut invocations) = mpsc::unbounded_channel();
+    let state = Arc::new(FakeStateTransport::default());
+    let actor = ActorKey {
+        project_id: "default".into(),
+        actor_name: "Counter".into(),
+        actor_id: "one".into(),
+    };
+    let host = Arc::new(create_host(
+        HostEndpoint {
+            id: super::super::HostId::new("host-1"),
+            route: "http://host".into(),
+        },
+        Arc::new(HydratingExecutor {
+            admission: watch::channel(()).0,
+            hydrated,
+            started,
+        }),
+        Arc::new(FakeAuthority::default()),
+        state.clone(),
+        Arc::new(EmptySocketPublisher),
+        replication().await,
+    ));
+
+    let caller = host.clone();
+    let activating_actor = actor.clone();
+    let activating = tokio::spawn(async move { caller.activate_actor(activating_actor).await });
+    let acknowledged = tokio::time::timeout(Duration::from_secs(1), captured.recv())
+        .await?
+        .context("hydration did not write")?;
+    assert_eq!(state.writes.lock().unwrap().len(), 1);
+    let caller = host.clone();
+    let invocation_actor = actor.clone();
+    let invoked = tokio::spawn(async move {
+        caller
+            .invoke_actor(
+                ActorInvocation {
+                    request_id: "during-hydration".into(),
+                    actor: invocation_actor,
+                    method: "read".into(),
+                    args: vec![],
+                },
+                7,
+                HostState::Warm,
+                0.0,
+            )
+            .await
+            .0
+    });
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), invocations.recv())
+            .await
+            .is_err()
+    );
+    acknowledged.send(()).unwrap();
+
+    let activation = activating.await??;
+    assert_eq!(activation.owner_epoch, 7);
+    assert_eq!(activation.state_version, 1);
+    let snapshots = state.writes.lock().unwrap();
+    assert_eq!(snapshots.len(), 1);
+    let snapshot = StateSnapshot::decode(&snapshots[0])?;
+    assert_eq!(snapshot.request_id, "activate");
+    assert!(snapshot.completion.is_none());
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(1), invocations.recv())
+            .await?
+            .as_deref(),
+        Some("during-hydration")
+    );
+    assert!(matches!(
+        invoked.await??,
+        ActorExecutionResult::Failed { failure } if failure.code == "actor_error"
+    ));
+    host.drain(Duration::from_secs(1)).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn activation_reuses_recovered_bytes_and_publishes_readiness_without_a_write_ticket()
 -> Result<()> {
     let snapshot = StateSnapshot::new(
@@ -999,7 +1270,7 @@ async fn activation_reuses_recovered_bytes_and_publishes_readiness_without_a_wri
         actor_name: "Counter".into(),
         actor_id: "restored".into(),
     };
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host"),
             route: "http://host".into(),
@@ -1203,7 +1474,7 @@ async fn cold_actors_load_the_current_head_instead_of_a_cached_route_snapshot() 
         ..Default::default()
     });
     let state = Arc::new(FakeStateTransport::default());
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -1233,12 +1504,11 @@ async fn read_only_results_are_withheld_if_the_lease_expires_during_execution() 
         async fn invoke(
             &self,
             _: ActorMethodInvocation,
-            state: Option<&ActorState>,
+            _: Arc<dyn ActorDatabase>,
         ) -> Result<ActorMethodOutcome> {
             self.0.fenced.store(true, Ordering::SeqCst);
             Ok(ActorMethodOutcome::Completed {
                 result: json!(8),
-                state: state.unwrap().clone(),
                 effects: vec![],
             })
         }
@@ -1256,7 +1526,7 @@ async fn read_only_results_are_withheld_if_the_lease_expires_during_execution() 
         ..Default::default()
     });
     let state = Arc::new(FakeStateTransport::default());
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -1282,7 +1552,7 @@ async fn write_results_are_withheld_if_the_lease_expires_during_persistence() ->
             paused_commit: Some((commit_started, release.clone())),
             ..Default::default()
         });
-        let host = Arc::new(ActorHost::new(
+        let host = Arc::new(create_host(
             HostEndpoint {
                 id: super::super::HostId::new("host-1"),
                 route: "http://host.invalid/".into(),
@@ -1325,7 +1595,7 @@ async fn epoch_snapshot_proofs_commit_locally_and_retry_an_ambiguous_write() -> 
     let executor = Arc::new(IncrementingExecutor {
         invocations: AtomicU64::new(0),
     });
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -1357,7 +1627,7 @@ async fn durable_snapshot_commits_locally_before_success() -> Result<()> {
     let state = Arc::new(FakeStateTransport {
         ..Default::default()
     });
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -1382,7 +1652,7 @@ async fn resident_actor_uses_immutable_snapshots_and_replays_the_last_request() 
     let executor = Arc::new(IncrementingExecutor {
         invocations: AtomicU64::new(0),
     });
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -1420,7 +1690,7 @@ async fn retries_an_ambiguous_commit_without_executing_the_request_twice() -> Re
     let state = Arc::new(FakeStateTransport::default());
     state.failures.store(1, Ordering::SeqCst);
     let executor = Arc::new(SerialAdmissionExecutor::new());
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -1447,7 +1717,7 @@ async fn retries_an_ambiguous_commit_without_executing_the_request_twice() -> Re
 
 #[tokio::test]
 async fn preserves_executor_resource_exhaustion() -> Result<()> {
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -1470,7 +1740,7 @@ async fn preserves_executor_resource_exhaustion() -> Result<()> {
 async fn invalid_socket_effects_do_not_commit_actor_state() -> Result<()> {
     let authority = Arc::new(FakeAuthority::default());
     let state = Arc::new(FakeStateTransport::default());
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -1503,12 +1773,12 @@ async fn publishes_automatic_state_after_commit_before_returning_to_rpc_callers(
         async fn invoke(
             &self,
             _: ActorMethodInvocation,
-            state: Option<&ActorState>,
+            database: Arc<dyn ActorDatabase>,
         ) -> Result<ActorMethodOutcome> {
-            let count = fields(state)?["count"].as_u64().unwrap_or(0) + 1;
+            let count = fields(&*database).await?["count"].as_u64().unwrap_or(0) + 1;
+            write_fields(&*database, json!({"count": count})).await?;
             Ok(ActorMethodOutcome::Completed {
                 result: json!(count),
-                state: write_fields(state, json!({"count": count})).await?,
                 effects: serde_json::from_value(
                     json!([{ "type":"state_update", "changes":{"count":count}, "removed":[] }]),
                 )?,
@@ -1541,7 +1811,7 @@ async fn publishes_automatic_state_after_commit_before_returning_to_rpc_callers(
         state: state.clone(),
         values: Mutex::new(vec![]),
     });
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -1586,7 +1856,7 @@ async fn socket_events_return_effects_only_after_committing_state() -> Result<()
     let executor = Arc::new(IncrementingExecutor {
         invocations: AtomicU64::new(0),
     });
-    let host = ActorHost::new(
+    let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -1652,12 +1922,12 @@ async fn socket_events_return_effects_only_after_committing_state() -> Result<()
     Ok(())
 }
 
-struct CheckpointingExecutor {
+struct ImmediateWriter {
     admission: watch::Sender<()>,
-    checkpoints: mpsc::UnboundedSender<(ActorState, oneshot::Sender<()>)>,
+    written: mpsc::UnboundedSender<u64>,
 }
 #[async_trait]
-impl ActorExecutor for CheckpointingExecutor {
+impl ActorExecutor for ImmediateWriter {
     fn supports(&self, _: &str) -> bool {
         true
     }
@@ -1667,48 +1937,44 @@ impl ActorExecutor for CheckpointingExecutor {
     async fn invoke(
         &self,
         invocation: ActorMethodInvocation,
-        state: Option<&ActorState>,
+        database: Arc<dyn ActorDatabase>,
     ) -> Result<ActorMethodOutcome> {
-        let count = fields(state)?["count"].as_u64().unwrap_or(0);
-        let mut state = write_fields(state, json!({"count": count + 1})).await?;
+        let count = fields(&*database).await?["count"].as_u64().unwrap_or(0);
         if invocation.request_id == "first" {
             for value in [count + 1, count + 2] {
-                state = write_fields(Some(&state), json!({"count": value})).await?;
-                let (reply, ack) = oneshot::channel();
-                self.checkpoints.send((state.clone(), reply))?;
-                ack.await?;
+                persist_fields(&*database, json!({ "count": value }), true).await?;
+                self.written.send(value)?;
             }
             return Ok(ActorMethodOutcome::Failed(ActorInvocationFailure {
                 code: "actor_method_failed".into(),
                 message: "failed after durable writes".into(),
             }));
         }
+        write_fields(&*database, json!({ "count": count + 1 })).await?;
         Ok(ActorMethodOutcome::Completed {
             result: json!(count + 1),
-            state,
             effects: vec![],
         })
     }
 }
 
 #[tokio::test]
-async fn checkpoints_wait_for_durability_and_share_atomic_versions() -> Result<()> {
-    use crate::state_transport::{SqlitePersistenceMode, SqliteWrite, SqliteWriter};
-    let (checkpoints, mut captured) = mpsc::unbounded_channel();
+async fn immediate_writes_wait_for_durability_and_share_atomic_versions() -> Result<()> {
+    let (written, mut writes_seen) = mpsc::unbounded_channel();
     let (started, mut saving) = mpsc::unbounded_channel();
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let writes = Arc::new(FakeStateTransport {
         paused_commit: Some((started, release.clone())),
         ..Default::default()
     });
-    let host = Arc::new(ActorHost::new(
+    let host = Arc::new(create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
         },
-        Arc::new(CheckpointingExecutor {
+        Arc::new(ImmediateWriter {
             admission: watch::channel(()).0,
-            checkpoints,
+            written,
         }),
         Arc::new(FakeAuthority::default()),
         writes.clone(),
@@ -1718,39 +1984,23 @@ async fn checkpoints_wait_for_durability_and_share_atomic_versions() -> Result<(
     assert_eq!(invoke(&host, "atomic-before").await?, completed(1));
     let caller = host.clone();
     let invocation = tokio::spawn(async move { invoke(&caller, "first").await });
-    for version in [2, 3] {
-        let (state, ack) = tokio::time::timeout(Duration::from_secs(3), captured.recv())
-            .await?
-            .unwrap();
-        let write = SqliteWrite {
-            request_id: "first".into(),
-            actor: ActorKey {
-                project_id: "default".into(),
-                actor_name: "Counter".into(),
-                actor_id: "counter-1".into(),
-            },
-            path: state.sqlite.path.clone().unwrap().into(),
-            mode: SqlitePersistenceMode::DurableWrite,
-            txid: Some(state.sqlite.txid),
-        };
-        let caller = host.clone();
-        let checkpoint = tokio::spawn(async move { caller.persist_sqlite(&write).await });
+    for value in [2, 3] {
         tokio::time::timeout(Duration::from_secs(3), saving.recv())
             .await?
             .unwrap();
         assert!(
-            !checkpoint.is_finished(),
-            "checkpoint acknowledged before storage"
+            writes_seen.try_recv().is_err(),
+            "immediate write acknowledged before storage"
         );
         assert!(
             !invocation.is_finished(),
             "method resumed before durability"
         );
         release.add_permits(1);
-        let saved = checkpoint.await??;
-        assert_eq!(saved.state_version, Some(version));
-        assert_eq!(saved.txid, state.sqlite.txid);
-        ack.send(()).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), writes_seen.recv()).await?,
+            Some(value)
+        );
     }
     assert!(matches!(
         invocation.await??,
@@ -1785,51 +2035,30 @@ async fn checkpoints_wait_for_durability_and_share_atomic_versions() -> Result<(
 }
 
 #[tokio::test]
-async fn failed_checkpoint_stops_the_actor_without_acknowledging_the_write() -> Result<()> {
-    use crate::state_transport::{SqlitePersistenceMode, SqliteWrite, SqliteWriter};
-    let (checkpoints, mut captured) = mpsc::unbounded_channel();
+async fn failed_immediate_write_stops_the_actor_without_acknowledging_the_write() -> Result<()> {
+    let (written, mut writes_seen) = mpsc::unbounded_channel();
     let writes = Arc::new(FakeStateTransport {
         failures: AtomicUsize::new(1),
         ..Default::default()
     });
-    let host = Arc::new(ActorHost::new(
+    let host = Arc::new(create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
         },
-        Arc::new(CheckpointingExecutor {
+        Arc::new(ImmediateWriter {
             admission: watch::channel(()).0,
-            checkpoints,
+            written,
         }),
         Arc::new(FakeAuthority::default()),
         writes,
         Arc::new(EmptySocketPublisher),
         replication().await,
     ));
-    let caller = host.clone();
-    let invocation = tokio::spawn(async move { invoke(&caller, "first").await });
-    let (state, ack) = tokio::time::timeout(Duration::from_secs(3), captured.recv())
-        .await?
-        .unwrap();
-    let error = host
-        .persist_sqlite(&SqliteWrite {
-            request_id: "first".into(),
-            actor: ActorKey {
-                project_id: "default".into(),
-                actor_name: "Counter".into(),
-                actor_id: "counter-1".into(),
-            },
-            path: state.sqlite.path.clone().unwrap().into(),
-            mode: SqlitePersistenceMode::DurableWrite,
-            txid: Some(state.sqlite.txid),
-        })
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("write response lost"));
     assert!(
-        matches!(invocation.await??, ActorExecutionResult::Failed { failure } if failure.code == "outcome_unknown")
+        matches!(invoke(&host, "first").await?, ActorExecutionResult::Failed { failure } if failure.code == "outcome_unknown")
     );
-    assert!(ack.send(()).is_err());
+    assert!(writes_seen.try_recv().is_err());
     assert_eq!(
         invoke(&host, "after").await?,
         ActorExecutionResult::HostUnavailable
@@ -1838,12 +2067,11 @@ async fn failed_checkpoint_stops_the_actor_without_acknowledging_the_write() -> 
 }
 
 #[tokio::test]
-async fn delayed_interleaved_completion_cannot_rewind_a_checkpoint() -> Result<()> {
+async fn delayed_interleaved_completion_cannot_rewind_an_immediate_write() -> Result<()> {
     use crate::actor::ActorInterleavedOutcome;
-    use crate::state_transport::{SqlitePersistenceMode, SqliteWrite, SqliteWriter};
     struct Executor {
         admission: watch::Sender<()>,
-        captured: mpsc::UnboundedSender<(String, ActorState, oneshot::Sender<()>)>,
+        captured: mpsc::UnboundedSender<oneshot::Sender<()>>,
     }
     #[async_trait]
     impl ActorExecutor for Executor {
@@ -1856,28 +2084,28 @@ async fn delayed_interleaved_completion_cannot_rewind_a_checkpoint() -> Result<(
         async fn invoke(
             &self,
             invocation: ActorMethodInvocation,
-            state: Option<&ActorState>,
+            database: Arc<dyn ActorDatabase>,
         ) -> Result<ActorMethodOutcome> {
-            let count = fields(state)?["count"].as_u64().unwrap_or(0) + 1;
-            let state = write_fields(state, json!({"count": count})).await?;
+            let count = fields(&*database).await?["count"].as_u64().unwrap_or(0) + 1;
+            let immediate = invocation.request_id == "newer";
+            persist_fields(&*database, json!({ "count": count }), immediate).await?;
+            database.call(DatabaseCall::Commit).await?;
             if count <= 2 {
                 let (reply, ack) = oneshot::channel();
-                self.captured
-                    .send((invocation.request_id, state.clone(), reply))?;
+                self.captured.send(reply)?;
                 self.admission.send_replace(());
                 ack.await?;
             }
             Ok(ActorMethodOutcome::Interleaved(ActorInterleavedOutcome {
                 sequence: count,
                 result: json!(count),
-                state,
                 effects: vec![],
             }))
         }
     }
     let (captured, mut captures) = mpsc::unbounded_channel();
     let writes = Arc::new(FakeStateTransport::default());
-    let host = Arc::new(ActorHost::new(
+    let host = Arc::new(create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
             route: "http://host.invalid/".into(),
@@ -1893,28 +2121,15 @@ async fn delayed_interleaved_completion_cannot_rewind_a_checkpoint() -> Result<(
     ));
     let caller = host.clone();
     let older = tokio::spawn(async move { invoke(&caller, "older").await });
-    let (_, _, release_older) = tokio::time::timeout(Duration::from_secs(3), captures.recv())
+    let release_older = tokio::time::timeout(Duration::from_secs(3), captures.recv())
         .await?
         .unwrap();
     let caller = host.clone();
     let newer = tokio::spawn(async move { invoke(&caller, "newer").await });
-    let (_, state, release_newer) = tokio::time::timeout(Duration::from_secs(3), captures.recv())
+    let release_newer = tokio::time::timeout(Duration::from_secs(3), captures.recv())
         .await?
         .unwrap();
-    let saved = host
-        .persist_sqlite(&SqliteWrite {
-            request_id: "newer".into(),
-            actor: ActorKey {
-                project_id: "default".into(),
-                actor_name: "Counter".into(),
-                actor_id: "counter-1".into(),
-            },
-            path: state.sqlite.path.clone().unwrap().into(),
-            mode: SqlitePersistenceMode::DurableWrite,
-            txid: Some(state.sqlite.txid),
-        })
-        .await?;
-    assert_eq!(saved.state_version, Some(1));
+    assert_eq!(writes.writes.lock().unwrap().len(), 1);
     release_older.send(()).unwrap();
     assert_eq!(older.await??, completed(1));
     release_newer.send(()).unwrap();
@@ -1928,9 +2143,57 @@ async fn delayed_interleaved_completion_cannot_rewind_a_checkpoint() -> Result<(
         .map(|bytes| StateSnapshot::decode(bytes))
         .collect::<Result<Vec<_>>>()?;
     assert_eq!(snapshots.len(), 2);
+    assert_eq!(snapshots[0].request_id, "newer");
+    assert!(snapshots[0].completion.is_none());
     assert_eq!(snapshots[1].state_version, 2);
     assert!(snapshots[1].sqlite.txid > snapshots[0].sqlite.txid);
     Ok(())
+}
+
+#[tokio::test]
+async fn database_handles_expire_with_their_invocation() -> Result<()> {
+    struct Executor(Mutex<Option<Arc<dyn ActorDatabase>>>);
+    #[async_trait]
+    impl ActorExecutor for Executor {
+        fn supports(&self, _: &str) -> bool {
+            true
+        }
+        async fn invoke(
+            &self,
+            _: ActorMethodInvocation,
+            database: Arc<dyn ActorDatabase>,
+        ) -> Result<ActorMethodOutcome> {
+            *self.0.lock().unwrap() = Some(database.clone());
+            increment(&*database).await
+        }
+    }
+    let executor = Arc::new(Executor(Mutex::new(None)));
+    let host = create_host(
+        HostEndpoint {
+            id: super::super::HostId::new("host-1"),
+            route: "http://host.invalid/".into(),
+        },
+        executor.clone(),
+        Arc::new(FakeAuthority::default()),
+        Arc::new(FakeStateTransport::default()),
+        Arc::new(EmptySocketPublisher),
+        replication().await,
+    );
+    assert_eq!(invoke(&host, "request-1").await?, completed(1));
+    let retained = executor.0.lock().unwrap().clone().unwrap();
+    let error = retained.call(DatabaseCall::Fields).await.unwrap_err();
+    assert!(error.to_string().contains("no active invocation"));
+    host.drain(Duration::from_secs(1)).await?;
+    Ok(())
+}
+
+async fn increment(database: &dyn ActorDatabase) -> Result<ActorMethodOutcome> {
+    let count = fields(database).await?["count"].as_u64().unwrap_or(0) + 1;
+    write_fields(database, json!({ "count": count })).await?;
+    Ok(ActorMethodOutcome::Completed {
+        result: json!(count),
+        effects: Vec::new(),
+    })
 }
 
 async fn invoke(host: &ActorHost, request_id: &str) -> Result<ActorExecutionResult> {
@@ -1993,7 +2256,7 @@ async fn restored_request_only_returns_a_saved_result_when_completion_is_present
         let executor = Arc::new(IncrementingExecutor {
             invocations: AtomicU64::new(0),
         });
-        let host = ActorHost::new(
+        let host = create_host(
             HostEndpoint {
                 id: super::super::HostId::new("host-1"),
                 route: "http://host.invalid/".into(),

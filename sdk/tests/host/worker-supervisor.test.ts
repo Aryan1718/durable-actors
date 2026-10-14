@@ -9,9 +9,8 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import type { SocketEffect } from "../../src/actor/socketProtocol.js"
 import { buildActor } from "../../src/compiler/actor-build.js"
 import { ActorWorker, ActorWorkerSupervisor } from "../../src/host/worker-supervisor.js"
-import { fields, recover, seed } from "../fixtures/litestream.js"
 import { assertReply } from "../fixtures/reply.js"
-import { execute, handle } from "../fixtures/worker-supervisor.js"
+import { execute, handle, hostDatabase, seed } from "../fixtures/worker-supervisor.js"
 
 const actorIdentity = {
     project_id: "default",
@@ -19,7 +18,7 @@ const actorIdentity = {
     actor_id: "counter-1"
 }
 
-test("worker eviction restores fields and SQL from the SQLite replica", { timeout: 30000 }, async context => {
+test("worker eviction restores fields and SQL from the host database", { timeout: 30000 }, async context => {
     const root = await createTypeScriptConsumer("SqliteWorker")
     const file = path.join(root, "src/actors.ts")
     await writeFile(
@@ -39,26 +38,14 @@ test("worker eviction restores fields and SQL from the SQLite replica", { timeou
     )
     const supervisor = new ActorWorkerSupervisor({ actorEntrypointUrl: await buildConsumer(root) })
     try {
-        const command = await invokeCommand("one", "SqliteWorker")
-        const first = await handle(supervisor, command, () => {})
-        assert.equal(first.type, "invoked")
-        if (first.type !== "invoked") return
-        assert.equal(typeof first.sqlite, "object")
-        assert.deepEqual(fields(command.sqlite), { count: 1 })
+        const command = invokeCommand("one", "SqliteWorker")
+        assert.equal((await handle(supervisor, command, () => {})).type, "invoked")
+        assert.deepEqual(hostDatabase(supervisor).fields(), { count: 1 })
         await handle(supervisor, { type: "evict", actor: command.actor }, () => {})
-        const restored = await handle(
-            supervisor,
-            {
-                ...command,
-                method: "read",
-                sqlite: await recover(command.sqlite, first.sqlite)
-            },
-            () => {}
-        )
+        const restored = await handle(supervisor, { ...command, method: "read" }, () => {})
         assert.equal(restored.type, "invoked")
         if (restored.type !== "invoked") return
         assert.deepEqual(restored.result, [{ count: 1 }])
-        assert.ok(restored.sqlite.txid > 0)
     } finally {
         supervisor.close()
         await rm(root, { recursive: true, force: true })
@@ -77,7 +64,7 @@ test("keeps actor state resident between requests until the host closes", async 
             return {
                 state: "ready",
                 ready: async () => ["SessionCounter"],
-                execute: async () => ({ type: "invoked", result: ++count, sqlite: { txid: 1 } }),
+                execute: async () => ({ type: "invoked", result: ++count }),
                 terminate() {
                     terminated++
                 }
@@ -85,18 +72,16 @@ test("keeps actor state resident between requests until the host closes", async 
         }
     })
     try {
-        const command = await invokeCommand("counter-1", "SessionCounter")
+        const command = invokeCommand("counter-1", "SessionCounter")
         assert.deepEqual(await handle(supervisor, command, () => {}), {
             type: "invoked",
-            result: 1,
-            sqlite: { txid: 1 }
+            result: 1
         })
         context.mock.timers.tick(300_000)
         assert.deepEqual(supervisor.activeActors(), [actorIdentity])
-        assert.deepEqual(await handle(supervisor, { ...command, resident_only: true, sqlite: undefined }, () => {}), {
+        assert.deepEqual(await handle(supervisor, command, () => {}), {
             type: "invoked",
-            result: 2,
-            sqlite: { txid: 1 }
+            result: 2
         })
         assert.equal(created, 1)
         assert.equal(terminated, 0)
@@ -145,7 +130,7 @@ test("correlates overlapping worker replies and socket lookups", { timeout: 1000
     try {
         const holding = handle(
             runtime,
-            { ...(await invokeCommand("one", "InterleavedWorker")), method: "hold" },
+            { ...invokeCommand("one", "InterleavedWorker"), method: "hold" },
             () => {},
             async effects => {
                 for (const effect of effects) if (effect.type === "broadcast") events.push(effect.message.data)
@@ -156,7 +141,7 @@ test("correlates overlapping worker replies and socket lookups", { timeout: 1000
         await start
         const second = await handle(
             runtime,
-            { ...(await invokeCommand("one", "InterleavedWorker")), request_id: "second" },
+            { ...invokeCommand("one", "InterleavedWorker"), request_id: "second" },
             () => {},
             async effects => {
                 assert.deepEqual(
@@ -169,15 +154,11 @@ test("correlates overlapping worker replies and socket lookups", { timeout: 1000
         const first = await holding
         assert.equal("result" in first && first.result, 2)
         assert.deepEqual(events, ['"started:one"', '"ended:one"'])
-        await handle(
-            runtime,
-            { type: "evict", actor: (await invokeCommand("one", "InterleavedWorker")).actor },
-            () => {}
-        )
+        await handle(runtime, { type: "evict", actor: invokeCommand("one", "InterleavedWorker").actor }, () => {})
         assert.deepEqual(runtime.activeActors(), [])
         const resumed = await handle(
             runtime,
-            { ...(await invokeCommand("one", "InterleavedWorker")), sqlite: await seed({ count: 2 }) },
+            invokeCommand("one", "InterleavedWorker"),
             () => {},
             async () => {}
         )
@@ -203,18 +184,12 @@ test("a generic Bun worker is warm before customer code is assigned", async () =
             worker.load({ moduleUrl, environment: { TEST_WARM_SECRET: "warm-secret" } }, () => {})
             assert.deepEqual(await worker.ready(), ["WarmCounter"])
             assert.throws(() => worker.load({ moduleUrl }, () => {}), /already assigned/)
-            const command = await invokeCommand("one", "WarmCounter")
-            assert.deepEqual(
-                await execute(
-                    worker,
-                    { type: "hydrate", actor: command.actor, sqlite: await seed({ count: 41 }) },
-                    () => {}
-                ),
-                {
-                    type: "hydrated"
-                }
-            )
-            assertReply(await execute(worker, { ...command, resident_only: true, sqlite: undefined }, () => {}), {
+            const command = invokeCommand("one", "WarmCounter")
+            seed(worker, { count: 41 })
+            assert.deepEqual(await execute(worker, { type: "hydrate", actor: command.actor }, () => {}), {
+                type: "hydrated"
+            })
+            assertReply(await execute(worker, command, () => {}), {
                 type: "invoked",
                 result: 42
             })
@@ -233,10 +208,10 @@ test("an executor never accepts a second actor identity, even after eviction", a
         actorEntrypointUrl: entrypoint
     })
     try {
-        const first = await invokeCommand("first", "BoundCounter")
+        const first = invokeCommand("first", "BoundCounter")
         assert.equal((await handle(runtime, first, () => {})).type, "invoked")
         await handle(runtime, { type: "evict", actor: first.actor }, () => {})
-        const reply = await handle(runtime, await invokeCommand("second", "BoundCounter"), () => {})
+        const reply = await handle(runtime, invokeCommand("second", "BoundCounter"), () => {})
         assert.equal(reply.type, "failed")
         if (reply.type === "failed") assert.equal(reply.code, "actor_identity_mismatch")
     } finally {
@@ -263,7 +238,7 @@ test("reports a new actor only after its Worker is ready", { timeout: 5_000 }, a
         actorEntrypointUrl: entrypoint
     })
     try {
-        const starting = handle(supervisor, await invokeCommand("counter-1", "SessionCounter"), () => {})
+        const starting = handle(supervisor, invokeCommand("counter-1", "SessionCounter"), () => {})
         assert.deepEqual(supervisor.activeActors(), [])
         assert.equal((await starting).type, "invoked")
         assert.deepEqual(supervisor.activeActors(), [actorIdentity])
@@ -291,7 +266,7 @@ watch(new URL(".", import.meta.url), (_, name) => {
             actorEntrypointUrl: entrypoint
         })
         try {
-            await handle(supervisor, await invokeCommand("counter-1", "SessionCounter"), () => {})
+            await handle(supervisor, invokeCommand("counter-1", "SessionCounter"), () => {})
             const changes = new EventEmitter()
             supervisor.onActiveActorsChange(() => changes.emit("change"))
             const stopped = once(changes, "change", { signal: context.signal })
@@ -324,7 +299,7 @@ test("starts one speculative Worker and gives it to the first actor", async () =
                         return ["PreloadedCounter"]
                     },
                     async execute() {
-                        return { type: "invoked", result: null, sqlite: { txid: 1 } }
+                        return { type: "invoked", result: null }
                     },
                     terminate() {}
                 }
@@ -332,9 +307,9 @@ test("starts one speculative Worker and gives it to the first actor", async () =
         })
 
         assert.equal(created.length, 1)
-        await handle(runtime, await invokeCommand("counter-1", "PreloadedCounter"), () => {})
+        await handle(runtime, invokeCommand("counter-1", "PreloadedCounter"), () => {})
         assert.equal(created.length, 1)
-        const second = await handle(runtime, await invokeCommand("counter-2", "PreloadedCounter"), () => {})
+        const second = await handle(runtime, invokeCommand("counter-2", "PreloadedCounter"), () => {})
         assert.equal(second.type, "failed")
         assert.equal(created.length, 1)
         runtime.close()
@@ -351,17 +326,16 @@ test("atomic methods and socket handlers roll back state without restarting the 
     })
     const seen: number[] = []
     supervisor.onActiveActorsChange(() => seen.push(supervisor.activeActors().length))
-    const command = await invokeCommand("counter-1", "SessionCounter")
+    const command = invokeCommand("counter-1", "SessionCounter")
     try {
         await handle(supervisor, command, () => {})
         const workerId = await handle(supervisor, { ...command, method: "workerId" }, () => {})
         for (const failure of [
-            { ...command, method: "explode", resident_only: true, sqlite: undefined },
+            { ...command, method: "explode" },
             {
                 type: "websocket_event" as const,
                 request_id: "socket-failure",
                 actor: actorIdentity,
-                resident_only: true,
                 event: {
                     type: "message" as const,
                     connection_id: "socket-1",
@@ -373,17 +347,10 @@ test("atomic methods and socket handlers roll back state without restarting the 
             assert.equal((await handle(supervisor, failure, () => {})).type, "failed")
             assert.deepEqual(supervisor.activeActors(), [actorIdentity])
             assert.deepEqual(seen, [1])
-            assertReply(
-                await handle(
-                    supervisor,
-                    { ...command, method: "getCount", resident_only: true, sqlite: undefined },
-                    () => {}
-                ),
-                {
-                    type: "invoked",
-                    result: 1
-                }
-            )
+            assertReply(await handle(supervisor, { ...command, method: "getCount" }, () => {}), {
+                type: "invoked",
+                result: 1
+            })
             assert.deepEqual(await handle(supervisor, { ...command, method: "workerId" }, () => {}), workerId)
         }
     } finally {
@@ -403,7 +370,7 @@ test("keeps the preloaded Worker available until the first request", async conte
             return {
                 state: "ready",
                 ready: async () => ["SessionCounter"],
-                execute: async () => ({ type: "invoked", result: null, sqlite: { txid: 1 } }),
+                execute: async () => ({ type: "invoked", result: null }),
                 terminate() {
                     terminated++
                 }
@@ -413,7 +380,7 @@ test("keeps the preloaded Worker available until the first request", async conte
     try {
         await supervisor.ready()
         context.mock.timers.tick(300_000)
-        await handle(supervisor, await invokeCommand("counter-1", "SessionCounter"), () => {})
+        await handle(supervisor, invokeCommand("counter-1", "SessionCounter"), () => {})
         assert.equal(created, 1)
         assert.equal(terminated, 0)
         assert.deepEqual(supervisor.activeActors(), [actorIdentity])
@@ -426,7 +393,7 @@ test("keeps the preloaded Worker available until the first request", async conte
 test("eviction during Worker startup settles the invocation and allows recovery", { timeout: 5_000 }, async () => {
     const root = await createTypeScriptConsumer("CancelledCounter")
     const entrypoint = await buildConsumer(root)
-    const command = await invokeCommand("counter-1", "CancelledCounter")
+    const command = invokeCommand("counter-1", "CancelledCounter")
     try {
         const runtime = new ActorWorkerSupervisor({
             actorEntrypointUrl: entrypoint
@@ -437,7 +404,8 @@ test("eviction during Worker startup settles the invocation and allows recovery"
         const reply = await pending
         assert.equal(reply.type, "failed")
         if (reply.type === "failed") assert.equal(reply.code, "actor_worker_terminated")
-        assertReply(await handle(runtime, { ...command, sqlite: await seed({ count: 9 }) }, () => {}), {
+        seed(runtime, { count: 9 })
+        assertReply(await handle(runtime, command, () => {}), {
             type: "invoked",
             result: 10
         })
@@ -464,7 +432,7 @@ test("discards a failed preload before accepting the first actor", async () => {
                         failed ? Promise.reject(new Error("preload failed")) : Promise.resolve(["RetryPreloadCounter"]),
                     async execute() {
                         if (failed) throw new Error("preload failed")
-                        return { type: "invoked", result: 1, sqlite: { txid: 1 } }
+                        return { type: "invoked", result: 1 }
                     },
                     terminate() {
                         terminated += 1
@@ -474,10 +442,9 @@ test("discards a failed preload before accepting the first actor", async () => {
         })
         await new Promise(resolve => setImmediate(resolve))
         assert.equal(terminated, 1)
-        assert.deepEqual(await handle(runtime, await invokeCommand("counter-1", "RetryPreloadCounter"), () => {}), {
+        assert.deepEqual(await handle(runtime, invokeCommand("counter-1", "RetryPreloadCounter"), () => {}), {
             type: "invoked",
-            result: 1,
-            sqlite: { txid: 1 }
+            result: 1
         })
         assert.equal(created, 2)
         runtime.close()
@@ -507,7 +474,7 @@ test("closing the supervisor terminates an unused Worker and rejects new work", 
     runtime.close()
     runtime.close()
     assert.equal(terminated, 1)
-    const reply = await handle(runtime, await invokeCommand("counter-1", "UnusedCounter"), () => {})
+    const reply = await handle(runtime, invokeCommand("counter-1", "UnusedCounter"), () => {})
     assert.equal(reply.type, "failed")
     if (reply.type === "failed") assert.equal(reply.code, "actor_worker_terminated")
 })
@@ -523,7 +490,7 @@ test("an actor module that fails inside a Worker returns a failure without hangi
             actorEntrypointUrl: entrypoint
         })
         try {
-            const reply = await handle(runtime, await invokeCommand("counter-1", "FailedImportCounter"), () => {})
+            const reply = await handle(runtime, invokeCommand("counter-1", "FailedImportCounter"), () => {})
             assert.equal(reply.type, "failed")
             if (reply.type === "failed") assert.match(reply.message, /worker import failed/)
         } finally {
@@ -548,8 +515,7 @@ async function exerciseActiveActors(entrypoint: string): Promise<void> {
                 request_id: "request-1",
                 actor: actorIdentity,
                 method: "increment",
-                args: [2],
-                sqlite: await seed(null)
+                args: [2]
             },
             () => {}
         ),
@@ -563,8 +529,7 @@ async function exerciseActiveActors(entrypoint: string): Promise<void> {
                 request_id: "request-2",
                 actor: actorIdentity,
                 method: "increment",
-                args: [3],
-                sqlite: await seed({ count: 0 })
+                args: [3]
             },
             () => {}
         ),
@@ -579,12 +544,11 @@ async function exerciseActiveActors(entrypoint: string): Promise<void> {
                 request_id: "request-3",
                 actor: actorIdentity,
                 method: "getCount",
-                args: [],
-                sqlite: await seed({ count: 2 })
+                args: []
             },
             () => {}
         ),
-        { type: "invoked", result: 2 }
+        { type: "invoked", result: 5 }
     )
     runtime.close()
 }
@@ -602,8 +566,7 @@ async function exerciseSocketRecovery(entrypoint: string): Promise<void> {
                 request_id: "socket-request-1",
                 actor: actorIdentity,
                 event: { type: "connect", connection },
-                connections: [connection],
-                sqlite: await seed(null)
+                connections: [connection]
             },
             () => {}
         ),
@@ -629,8 +592,7 @@ async function exerciseSocketRecovery(entrypoint: string): Promise<void> {
                     connection_id: "socket-1",
                     message: { type: "text", data: JSON.stringify({ text: "hello" }) }
                 },
-                connections: [connection],
-                sqlite: await seed({ count: 1 })
+                connections: [connection]
             },
             () => {},
             async effects => {
@@ -711,14 +673,13 @@ export class ${actorName} extends Actor<{ userId: string }, { text: string }> {
     return root
 }
 
-async function invokeCommand(actorId: string, actorName: string) {
+function invokeCommand(actorId: string, actorName: string) {
     return {
         type: "invoke" as const,
         request_id: `request-${actorId}`,
         actor: { ...actorIdentity, actor_name: actorName, actor_id: actorId },
         method: "increment",
-        args: [],
-        sqlite: await seed(null)
+        args: []
     }
 }
 
@@ -731,20 +692,18 @@ test("residency reports actual workers and drops evicted and failed instances", 
 
             ready: async () => ["SessionCounter"],
             execute: async () =>
-                fail
-                    ? { type: "failed", code: "test", message: "failed" }
-                    : { type: "invoked", result: null, sqlite: { txid: 1 } },
+                fail ? { type: "failed", code: "test", message: "failed" } : { type: "invoked", result: null },
             terminate() {}
         })
     })
     try {
         assert.deepEqual(supervisor.activeActors(), [])
-        await handle(supervisor, await invokeCommand("counter-1", "SessionCounter"), () => {})
+        await handle(supervisor, invokeCommand("counter-1", "SessionCounter"), () => {})
         assert.deepEqual(supervisor.activeActors(), [actorIdentity])
         await handle(supervisor, { type: "evict", actor: actorIdentity }, () => {})
         assert.deepEqual(supervisor.activeActors(), [])
         fail = true
-        await handle(supervisor, await invokeCommand("counter-1", "SessionCounter"), () => {})
+        await handle(supervisor, invokeCommand("counter-1", "SessionCounter"), () => {})
         assert.deepEqual(supervisor.activeActors(), [])
     } finally {
         supervisor.close()
@@ -758,18 +717,18 @@ test("residency subscribers see worker creation and eviction immediately", async
             state: "ready",
 
             ready: async () => ["SessionCounter"],
-            execute: async () => ({ type: "invoked", result: null, sqlite: { txid: 1 } }),
+            execute: async () => ({ type: "invoked", result: null }),
             terminate() {}
         })
     })
     const seen: number[] = []
     try {
         const unsubscribe = supervisor.onActiveActorsChange(() => seen.push(supervisor.activeActors().length))
-        await handle(supervisor, await invokeCommand("counter-1", "SessionCounter"), () => {})
+        await handle(supervisor, invokeCommand("counter-1", "SessionCounter"), () => {})
         await handle(supervisor, { type: "evict", actor: actorIdentity }, () => {})
         assert.deepEqual(seen, [1, 0])
         unsubscribe()
-        await handle(supervisor, await invokeCommand("counter-1", "SessionCounter"), () => {})
+        await handle(supervisor, invokeCommand("counter-1", "SessionCounter"), () => {})
         assert.deepEqual(seen, [1, 0])
     } finally {
         supervisor.close()

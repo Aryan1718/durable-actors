@@ -6,9 +6,9 @@ import { Ephemeral, Persisted } from "../../src/actor/decorators.js"
 import { Persistence } from "../../src/actor/schema.js"
 import type { ActorConnection, ActorSocket } from "../../src/actor/socket.js"
 import type { SocketEffect } from "../../src/actor/socketProtocol.js"
-import { ActorRuntime } from "../fixtures/actor-runtime.js"
+import { ActorRuntime, DatabaseProxy } from "../fixtures/actor-runtime.js"
 import { runWithActorClientForTests } from "../fixtures/actorClient.js"
-import { seed } from "../fixtures/litestream.js"
+import { HostDatabase } from "../fixtures/host-database.js"
 import { assertReply } from "../fixtures/reply.js"
 
 export class Counter extends Actor {
@@ -132,8 +132,7 @@ test("socket handlers load the full connection list only when requested", async 
                 connection_id: "sender",
                 message: { type: "text", data: JSON.stringify(enumerate) }
             },
-            connections: [connections[0]!],
-            sqlite: await seed(null)
+            connections: [connections[0]!]
         })
         assert.equal(reply.type, "websocket_handled")
         if (reply.type !== "websocket_handled") return
@@ -169,8 +168,7 @@ test("invocation does not enforce deployment JSON schemas at runtime", async () 
         request_id: "no-runtime-schema",
         actor: actorIdentity,
         method: "increment",
-        args: [1],
-        sqlite: await seed(null)
+        args: [1]
     })
     assert.equal(reply.type, "invoked")
 })
@@ -205,8 +203,7 @@ test("ephemeral caches survive resident calls and reset after atomic failure or 
         request_id: "cache",
         actor: { ...actorIdentity, actor_name: "CachingCounter" },
         method: "increment",
-        args: [],
-        sqlite: await seed(null)
+        args: []
     }
     assertReply(await runtime.handle(command), {
         type: "invoked",
@@ -217,10 +214,16 @@ test("ephemeral caches survive resident calls and reset after atomic failure or 
         result: { count: 2, calls: 2 }
     })
     assert.equal((await runtime.handle({ ...command, method: "fail" })).type, "failed")
-    const restored = { ...command, sqlite: await seed({ count: 2, cache: "stale" }) }
     const expected = { type: "invoked", result: { count: 3, calls: 1 } }
-    assertReply(await runtime.handle({ ...command, resident_only: true, sqlite: undefined }), expected)
-    assertReply(await new ActorRuntime(definition, () => {}).handle(restored), expected)
+    assertReply(await runtime.handle(command), expected)
+    const restored = new ActorRuntime(
+        definition,
+        () => {},
+        undefined,
+        undefined,
+        new DatabaseProxy(HostDatabase.with({ count: 2, cache: "stale" }).call)
+    )
+    assertReply(await restored.handle(command), expected)
 })
 
 test("failed state recovery reports a fatal error instead of keeping a damaged instance", async () => {
@@ -245,16 +248,17 @@ test("failed state recovery reports a fatal error instead of keeping a damaged i
         actor: { project_id: "default", actor_name: "RecoveryFailure", actor_id: "one" },
         request_id: "failed-recovery",
         method: "fail",
-        args: [],
-        sqlite: await seed(null)
+        args: []
     }
     assert.deepEqual(await runtime.handle(command), {
         type: "failed",
         code: "invalid_actor_state",
         message: "cannot restore"
     })
-    assert.deepEqual(await runtime.handle({ ...command, resident_only: true, sqlite: undefined }), {
-        type: "state_required"
+    assert.deepEqual(await runtime.handle(command), {
+        type: "failed",
+        code: "invalid_actor_state",
+        message: "cannot restore"
     })
 })
 
@@ -290,8 +294,7 @@ test("streams actor output before execution finishes without replaying it in the
             request_id: "stream-1",
             actor: { ...actorIdentity, actor_name: "StreamingActor" },
             method: "stream",
-            args: [],
-            sqlite: await seed(null)
+            args: []
         })
         .then(reply => {
             completed = true
@@ -329,7 +332,6 @@ test("rejecting a connection never publishes live socket effects", async () => {
         type: "websocket_event",
         request_id: "connect-1",
         actor: { ...actorIdentity, actor_name: "RejectingRoom" },
-        sqlite: await seed(null),
         connections: [],
         event: { type: "connect", connection: { id: "socket-1", metadata: {}, tags: [] } }
     })
@@ -349,8 +351,7 @@ test("batches pending stream output in order and surfaces publish failures", asy
         request_id: "burst",
         actor: { ...actorIdentity, actor_name: "BurstActor" },
         method: "stream",
-        args: [],
-        sqlite: await seed(null)
+        args: []
     }
     const runtime = new ActorRuntime(
         definition,
@@ -377,25 +378,6 @@ test("batches pending stream output in order and surfaces publish failures", asy
     if (reply.type === "failed") assert.match(reply.message, /publish denied/)
 })
 
-test("a resident-only command requests hydration before constructing or executing an actor", async () => {
-    const runtime = new ActorRuntime(counterDefinition, () => {})
-    const command = {
-        type: "invoke" as const,
-        request_id: "resident-1",
-        actor: actorIdentity,
-        method: "increment",
-        args: [1],
-        sqlite: await seed(null),
-        resident_only: true
-    }
-    assert.deepEqual(await runtime.handle(command), { type: "state_required" })
-    assertReply(await runtime.handle({ ...command, resident_only: false, sqlite: await seed({ count: 9 }) }), {
-        type: "invoked",
-        result: 10
-    })
-    assertReply(await runtime.handle(command), { type: "invoked", result: 11 })
-})
-
 test("a resident actor rejects another type or ID without changing its state", async () => {
     const runtime = new ActorRuntime(counterDefinition, () => {})
     const command = {
@@ -403,8 +385,7 @@ test("a resident actor rejects another type or ID without changing its state", a
         request_id: "identity-1",
         actor: actorIdentity,
         method: "increment",
-        args: [1],
-        sqlite: await seed(null)
+        args: [1]
     }
     assertReply(await runtime.handle(command), { type: "invoked", result: 1 })
     for (const actor of [
@@ -430,8 +411,7 @@ test("keeps a successful actor instance resident and restores it after atomic fa
             request_id: "request-1",
             actor: actorIdentity,
             method: "increment",
-            args: [2],
-            sqlite: await seed(null)
+            args: [2]
         }),
         { type: "invoked", result: 2 }
     )
@@ -441,8 +421,7 @@ test("keeps a successful actor instance resident and restores it after atomic fa
             request_id: "request-2",
             actor: actorIdentity,
             method: "increment",
-            args: [3],
-            sqlite: await seed({ count: 2 })
+            args: [3]
         }),
         { type: "invoked", result: 5 }
     )
@@ -452,8 +431,7 @@ test("keeps a successful actor instance resident and restores it after atomic fa
             request_id: "request-3",
             actor: actorIdentity,
             method: "getCount",
-            args: [],
-            sqlite: await seed({ count: 2 })
+            args: []
         }),
         { type: "invoked", result: 5 }
     )
@@ -464,8 +442,7 @@ test("keeps a successful actor instance resident and restores it after atomic fa
             request_id: "request-4",
             actor: actorIdentity,
             method: "getIdentity",
-            args: [],
-            sqlite: await seed({ count: 2 })
+            args: []
         }),
         { type: "invoked", result: "counter-1" }
     )
@@ -476,8 +453,7 @@ test("keeps a successful actor instance resident and restores it after atomic fa
             request_id: "request-5",
             actor: actorIdentity,
             method: "explode",
-            args: [],
-            sqlite: await seed({ count: 2 })
+            args: []
         }),
         { type: "failed", code: "actor_method_failed", message: "boom" }
     )
@@ -487,8 +463,7 @@ test("keeps a successful actor instance resident and restores it after atomic fa
             request_id: "request-6",
             actor: actorIdentity,
             method: "getCount",
-            args: [],
-            resident_only: true
+            args: []
         }),
         { type: "invoked", result: 5 }
     )
@@ -564,8 +539,7 @@ test("keeps persisted fields off the socket unless they are emittable", async ()
             request_id: "request-state",
             actor: actorIdentity,
             event: { type: "connect", connection },
-            connections: [connection],
-            sqlite: await seed(null)
+            connections: [connection]
         }),
         {
             type: "websocket_handled",
@@ -586,8 +560,7 @@ test("does not expose actor properties to a rejected connection", async () => {
             request_id: "request-reject",
             actor,
             event: { type: "connect", connection },
-            connections: [connection],
-            sqlite: await seed(null)
+            connections: [connection]
         }),
         {
             type: "websocket_handled",
@@ -613,8 +586,7 @@ test("runs the full socket lifecycle and exposes live actor connections", async 
             request_id: "request-1",
             actor,
             event: { type: "connect", connection },
-            connections: [connection],
-            sqlite: await seed(null)
+            connections: [connection]
         }),
         {
             type: "websocket_handled",
@@ -642,8 +614,7 @@ test("runs the full socket lifecycle and exposes live actor connections", async 
                 connection_id: "connection-1",
                 message: { type: "text", data: JSON.stringify({ text: "hello" }) }
             },
-            connections: [connected],
-            sqlite: await seed({ events: ["connect:user-1:1"] })
+            connections: [connected]
         }),
         {
             type: "websocket_handled",
@@ -665,8 +636,7 @@ test("runs the full socket lifecycle and exposes live actor connections", async 
             request_id: "request-announce",
             actor,
             method: "announce",
-            args: ["announcement"],
-            sqlite: await seed({ events: ["connect:user-1:1", "message:user-1:hello"] })
+            args: ["announcement"]
         }),
         {
             type: "invoked",
@@ -689,8 +659,7 @@ test("runs the full socket lifecycle and exposes live actor connections", async 
             request_id: "request-3",
             actor,
             event: { type: "disconnect", connection: connected, code: 1000, reason: "done", was_clean: true },
-            connections: [],
-            sqlite: await seed({ events: ["connect:user-1:1", "message:user-1:hello"] })
+            connections: []
         }),
         {
             type: "websocket_handled",
@@ -716,8 +685,7 @@ test("the injected invoker remains available inside actor unit tests", async () 
                     request_id: "parent-request",
                     actor: forwarderIdentity,
                     method: "incrementCounter",
-                    args: [],
-                    sqlite: await seed(null)
+                    args: []
                 }),
                 {
                     type: "failed",

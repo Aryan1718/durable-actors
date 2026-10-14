@@ -6,8 +6,8 @@ import tempfile
 from pathlib import Path
 
 import pytest
-from fixtures.executor import build, warm_executor
-from fixtures.sqlite import commit, fields, seed
+from fixtures.executor import ExecutorHost, build, warm_executor
+from fixtures.host_database import HostDatabase
 
 from durable_actors.build import build_actor
 
@@ -24,7 +24,6 @@ class Settings(Actor):
 """,
     )
     actor = {"project_id": "local", "actor_name": "Settings", "actor_id": "one"}
-    state = seed()
 
     async def send(message_id, command):
         host.send({"type": "command", "message_id": message_id, "command": command})
@@ -34,10 +33,8 @@ class Settings(Actor):
         "type": "invoke",
         "request_id": "read",
         "actor": actor,
-        "sqlite": state,
         "method": "read",
         "args": ["PAYMENTS_API_KEY"],
-        "resident_only": False,
     }
     async with warm_executor(entrypoint, {"PAYMENTS_API_KEY": "secret"}) as host:
         assert (await send(1, read))["result"] == "secret"
@@ -61,82 +58,46 @@ class Counter(Actor):
     contract = build_actor(project, "actors.py", tmp_path / "build")
     assert contract["actors"][0]["actorName"] == "Counter"
     actor = {"project_id": "local", "actor_name": "Counter", "actor_id": "one"}
-    state = seed()
+    database = HostDatabase()
     with tempfile.TemporaryDirectory(dir="/tmp") as short:
         for expected in (2, 4):
             done = asyncio.get_running_loop().create_future()
 
             async def accepted(reader, writer):
+                host = ExecutorHost(reader, writer, database)
                 try:
                     if generic:
-                        assert json.loads(await reader.readline()) == {
-                            "type": "warm",
-                            "protocol": 26,
-                        }
-                        writer.write(
-                            (
-                                json.dumps(
-                                    {
-                                        "type": "load",
-                                        "entrypoint": str(tmp_path / "build/actors.pyz"),
-                                        "environment": {},
-                                    }
-                                )
-                                + "\n"
-                            ).encode()
+                        assert await host.receive() == {"type": "warm", "protocol": 27}
+                        host.send(
+                            {
+                                "type": "load",
+                                "entrypoint": str(tmp_path / "build/actors.pyz"),
+                                "environment": {},
+                            }
                         )
-                        await writer.drain()
-                    attached = json.loads(await reader.readline())
-                    assert attached == {
+                    assert await host.receive() == {
                         "type": "attach",
-                        "protocol": 26,
+                        "protocol": 27,
                         "actor_names": ["Counter"],
                     }
-                    writer.write(b'{"type":"attached","protocol":26}\n')
-                    writer.write(
-                        (
-                            json.dumps(
-                                {
-                                    "type": "command",
-                                    "message_id": 1,
-                                    "command": {
-                                        "type": "invoke",
-                                        "request_id": "r1",
-                                        "actor": actor,
-                                        "sqlite": state,
-                                        "method": "increment",
-                                        "args": [2],
-                                    },
-                                }
-                            )
-                            + "\n"
-                        ).encode()
+                    host.send({"type": "attached", "protocol": 27})
+                    host.send(
+                        {
+                            "type": "command",
+                            "message_id": 1,
+                            "command": {
+                                "type": "invoke",
+                                "request_id": "r1",
+                                "actor": actor,
+                                "method": "increment",
+                                "args": [2],
+                            },
+                        }
                     )
-                    await writer.drain()
-                    assert json.loads(await reader.readline()) == {
-                        "type": "persist_sqlite",
-                        "message_id": 1,
-                        "commit_id": 1,
-                        "mode": "atomic_snapshot",
-                    }
-                    writer.write(
-                        (
-                            json.dumps(
-                                {
-                                    "type": "sqlite_persisted",
-                                    "message_id": 1,
-                                    "commit_id": 1,
-                                    "txid": commit(state),
-                                }
-                            )
-                            + "\n"
-                        ).encode()
-                    )
-                    await writer.drain()
-                    reply = json.loads(await reader.readline())
-                    assert reply["reply"]["result"] == expected
-                    assert fields(state) == {"count": expected}
-                    done.set_result({**state, **reply["reply"]["sqlite"]})
+                    reply = await host.receive()
+                    assert reply["reply"] == {"type": "invoked", "result": expected}
+                    assert database.fields() == {"count": expected}
+                    done.set_result(None)
                 except BaseException as error:
                     done.set_exception(error)
                 finally:
@@ -158,7 +119,7 @@ class Counter(Actor):
                 stderr=asyncio.subprocess.PIPE,
             )
             try:
-                state = await asyncio.wait_for(done, 10)
+                await asyncio.wait_for(done, 10)
             finally:
                 if process.returncode is None:
                     process.terminate()
@@ -209,32 +170,15 @@ class Counter(Actor):
         try:
             async with asyncio.timeout(5):
                 reader, writer = await connected
-
-                async def receive():
-                    while True:
-                        message = json.loads(await reader.readline())
-                        if message["type"] != "persist_sqlite":
-                            return message
-                        send(
-                            {
-                                "type": "sqlite_persisted",
-                                "message_id": message["message_id"],
-                                "commit_id": message["commit_id"],
-                                "txid": commit(invocation["sqlite"]),
-                            }
-                        )
-
-                def send(message):
-                    writer.write((json.dumps(message) + "\n").encode())
-
+                host = ExecutorHost(reader, writer, HostDatabase())
+                receive, send = host.receive, host.send
                 assert (await receive())["type"] == "attach"
-                send({"type": "attached", "protocol": 26})
+                send({"type": "attached", "protocol": 27})
                 actor = {"project_id": "local", "actor_name": "Counter", "actor_id": "one"}
                 invocation = {
                     "type": "invoke",
                     "request_id": "r1",
                     "actor": actor,
-                    "sqlite": seed(),
                     "method": "hold",
                     "args": [],
                 }
@@ -276,20 +220,15 @@ class Counter(Actor):
                 outcomes = {reply["message_id"]: reply["reply"] for reply in replies}
                 assert outcomes[1]["code"] == "actor_evicted"
                 assert outcomes[2] == {"type": "evicted"}
-                invocation["sqlite"] = seed({"count": 10})
                 send(
                     {
                         "type": "command",
                         "message_id": 3,
-                        "command": {
-                            **invocation,
-                            "method": "increment",
-                            "sqlite": invocation["sqlite"],
-                        },
+                        "command": {**invocation, "method": "increment"},
                     }
                 )
                 restored = (await receive())["reply"]
-                assert restored["result"] == 11
+                assert restored["result"] == 2
                 assert restored["sequence"] == 2
         finally:
             if child_pid is not None:

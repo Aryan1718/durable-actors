@@ -53,7 +53,7 @@ Update documentation and examples when changing a public API, configuration, or 
 
 ## Run checks
 
-SQLite test fixtures use the upstream Go Litestream CLI to create and restore compatible backups. Install Go 1.27.1 and the pinned test tool, then add Go's binary directory to your PATH:
+Rust SQLite test fixtures use the upstream Go Litestream CLI to create and restore compatible backups. Install Go 1.27.1 and the pinned test tool, then add Go's binary directory to your PATH:
 
 ```sh
 go install github.com/benbjohnson/litestream/cmd/litestream@v0.5.17

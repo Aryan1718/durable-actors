@@ -1,6 +1,7 @@
 import type { ActorIdentity } from "../actor/identity.js"
 import type { SocketEffect, SocketSource } from "../actor/socketProtocol.js"
 
+import type { DatabaseCall, DatabaseResult } from "./database.js"
 import type {
     ActorExecutorCommand,
     ActorExecutorReply,
@@ -9,8 +10,6 @@ import type {
     InvokeCommand,
     WebSocketEventCommand
 } from "./protocol.js"
-import type { SqlitePersister } from "./sqlite-persistence.js"
-import type { SqliteCommitter } from "./sqlite.js"
 import type { ActorWorkerSupervisor } from "./worker-supervisor.js"
 
 interface ActorHostSettings {
@@ -21,11 +20,12 @@ interface ActorHostSettings {
 
 type SocketPublisher = (effects: readonly SocketEffect[]) => Promise<void>
 
+type DatabaseRequester = (call: DatabaseCall) => Promise<DatabaseResult>
+
 type ActorCommandHandler = (
     command: ActorExecutorCommand,
     allowNextInvocation: () => void,
-    commit: SqliteCommitter,
-    persist: SqlitePersister,
+    database: DatabaseRequester,
     publish?: SocketPublisher,
     connections?: SocketSource
 ) => Promise<ActorExecutorReply>
@@ -56,8 +56,7 @@ interface ActorWorkerHandle {
     execute(
         command: InvokeCommand | WebSocketEventCommand | HydrateCommand,
         allowNextInvocation: () => void,
-        commit: SqliteCommitter,
-        persist: SqlitePersister,
+        database: DatabaseRequester,
         publish?: SocketPublisher,
         connections?: SocketSource
     ): Promise<ActorExecutorReply>
@@ -74,6 +73,7 @@ export type {
     ActorWorkerState,
     ActorWorkerSupervisorFactory,
     ActorWorkerSupervisorOptions,
+    DatabaseRequester,
     ResidentActorWorkerOptions,
     SocketPublisher,
     SocketSource

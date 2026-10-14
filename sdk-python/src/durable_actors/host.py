@@ -16,7 +16,7 @@ from .client import component
 from .contract import Document
 from .executor_wire import Channel, serialize
 from .runtime import ActorRuntime, failed
-from .sqlite import SqliteStorage, valid_txid
+from .sqlite import DatabaseProxy
 
 message_id: ContextVar[int] = ContextVar("actor_message_id")
 
@@ -29,12 +29,12 @@ class Session(Channel):
         self.pending: dict[tuple[str, int], asyncio.Future[Any]] = {}
         self.tasks: set[asyncio.Task[None]] = set()
         self.residency: asyncio.Task[None] | None = None
-        self.next_persistence_id = 0
+        self.database_calls = asyncio.Lock()
 
     async def run(self, entrypoint: str | None, generic: bool) -> None:
         try:
             if generic:
-                await self.send({"type": "warm", "protocol": 26})
+                await self.send({"type": "warm", "protocol": 27})
                 assignment = await self.read()
                 if (
                     assignment.get("type") != "load"
@@ -49,15 +49,15 @@ class Session(Channel):
                 while not path.is_file():
                     await asyncio.sleep(0.01)
             actors = load_artifact(path)
+            database = DatabaseProxy(self.call_database, asyncio.get_running_loop())
             self.runtimes = {
-                actor.__name__: ActorRuntime(actor, self, SqliteStorage(self.commit_sqlite))
-                for actor in actors
+                actor.__name__: ActorRuntime(actor, self, database) for actor in actors
             }
             await self.send(
-                {"type": "attach", "protocol": 26, "actor_names": sorted(self.runtimes)}
+                {"type": "attach", "protocol": 27, "actor_names": sorted(self.runtimes)}
             )
             attached = await self.read()
-            if attached.get("type") != "attached" or attached.get("protocol") != 26:
+            if attached.get("type") != "attached" or attached.get("protocol") != 27:
                 raise ValueError("unsupported executor protocol")
             if attached.get("supports_residency"):
                 self.residency = asyncio.create_task(self.report_residency())
@@ -73,7 +73,7 @@ class Session(Channel):
                 elif message["type"] in {
                     "socket_connections",
                     "socket_effects_published",
-                    "sqlite_persisted",
+                    "database_result",
                 }:
                     pending = self.pending.pop((message["type"], message["message_id"]))
                     if pending.cancelled():
@@ -82,8 +82,8 @@ class Session(Channel):
                         pending.set_exception(RuntimeError(message["error"]))
                     else:
                         pending.set_result(
-                            message
-                            if message["type"] == "sqlite_persisted"
+                            message.get("result")
+                            if message["type"] == "database_result"
                             else message.get("connections")
                         )
                 else:
@@ -116,18 +116,12 @@ class Session(Channel):
         if not task.cancelled() and task.exception() is not None:
             self.writer.close()
 
-    async def commit_sqlite(self) -> int:
-        self.next_persistence_id += 1
-        commit_id = self.next_persistence_id
-        reply = await self.exchange(
-            "persist_sqlite", "sqlite_persisted", commit_id=commit_id, mode="atomic_snapshot"
-        )
-        if reply.get("commit_id") != commit_id:
-            raise ValueError("unexpected SQLite persistence acknowledgment")
-        txid = reply.get("txid")
-        if not valid_txid(txid):
-            raise ValueError("invalid host commit position")
-        return int(txid)
+    async def call_database(self, call: Document) -> Document:
+        # The host accepts one outstanding database call per invocation.
+        async with self.database_calls:
+            return cast(
+                Document, await self.exchange("database_call", "database_result", call=call)
+            )
 
     async def publish(self, effects: list[Document]) -> None:
         await self.exchange("socket_effects", "socket_effects_published", effects=effects)

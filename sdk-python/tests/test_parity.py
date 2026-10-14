@@ -1,11 +1,10 @@
 import importlib
 import json
 import subprocess
-import sys
 
 import httpx
 import pytest
-from fixtures.sqlite import seed
+from fixtures.typecheck import checker_command
 from test_authoring import Chat
 
 from durable_actors import ActorInvocationError, Client
@@ -114,7 +113,7 @@ def check(client: Client) -> None:
 """)
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, str(source)],
+            checker_command(checker, source),
             cwd=tmp_path,
             capture_output=True,
             text=True,
@@ -126,7 +125,7 @@ def check(client: Client) -> None:
     )
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, str(source)],
+            checker_command(checker, source),
             cwd=tmp_path,
             capture_output=True,
             text=True,
@@ -172,7 +171,7 @@ class Echo(Actor[None, str]):
 """)
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, str(source)],
+            checker_command(checker, source),
             cwd=tmp_path,
             capture_output=True,
             text=True,
@@ -190,7 +189,7 @@ def bad(room: Room, socket: ActorSocket[str, str, Tag], echo: Echo) -> None:
     )
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, str(source)],
+            checker_command(checker, source),
             cwd=tmp_path,
             capture_output=True,
             text=True,
@@ -202,7 +201,7 @@ async def test_socket_tag_contract_rejects_values_outside_the_declared_set():
     from typing import Literal
 
     from fixtures.effects import Effects
-    from fixtures.sqlite import ActorRuntime
+    from fixtures.runtime import ActorRuntime
 
     from durable_actors import Actor, ActorSocket
 
@@ -215,7 +214,6 @@ async def test_socket_tag_contract_rejects_values_outside_the_declared_set():
         {
             "type": "websocket_event",
             "actor": {"project_id": "local", "actor_name": "Room", "actor_id": "one"},
-            "sqlite": seed(),
             "event": {
                 "type": "connect",
                 "connection": {"id": "socket", "metadata": "Ada", "tags": []},
@@ -271,7 +269,7 @@ Counter.get("one").increment("bad")
 """)
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, str(source)],
+            checker_command(checker, source),
             cwd=tmp_path,
             capture_output=True,
             text=True,

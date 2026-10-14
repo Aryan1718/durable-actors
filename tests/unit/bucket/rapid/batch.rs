@@ -378,10 +378,7 @@ async fn write_history(
     writer: &RapidSnapshots,
     count: u64,
 ) -> Result<(Arc<crate::litestream::Litestream>, Vec<Bytes>)> {
-    use crate::litestream::{
-        Litestream, Replicator,
-        storage::{SqliteCapture, SqliteState},
-    };
+    use crate::litestream::{Litestream, Replicator, storage::SqliteCapture};
     writer.start(&f.stream).await?;
     let replication = Arc::new(Litestream::default());
     let mut capture = SqliteCapture::new(replication.clone()).await?;
@@ -395,7 +392,7 @@ async fn write_history(
         db.execute("INSERT INTO entries VALUES (?)", [version as i64])?;
         db.execute("UPDATE __terse_fields SET value=?", [version.to_string()])?;
         let txid = replication.sync(&capture.path()).await?;
-        let files = capture.capture(&SqliteState::position(txid)).await?;
+        let files = capture.capture(txid).await?;
         let snapshot = StateSnapshot::new(
             version,
             1,
@@ -571,10 +568,7 @@ async fn partial_flush_cannot_acknowledge_a_write_and_remains_recoverable() -> R
 #[tokio::test]
 async fn archived_sqlite_parent_and_rapid_tail_restore_together() -> Result<()> {
     use crate::{
-        litestream::{
-            Litestream, Replicator,
-            storage::{SqliteCapture, SqliteState},
-        },
+        litestream::{Litestream, Replicator, storage::SqliteCapture},
         state_log::SqliteSnapshot,
         storage::SnapshotRef,
     };
@@ -591,7 +585,7 @@ async fn archived_sqlite_parent_and_rapid_tail_restore_together() -> Result<()> 
         SqliteSnapshot {
             txid,
             parent: None,
-            files: capture.capture(&SqliteState::position(txid)).await?,
+            files: capture.capture(txid).await?,
         },
         serde_json::json!(1),
     )?;
@@ -605,7 +599,7 @@ async fn archived_sqlite_parent_and_rapid_tail_restore_together() -> Result<()> 
         SqliteSnapshot {
             txid,
             parent: Some(SnapshotRef::new(f.stream.object(1), &first, &first_bytes)),
-            files: capture.capture(&SqliteState::position(txid)).await?,
+            files: capture.capture(txid).await?,
         },
         serde_json::json!(2),
     )?;

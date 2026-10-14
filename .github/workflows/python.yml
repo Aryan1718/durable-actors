@@ -29,7 +29,6 @@ jobs:
             - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
               with:
                   shared-key: validation-ubuntu-24.04
-            - uses: ./.github/actions/setup-test-litestream
             - name: Build native runtime
               run: cargo build --locked
             - name: Install Python dependencies

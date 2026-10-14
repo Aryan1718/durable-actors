@@ -12,7 +12,7 @@ from .actor_base import ActorBase
 from .contract import Document, Method, decode, describe_actor, encode
 from .database import actor_database_invocation, bind_actor_database
 from .socket import Effects, SocketScope, scope_context
-from .sqlite import SqliteCaptureError, Storage
+from .sqlite import DatabaseCommitError, DatabaseProxy
 from .threads import run_in_thread
 
 
@@ -21,7 +21,7 @@ class ActorRuntime:
         self,
         actor: type[ActorBase[Any, Any, Any, Any]],
         effects: Effects,
-        database: Storage,
+        database: DatabaseProxy,
     ) -> None:
         self.effects = effects
         self.database = database
@@ -64,7 +64,6 @@ class ActorRuntime:
         await asyncio.gather(*tasks, return_exceptions=True)
         self.instance = None
         self.fatal = None
-        self.database.close()
         return {"type": "evicted"}
 
     async def run(self, command: Document) -> Document:
@@ -95,13 +94,9 @@ class ActorRuntime:
 
     async def execute(self, command: Document, admit: Any) -> Document:
         if self.instance is None:
-            if command.get("resident_only"):
-                return {"type": "state_required"}
             try:
-                self.database.restore(command.get("sqlite"))
-                self.restore(self.database.fields())
+                self.restore(await self.database.fields())
             except Exception as error:
-                self.database.close()
                 return failed("invalid_actor_state", str(error))
         if command["type"] == "hydrate":
             return {"type": "hydrated"}
@@ -150,17 +145,14 @@ class ActorRuntime:
                 state = self.snapshot()
                 previous = self.last_state if self.definition.reentrant_methods else before
                 effects.extend(self.state_updates(previous, state, command))
-                await run_in_thread(partial(self.database.persist_fields, state))
+                await self.database.replace_fields(state)
                 try:
-                    sqlite = await self.database.snapshot()
-                except SqliteCaptureError as error:
+                    await self.database.commit()
+                except DatabaseCommitError as error:
                     self.fatal = failed("actor_database_failed", str(error))
                     return self.fatal
                 self.last_state = state
-                reply: Document = {
-                    "type": "websocket_handled" if socket_event else "invoked",
-                    "sqlite": sqlite,
-                }
+                reply: Document = {"type": "websocket_handled" if socket_event else "invoked"}
                 if not socket_event:
                     reply["result"] = result
                 if socket_event or effects:
@@ -172,11 +164,11 @@ class ActorRuntime:
         except asyncio.CancelledError:
             if not self.definition.reentrant_methods:
                 self.instance = None
-                await run_in_thread(self.database.rollback)
+                await self.database.rollback()
             raise
         except Exception as error:
             if not self.definition.reentrant_methods:
-                self.database.rollback()
+                await self.database.rollback()
                 self.restore(before)
             return failed(
                 "actor_socket_failed" if socket_event else "actor_method_failed", str(error)

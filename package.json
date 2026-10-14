@@ -3,21 +3,22 @@
     "private": true,
     "license": "MIT",
     "scripts": {
-        "build": "bun run --bun --cwd sdk build && bun scripts/build-runtime.mjs",
+        "build": "bun run --bun --cwd sdk build && bun run --bun --cwd packages/pi-durable build && bun scripts/build-runtime.mjs",
         "build:observer": "bun run --bun --cwd sdk build:observer",
         "start": "bun sdk/dist/cli.js start",
         "start:cloud": "bun scripts/tunnel.mjs --start",
         "dev": "cargo run --release",
         "tunnel": "bun scripts/tunnel.mjs",
-        "format": "cargo fmt --all && bun run --bun --cwd sdk format && prettier --write \"scripts/*.mjs\" \"tests/scripts/*.mjs\" && bun run --bun --cwd packages/observer-ui format",
-        "format:check": "cargo fmt --all -- --check && bun run --bun --cwd sdk format:check && prettier --check \"scripts/*.mjs\" \"tests/scripts/*.mjs\" && bun run --bun --cwd packages/observer-ui format:check",
+        "format": "cargo fmt --all && bun run --bun --cwd sdk format && prettier --write \"scripts/*.mjs\" \"tests/scripts/*.mjs\" && bun run --bun --cwd packages/observer-ui format && bun run --bun --cwd packages/pi-durable format",
+        "format:check": "cargo fmt --all -- --check && bun run --bun --cwd sdk format:check && prettier --check \"scripts/*.mjs\" \"tests/scripts/*.mjs\" && bun run --bun --cwd packages/observer-ui format:check && bun run --bun --cwd packages/pi-durable format:check",
         "release:notes": "node scripts/release-notes.mjs",
         "release:prepare": "bun scripts/release.mjs prepare",
         "release:verify": "bun scripts/release.mjs verify",
-        "test": "bun run --bun --cwd packages/observer-ui test && bun test --timeout 60000 tests/scripts/*.test.mjs && cargo test --locked --no-fail-fast && bun run --bun --cwd sdk test",
+        "test": "bun run --bun --cwd packages/observer-ui test && bun test --timeout 60000 tests/scripts/*.test.mjs && cargo test --locked --no-fail-fast && bun run --bun --cwd sdk test && bun run --bun --cwd packages/pi-durable build && bun run --bun --cwd packages/pi-durable test && bun run --bun --cwd examples/pi/pi-cli test",
         "docs:build": "bun run --bun docs:check && bun run --bun --cwd sdk build && bun run --bun --cwd sdk docs",
         "docs:check": "bun test --timeout 60000 tests/scripts/openapi.test.mjs",
-        "staging:persistence": "bun scripts/staging.mjs persistence-tests"
+        "staging:persistence": "bun scripts/staging.mjs persistence/persistence-tests",
+        "staging:pi": "bun scripts/staging.mjs pi/pi-durable"
     },
     "devDependencies": {
         "@apidevtools/swagger-parser": "^12.1.0",
@@ -30,7 +31,9 @@
     "workspaces": [
         "sdk",
         "packages/*",
-        "examples/*"
+        "examples/*",
+        "examples/persistence/*",
+        "examples/pi/*"
     ],
     "engines": {
         "bun": ">=1.4.2"

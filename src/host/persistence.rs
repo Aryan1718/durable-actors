@@ -1,9 +1,6 @@
-use super::{actor_runtime::ActorStorage, storage::HostStorage};
+use super::{actor_database::ActorStorage, storage::HostStorage};
 use crate::{
-    state_transport::{
-        SnapshotWriter, SqlitePersisted, SqlitePersistenceMode, SqliteWrite, SqliteWriter,
-        StateWrite,
-    },
+    state_transport::{SnapshotWriter, StateWrite},
     storage::WritePlan,
 };
 use anyhow::{Context, Result};
@@ -11,36 +8,6 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
-
-pub(super) struct SqlitePersistence {
-    replication: Arc<dyn crate::litestream::Replicator>,
-    durable: Arc<dyn SqliteWriter>,
-}
-
-impl SqlitePersistence {
-    pub fn new(
-        replication: Arc<dyn crate::litestream::Replicator>,
-        durable: Arc<dyn SqliteWriter>,
-    ) -> Self {
-        Self {
-            replication,
-            durable,
-        }
-    }
-}
-
-#[async_trait]
-impl SqliteWriter for SqlitePersistence {
-    async fn persist_sqlite(&self, write: &SqliteWrite) -> Result<SqlitePersisted> {
-        match write.mode {
-            SqlitePersistenceMode::AtomicSnapshot => Ok(SqlitePersisted {
-                txid: self.replication.sync(&write.path).await?,
-                state_version: None,
-            }),
-            SqlitePersistenceMode::DurableWrite => self.durable.persist_sqlite(write).await,
-        }
-    }
-}
 
 pub(super) struct ActorPersistence {
     saves: mpsc::Sender<PendingSave>,

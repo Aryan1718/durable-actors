@@ -1,5 +1,7 @@
 import { ActorDefinitionError } from "../errors.js"
 
+import { ActorResource } from "./resource.js"
+
 /** Marks a method for whole-call transactions. Currently all non-interleaved calls use this behavior. */
 function Atomic(_value: Function, context: ClassMethodDecoratorContext): void {
     if (context.kind !== "method" || context.static || context.private || typeof context.name !== "string")
@@ -33,9 +35,17 @@ function Emittable(_value: undefined, context: ClassFieldDecoratorContext): void
     if (context.private) throw new ActorDefinitionError("@Emittable requires a public field")
 }
 
+/** Marks a property as being a Resource. Includes them in Actor Lifecycle */
+function Resource<This, Value extends ActorResource>(
+    _value: undefined,
+    context: ClassFieldDecoratorContext<This, Value>
+): void {
+    validateField("Resource", context)
+}
+
 function validateField(name: string, context: ClassFieldDecoratorContext): void {
     if (context.kind !== "field" || context.static || typeof context.name !== "string")
         throw new ActorDefinitionError(`@${name} requires an instance field with a string name`)
 }
 
-export { Atomic, Emittable, Ephemeral, Interleave, Persisted }
+export { Atomic, Emittable, Ephemeral, Interleave, Persisted, Resource }

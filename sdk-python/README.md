@@ -15,7 +15,7 @@ uvx --from 'durable-actors[cli]' durable-actors init my-actors
 cd my-actors
 ```
 
-Define `src/actors.py`. Every instance field must use `persisted()` or `ephemeral()`. Persisted fields are stored in SQLite. Litestream is built into the runtime; local development persists to the filesystem. Wrap persisted fields with `emitted()` to broadcast saved changes.
+Define `src/actors.py`. Every instance field must use `persisted()` or `ephemeral()`. Persisted fields are stored in SQLite, which the Rust runtime owns and replicates with Litestream; local development persists to the filesystem. Wrap persisted fields with `emitted()` to broadcast saved changes.
 
 ```python
 from durable_actors import Actor, emitted, persisted

@@ -1,0 +1,17 @@
+{
+    "name": "durable-actors-example-persistence-tests",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "durable-actors dev",
+        "test": "bun test --timeout 60000 ./tests",
+        "check": "tsc --noEmit"
+    },
+    "dependencies": {
+        "durable-actors": "workspace:^"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "typescript": "~5.9.3"
+    }
+}

@@ -10,12 +10,14 @@ interface CompilerOptions {
 
 interface SdkSymbols {
     readonly Actor: ts.Symbol
+    readonly ActorResource?: ts.Symbol
     readonly Persisted: ts.Symbol
     readonly Ephemeral: ts.Symbol
     readonly Emittable: ts.Symbol
     readonly Atomic?: ts.Symbol
     readonly Interleave?: ts.Symbol
     readonly Compute?: ts.Symbol
+    readonly Resource?: ts.Symbol
 }
 
 enum AnnotationKind {
@@ -23,7 +25,8 @@ enum AnnotationKind {
     Emission = "emission",
     Interleave = "interleave",
     Atomicity = "atomicity",
-    Compute = "compute"
+    Compute = "compute",
+    Resource = "resource"
 }
 
 interface PersistenceAnnotation {
@@ -37,6 +40,10 @@ type Annotation =
     | { readonly kind: AnnotationKind.Compute; readonly node: ts.Decorator; readonly options: ComputeOptions }
     | {
           readonly kind: AnnotationKind.Emission | AnnotationKind.Interleave | AnnotationKind.Atomicity
+          readonly node: ts.Decorator
+      }
+    | {
+          readonly kind: AnnotationKind.Resource
           readonly node: ts.Decorator
       }
 
@@ -53,6 +60,7 @@ interface DecoratorResult {
 
 interface ParsedMember extends DecoratorResult {
     readonly node: ts.ClassElement
+    readonly resource: boolean
 }
 
 interface ParsedActor extends DecoratorResult {

@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks"
 import { parentPort, workerData } from "node:worker_threads"
+import type { TransferListItem } from "node:worker_threads"
 
 import { Actor, findActorDefinition, registerActorClass } from "../actor/actor.js"
 import type { ActorClass } from "../actor/actor.js"
@@ -9,10 +10,11 @@ import type { SocketEffect, SocketLookup, SocketQuery } from "../actor/socketPro
 import { ActorConfigurationError, ActorDefinitionError, errorMessage } from "../errors.js"
 
 import { ActorRuntime } from "./actor-runtime.js"
+import { requestDatabaseCall } from "./database-bridge.js"
+import { DatabaseProxy } from "./database.js"
+import type { DatabaseCall, DatabaseResult } from "./database.js"
 import { failedReply } from "./protocol.js"
 import type { ActorWorkerData, ActorWorkerMessage, ActorWorkerRequest } from "./protocol.js"
-import { persistenceBuffer, waitForPersistence } from "./sqlite-persistence.js"
-import { SqliteActorDatabase } from "./sqlite.js"
 
 const port = parentPort
 if (port === null) throw new Error("actor Worker requires a parent message port")
@@ -22,12 +24,11 @@ let runtime: ActorRuntime | undefined
 // Bun 1.3 can drain microtasks after process.exit().
 process.once("exit", () => {
     exiting = true
-    runtime?.close()
+    void runtime?.close().catch(() => undefined)
 })
 
 let assigned = false
 const invocation = new AsyncLocalStorage<number>()
-const committing = new Map<number, { resolve: (txid: number) => void; reject: (error: Error) => void }>()
 const publishing = new Map<number, { resolve: () => void; reject: (error: Error) => void }>()
 const loadingConnections = new Map<
     number,
@@ -50,14 +51,6 @@ async function initialize(data: ActorWorkerData): Promise<void> {
         const actorNames = await loadActorEntrypoint(data.moduleUrl)
         port!.on("message", (message: ActorWorkerRequest) => {
             if (message.type === "load") throw new Error("customer code already assigned")
-            if (message.type === "sqlite_committed") {
-                const pending = committing.get(message.messageId)
-                committing.delete(message.messageId)
-                if (message.error !== undefined) pending?.reject(new Error(message.error))
-                else if (message.txid !== undefined) pending?.resolve(message.txid)
-                else pending?.reject(new Error("host omitted SQLite commit position"))
-                return
-            }
             if (message.type === "socket_connections") {
                 const pending = loadingConnections.get(message.messageId)
                 loadingConnections.delete(message.messageId)
@@ -87,7 +80,7 @@ async function initialize(data: ActorWorkerData): Promise<void> {
             runtime ??= new ActorRuntime(
                 definition,
                 allowNextInvocation,
-                new SqliteActorDatabase(commitSqlite, persistSqlite),
+                new DatabaseProxy(callDatabase),
                 publish,
                 getConnections
             )
@@ -109,8 +102,8 @@ async function initialize(data: ActorWorkerData): Promise<void> {
     }
 }
 
-function post(message: ActorWorkerMessage): void {
-    if (!exiting) port!.postMessage(message)
+function post(message: ActorWorkerMessage, transfer?: readonly TransferListItem[]): void {
+    if (!exiting) port!.postMessage(message, transfer)
 }
 
 function allowNextInvocation(): void {
@@ -119,31 +112,10 @@ function allowNextInvocation(): void {
     post({ type: "ready_for_invocation", messageId })
 }
 
-function commitSqlite(): Promise<number> {
-    return new Promise((resolve, reject) => {
-        const messageId = invocation.getStore()
-        if (messageId === undefined) throw new Error("SQLite commit has no active invocation")
-        if (committing.has(messageId)) throw new Error("actor SQLite commit is already pending")
-        committing.set(messageId, { resolve, reject })
-        post({ type: "commit_sqlite", messageId })
-    })
-}
-
-let nextCommitId = 0
-
-function persistSqlite(): number {
+function callDatabase(call: DatabaseCall): DatabaseResult {
     const messageId = invocation.getStore()
-    if (messageId === undefined) throw new Error("SQLite persistence has no active invocation")
-    const captured = requestPersistence(messageId)
-    return requestPersistence(messageId, captured.txid).txid
-}
-
-function requestPersistence(messageId: number, txid?: number) {
-    const commitId = ++nextCommitId
-    if (!Number.isSafeInteger(commitId)) throw new Error("SQLite persistence request ID overflow")
-    const buffer = persistenceBuffer()
-    post({ type: "persist_sqlite", messageId, commitId, buffer, txid })
-    return waitForPersistence(buffer)
+    if (messageId === undefined || exiting) throw new Error("actor database call has no active invocation")
+    return requestDatabaseCall(request => post({ type: "database_call", messageId, call, request }, [request.port]))
 }
 
 function publish(effects: readonly SocketEffect[]): Promise<void> {

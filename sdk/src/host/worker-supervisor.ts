@@ -6,6 +6,9 @@ import type { SocketQuery } from "../actor/socketProtocol.js"
 import type { SocketEffect } from "../actor/socketProtocol.js"
 import { errorMessage } from "../errors.js"
 
+import { completeDatabaseCall } from "./database-bridge.js"
+import type { DatabaseRequest } from "./database-bridge.js"
+import type { DatabaseCall } from "./database.js"
 import { failedReply } from "./protocol.js"
 import type {
     ActorExecutorCommand,
@@ -18,14 +21,12 @@ import type {
     InvokeCommand,
     WebSocketEventCommand
 } from "./protocol.js"
-import { completePersistence } from "./sqlite-persistence.js"
-import type { SqlitePersister } from "./sqlite-persistence.js"
-import type { SqliteCommitter } from "./sqlite.js"
 import type {
     ActorWorkerFactory,
     ActorWorkerHandle,
     ActorWorkerState,
     ActorWorkerSupervisorOptions,
+    DatabaseRequester,
     ResidentActorWorkerOptions,
     SocketPublisher,
     SocketSource
@@ -42,13 +43,12 @@ class ActorWorker implements ActorWorkerHandle {
             resolve: (reply: ActorExecutorReply) => void
             reject: (error: Error) => void
             allowNextInvocation: (() => void) | undefined
-            commit: SqliteCommitter
-            persist: SqlitePersister
+            database: DatabaseRequester
             publish: SocketPublisher | undefined
             connections: SocketSource | undefined
         }
     >()
-    private readonly persisting = new Set<SharedArrayBuffer>()
+    private readonly databaseCalls = new Set<DatabaseRequest>()
     private nextMessageId = 0
     private lifecycleState: ActorWorkerState = "starting"
     private terminalError: Error | undefined
@@ -105,11 +105,8 @@ class ActorWorker implements ActorWorkerHandle {
                 allowNextInvocation()
                 return
             }
-            case "persist_sqlite":
-                void this.persistSqlite(message.messageId, message.commitId, message.buffer, message.txid)
-                return
-            case "commit_sqlite":
-                void this.commitSqlite(message.messageId)
+            case "database_call":
+                void this.callDatabase(message.messageId, message.call, message.request)
                 return
             case "get_connections":
                 void this.loadConnections(message.messageId, message.query)
@@ -158,8 +155,7 @@ class ActorWorker implements ActorWorkerHandle {
     async execute(
         command: InvokeCommand | WebSocketEventCommand | HydrateCommand,
         allowNextInvocation: () => void,
-        commit: SqliteCommitter,
-        persist: SqlitePersister,
+        database: DatabaseRequester,
         publish?: SocketPublisher,
         connections?: SocketSource
     ): Promise<ActorExecutorReply> {
@@ -174,8 +170,7 @@ class ActorWorker implements ActorWorkerHandle {
                     resolve,
                     reject,
                     allowNextInvocation,
-                    commit,
-                    persist,
+                    database,
                     publish,
                     connections
                 })
@@ -190,33 +185,16 @@ class ActorWorker implements ActorWorkerHandle {
         this.stop(new ActorWorkerTerminatedError(reason))
     }
 
-    private async persistSqlite(
-        messageId: number,
-        commitId: number,
-        buffer: SharedArrayBuffer,
-        txid?: number
-    ): Promise<void> {
-        this.persisting.add(buffer)
+    private async callDatabase(messageId: number, call: DatabaseCall, request: DatabaseRequest): Promise<void> {
+        this.databaseCalls.add(request)
         try {
-            const pending = this.pending.get(messageId)
-            if (pending === undefined) throw new Error("SQLite persistence has no active invocation")
-            const result = txid === undefined ? { txid: await pending.commit() } : await pending.persist(commitId, txid)
-            completePersistence(buffer, { result })
+            const database = this.pending.get(messageId)?.database
+            if (database === undefined) throw new Error("actor database call has no active invocation")
+            completeDatabaseCall(request, { result: await database(call) })
         } catch (error) {
-            completePersistence(buffer, { error: errorMessage(error) })
+            completeDatabaseCall(request, { error: errorMessage(error) })
         } finally {
-            this.persisting.delete(buffer)
-        }
-    }
-
-    private async commitSqlite(messageId: number): Promise<void> {
-        try {
-            const pending = this.pending.get(messageId)
-            if (pending === undefined) throw new Error("SQLite commit has no active invocation")
-            const txid = await pending.commit()
-            this.post({ type: "sqlite_committed", messageId, txid })
-        } catch (error) {
-            this.post({ type: "sqlite_committed", messageId, error: errorMessage(error) })
+            this.databaseCalls.delete(request)
         }
     }
 
@@ -274,8 +252,8 @@ class ActorWorker implements ActorWorkerHandle {
         this.readyReject?.(this.terminalError)
         this.readyResolve = undefined
         this.readyReject = undefined
-        for (const buffer of this.persisting) completePersistence(buffer, { error: this.terminalError.message })
-        this.persisting.clear()
+        for (const request of this.databaseCalls) completeDatabaseCall(request, { error: this.terminalError.message })
+        this.databaseCalls.clear()
         for (const pending of this.pending.values()) pending.reject(this.terminalError)
         this.pending.clear()
         this.worker.unref()
@@ -311,8 +289,7 @@ class ActorWorkerSupervisor {
     async handle(
         command: ActorExecutorCommand,
         allowNextInvocation: () => void,
-        commit: SqliteCommitter,
-        persist: SqlitePersister,
+        database: DatabaseRequester,
         publish?: SocketPublisher,
         connections?: SocketSource
     ): Promise<ActorExecutorReply> {
@@ -327,7 +304,7 @@ class ActorWorkerSupervisor {
             case "websocket_event":
                 try {
                     if (this.actorNames === undefined) await this.ready()
-                    return await this.execute(command, allowNextInvocation, commit, persist, publish, connections)
+                    return await this.execute(command, allowNextInvocation, database, publish, connections)
                 } catch (error) {
                     return failedReply("actor_worker_failed", errorMessage(error))
                 }
@@ -378,8 +355,7 @@ class ActorWorkerSupervisor {
     private execute(
         command: InvokeCommand | WebSocketEventCommand | HydrateCommand,
         allowNextInvocation: () => void,
-        commit: SqliteCommitter,
-        persist: SqlitePersister,
+        database: DatabaseRequester,
         publish?: SocketPublisher,
         connections?: SocketSource
     ): Promise<ActorExecutorReply> {
@@ -393,7 +369,6 @@ class ActorWorkerSupervisor {
         }
         let actor = this.resident
         if (actor === undefined) {
-            if (command.resident_only) return Promise.resolve({ type: "state_required" })
             actor = new ResidentActorWorker({
                 identity: command.actor,
                 sequenceBase: this.lastSequence,
@@ -405,7 +380,7 @@ class ActorWorkerSupervisor {
             this.resident = actor
         }
         const base = actor.sequenceBase
-        return actor.execute(command, allowNextInvocation, commit, persist, publish, connections).then(reply => {
+        return actor.execute(command, allowNextInvocation, database, publish, connections).then(reply => {
             if ((reply.type === "invoked" || reply.type === "websocket_handled") && reply.sequence !== undefined) {
                 const sequence = base + reply.sequence
                 this.lastSequence = Math.max(this.lastSequence, sequence)
@@ -448,18 +423,16 @@ class ResidentActorWorker {
     async execute(
         command: InvokeCommand | WebSocketEventCommand | HydrateCommand,
         allowNextInvocation: () => void,
-        commit: SqliteCommitter,
-        persist: SqlitePersister,
+        database: DatabaseRequester,
         publish?: SocketPublisher,
         connections?: SocketSource
     ): Promise<ActorExecutorReply> {
-        if (this.worker === undefined && command.resident_only) return { type: "state_required" }
         this.worker ??= this.createWorker({ moduleUrl: this.moduleUrl }, this.onActiveActorsChange)
         const worker = this.worker
         this.onActiveActorsChange()
         let reply: ActorExecutorReply
         try {
-            reply = await worker.execute(command, allowNextInvocation, commit, persist, publish, connections)
+            reply = await worker.execute(command, allowNextInvocation, database, publish, connections)
         } catch (error) {
             reply = failedReply(
                 error instanceof ActorWorkerTerminatedError ? "actor_worker_terminated" : "actor_worker_failed",

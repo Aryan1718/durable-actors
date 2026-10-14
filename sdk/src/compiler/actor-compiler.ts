@@ -10,7 +10,9 @@ import { DeclarationCompiler } from "./declarations.js"
 import { readAtomicity, validateAtomicity } from "./features/atomicity.js"
 import { readCompute, validateCompute } from "./features/compute.js"
 import { readInterleave, validateInterleave } from "./features/interleave.js"
-import { readEmission, readPersistence, validatePersistence } from "./features/persistence.js"
+import { validatePersistence } from "./features/persistence.js"
+import { readResource } from "./features/resource.js"
+import { readEmission, readPersistence } from "./fieldParsing.js"
 import { extractPublicSchema } from "./public-schema.js"
 import { rpcContract } from "./rpc-contract.js"
 import { socketContract } from "./socket-contract.js"
@@ -271,8 +273,25 @@ function readActor(node: ts.ClassDeclaration, checker: ts.TypeChecker, sdk: SdkS
     return {
         name: node.name!.text,
         ...readDecorators(node, checker, sdk),
-        members: node.members.map(member => ({ node: member, ...readDecorators(member, checker, sdk) }))
+        members: node.members.map(member => ({
+            node: member,
+            ...readDecorators(member, checker, sdk),
+            resource: isPrivateResource(member, checker, sdk)
+        }))
     }
+}
+
+function isPrivateResource(node: ts.ClassElement, checker: ts.TypeChecker, sdk: SdkSymbols): boolean {
+    if (!ts.isPropertyDeclaration(node) || sdk.ActorResource === undefined || node.initializer === undefined)
+        return false
+    const privateField =
+        ts.isPrivateIdentifier(node.name) ||
+        ts.getModifiers(node)?.some(modifier => modifier.kind === ts.SyntaxKind.PrivateKeyword)
+    if (!privateField || ts.getModifiers(node)?.some(modifier => modifier.kind === ts.SyntaxKind.DeclareKeyword))
+        return false
+    const type = checker.getTypeAtLocation(node)
+    if (type.flags & (ts.TypeFlags.Any | ts.TypeFlags.Never)) return false
+    return checker.isTypeAssignableTo(type, checker.getDeclaredTypeOfSymbol(sdk.ActorResource))
 }
 
 function readDecorators(target: ts.Node, checker: ts.TypeChecker, sdk: SdkSymbols): DecoratorResult {
@@ -282,14 +301,19 @@ function readDecorators(target: ts.Node, checker: ts.TypeChecker, sdk: SdkSymbol
         const call = ts.isCallExpression(node.expression) ? node.expression : undefined
         const symbol = symbolAt(checker, call?.expression ?? node.expression)
         const use = { node, target, called: call !== undefined }
-        const result = readDecorator(symbol, use, sdk)
+        const result = readDecorator(symbol, use, sdk, checker)
         annotations.push(...result.annotations)
         diagnostics.push(...result.diagnostics)
     }
     return { annotations, diagnostics }
 }
 
-function readDecorator(symbol: ts.Symbol | undefined, use: DecoratorUse, sdk: SdkSymbols): DecoratorResult {
+function readDecorator(
+    symbol: ts.Symbol | undefined,
+    use: DecoratorUse,
+    sdk: SdkSymbols,
+    checker: ts.TypeChecker
+): DecoratorResult {
     if (symbol === undefined) return { annotations: [], diagnostics: [] }
     switch (symbol) {
         case sdk.Persisted:
@@ -304,6 +328,8 @@ function readDecorator(symbol: ts.Symbol | undefined, use: DecoratorUse, sdk: Sd
             return readInterleave(use)
         case sdk.Compute:
             return readCompute(use)
+        case sdk.Resource:
+            return readResource(use, sdk, checker)
         default:
             return { annotations: [], diagnostics: [] }
     }
@@ -344,6 +370,8 @@ function resolveSdkSymbols(checker: ts.TypeChecker, source: ts.SourceFile): SdkS
     const atomic = exports.find(symbol => symbol.name === "Atomic")
     const interleave = exports.find(symbol => symbol.name === "Interleave")
     const compute = exports.find(symbol => symbol.name === "Compute")
+    const resource = exports.find(symbol => symbol.name === "Resource")
+    const actorResource = exports.find(symbol => symbol.name === "ActorResource")
     return {
         Actor: resolve("Actor"),
         Persisted: resolve("Persisted"),
@@ -351,7 +379,9 @@ function resolveSdkSymbols(checker: ts.TypeChecker, source: ts.SourceFile): SdkS
         Emittable: resolve("Emittable"),
         ...(atomic === undefined ? {} : { Atomic: canonicalSymbol(checker, atomic) }),
         ...(compute === undefined ? {} : { Compute: canonicalSymbol(checker, compute) }),
-        ...(interleave === undefined ? {} : { Interleave: canonicalSymbol(checker, interleave) })
+        ...(interleave === undefined ? {} : { Interleave: canonicalSymbol(checker, interleave) }),
+        ...(resource === undefined ? {} : { Resource: canonicalSymbol(checker, resource) }),
+        ...(actorResource === undefined ? {} : { ActorResource: canonicalSymbol(checker, actorResource) })
     }
 }
 

@@ -10,7 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 use super::{
     HostId,
-    actor_runtime::{ActorActivation, ActorStorage},
+    actor_database::{ActorActivation, ActorStorage},
 };
 use crate::{
     actor::ActorKey,

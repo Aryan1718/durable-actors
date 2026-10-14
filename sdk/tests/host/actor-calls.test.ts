@@ -6,7 +6,6 @@ import type { ActorConnection } from "../../src/actor/socket.js"
 import { runWithActorClient } from "../../src/client/client.js"
 import { RemoteActorClient } from "../../src/client/remoteClient.js"
 import { ActorRuntime } from "../fixtures/actor-runtime.js"
-import { seed } from "../fixtures/litestream.js"
 import { assertReply } from "../fixtures/reply.js"
 
 class Destination extends Actor {
@@ -77,8 +76,7 @@ test("actors invoke, broadcast, and open sockets through the remote client", asy
             request_id: "parent",
             actor: { project_id: "test", actor_name: "Relay", actor_id: "one" },
             method: "forward",
-            args: [],
-            sqlite: await seed(null)
+            args: []
         })
     )
     assertReply(reply, { type: "invoked", result: 3 })

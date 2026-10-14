@@ -58,31 +58,30 @@ async fn sqlite_dependencies_must_exist_in_the_snapshot_backend_before_publicati
         .await?;
     let replication = Arc::new(Litestream::default());
     let mut capture = SqliteCapture::new(replication.clone()).await?;
-    let initial = capture.state();
+    let initial = capture.txid();
     let first = StateSnapshot::new(
         1,
         1,
         "sql".into(),
         SqliteSnapshot {
-            txid: initial.txid,
+            txid: initial,
             parent: None,
-            files: capture.capture(&initial).await?,
+            files: capture.capture(initial).await?,
         },
         serde_json::Value::Null,
     )?;
     let first_bytes = first.encode()?;
     let database = rusqlite::Connection::open(capture.path())?;
     database.execute("INSERT INTO __terse_fields VALUES ('count', '1')", [])?;
-    let mut changed = initial;
-    changed.txid = replication.sync(&capture.path()).await?;
+    let changed = replication.sync(&capture.path()).await?;
     let next = StateSnapshot::new(
         2,
         1,
         "fields".into(),
         SqliteSnapshot {
-            txid: changed.txid,
+            txid: changed,
             parent: Some(first_plan.stream.snapshot(&first_bytes)?),
-            files: capture.capture(&changed).await?,
+            files: capture.capture(changed).await?,
         },
         serde_json::Value::Null,
     )?;

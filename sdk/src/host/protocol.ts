@@ -8,7 +8,8 @@ import { ActorProtocolError } from "../errors.js"
 import { jsonValueSchema } from "../json.js"
 import type { JsonValue } from "../json.js"
 
-import type { SqliteState } from "./sqlite.js"
+import type { DatabaseRequest } from "./database-bridge.js"
+import type { DatabaseCall } from "./database.js"
 
 function parseActorSessionServerMessage(document: string): ActorSessionServerMessage {
     let value: unknown
@@ -26,19 +27,26 @@ function failedReply(code: string, message: string): FailedReply {
     return { type: "failed", code, message }
 }
 
-const sqliteStateSchema = z.object({
-    txid: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
-    path: z.string().optional()
-})
+const databaseValueSchema = z.discriminatedUnion("type", [
+    z.object({ type: z.literal("null") }),
+    z.object({ type: z.literal("integer"), value: z.string().regex(/^-?\d+$/) }),
+    z.object({ type: z.literal("real"), value: z.number() }),
+    z.object({ type: z.literal("text"), value: z.string() }),
+    z.object({ type: z.literal("blob"), value: z.base64() })
+])
+
+const databaseResultSchema = z.discriminatedUnion("type", [
+    z.object({ type: z.literal("rows"), columns: z.array(z.string()), rows: z.array(z.array(databaseValueSchema)) }),
+    z.object({ type: z.literal("fields"), fields: z.record(z.string(), jsonValueSchema) }),
+    z.object({ type: z.literal("done") })
+])
 
 const invokeCommandSchema = z.object({
     type: z.literal("invoke"),
     request_id: actorComponentSchema,
     actor: actorIdentitySchema,
     method: actorComponentSchema,
-    args: z.array(jsonValueSchema),
-    sqlite: sqliteStateSchema.optional(),
-    resident_only: z.boolean().optional()
+    args: z.array(jsonValueSchema)
 })
 
 const websocketEventCommandSchema = z.object({
@@ -46,9 +54,7 @@ const websocketEventCommandSchema = z.object({
     request_id: actorComponentSchema,
     actor: actorIdentitySchema,
     event: socketEventSchema,
-    connections: z.array(socketConnectionSchema),
-    sqlite: sqliteStateSchema.optional(),
-    resident_only: z.boolean().optional()
+    connections: z.array(socketConnectionSchema)
 })
 
 const evictCommandSchema = z.object({
@@ -58,9 +64,7 @@ const evictCommandSchema = z.object({
 
 const hydrateCommandSchema = z.object({
     type: z.literal("hydrate"),
-    actor: actorIdentitySchema,
-    sqlite: sqliteStateSchema.optional(),
-    resident_only: z.boolean().optional()
+    actor: actorIdentitySchema
 })
 
 const executorCommandSchema = z.discriminatedUnion("type", [
@@ -73,19 +77,13 @@ const executorCommandSchema = z.discriminatedUnion("type", [
 const actorSessionServerMessageSchema = z.discriminatedUnion("type", [
     z
         .object({
-            type: z.literal("sqlite_persisted"),
+            type: z.literal("database_result"),
             message_id: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-            commit_id: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
-            txid: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
-            state_version: z.number().int().positive().max(Number.MAX_SAFE_INTEGER).optional(),
+            result: databaseResultSchema.optional(),
             error: z.string().optional()
         })
-        .refine(message =>
-            message.error === undefined
-                ? message.txid !== undefined
-                : message.txid === undefined && message.state_version === undefined
-        ),
-    z.object({ type: z.literal("attached"), protocol: z.literal(26), supports_residency: z.boolean().optional() }),
+        .refine(message => (message.result === undefined) !== (message.error === undefined)),
+    z.object({ type: z.literal("attached"), protocol: z.literal(27), supports_residency: z.boolean().optional() }),
     z.object({
         type: z.literal("socket_connections"),
         message_id: z.number().int().nonnegative(),
@@ -110,20 +108,9 @@ type EvictCommand = z.infer<typeof evictCommandSchema>
 type ActorExecutorCommand = z.infer<typeof executorCommandSchema>
 type ActorSessionServerMessage = z.infer<typeof actorSessionServerMessageSchema>
 type ActorExecutorReply =
-    | InvokedReply
-    | WebSocketHandledReply
-    | FailedReply
-    | EvictedReply
-    | { readonly type: "hydrated" }
-    | { readonly type: "state_required" }
+    InvokedReply | WebSocketHandledReply | FailedReply | EvictedReply | { readonly type: "hydrated" }
 type ActorSessionClientMessage =
-    | {
-          readonly type: "persist_sqlite"
-          readonly message_id: number
-          readonly commit_id: number
-          readonly mode: "atomic_snapshot" | "durable_write"
-          readonly txid?: number
-      }
+    | { readonly type: "database_call"; readonly message_id: number; readonly call: DatabaseCall }
     | { readonly type: "residency"; readonly actors: readonly ActorIdentity[] }
     | AttachMessage
     | { readonly type: "ready_for_invocation"; readonly message_id: number }
@@ -133,7 +120,7 @@ type ActorSessionClientMessage =
 
 interface AttachMessage {
     readonly type: "attach"
-    readonly protocol: 26
+    readonly protocol: 27
     readonly actor_names: readonly string[]
 }
 
@@ -147,14 +134,12 @@ interface InvokedReply {
     readonly type: "invoked"
     readonly sequence?: number
     readonly result: JsonValue
-    readonly sqlite: SqliteState
     readonly effects?: readonly SocketEffect[]
 }
 
 interface WebSocketHandledReply {
     readonly type: "websocket_handled"
     readonly sequence?: number
-    readonly sqlite: SqliteState
     readonly effects: readonly SocketEffect[]
 }
 
@@ -174,7 +159,6 @@ interface ActorWorkerData {
 }
 
 type ActorWorkerRequest =
-    | { readonly type: "sqlite_committed"; readonly messageId: number; readonly txid?: number; readonly error?: string }
     | { readonly type: "load"; readonly data: ActorWorkerData }
     | {
           readonly type: "execute"
@@ -190,13 +174,11 @@ type ActorWorkerRequest =
       }
 type ActorWorkerMessage =
     | {
-          readonly type: "persist_sqlite"
+          readonly type: "database_call"
           readonly messageId: number
-          readonly commitId: number
-          readonly buffer: SharedArrayBuffer
-          readonly txid?: number
+          readonly call: DatabaseCall
+          readonly request: DatabaseRequest
       }
-    | { readonly type: "commit_sqlite"; readonly messageId: number }
     | { readonly type: "warm" }
     | {
           readonly type: "ready"

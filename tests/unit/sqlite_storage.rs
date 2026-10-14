@@ -17,7 +17,7 @@ async fn capture_restores_fields_and_user_tables_at_the_requested_commit() -> Re
     db.execute_batch("BEGIN; UPDATE __terse_fields SET value='2'; INSERT INTO entries VALUES ('second'); COMMIT;")?;
     let second = replication.sync(&capture.path()).await?;
     assert!(second > first);
-    let files = capture.capture(&SqliteState::position(first)).await?;
+    let files = capture.capture(first).await?;
     let restored = SqliteCapture::restore(replication.clone(), &files, first).await?;
     let db = rusqlite::Connection::open(restored.path())?;
     assert_eq!(read_fields(&db)?, serde_json::json!({"count":1}));
@@ -30,7 +30,7 @@ async fn capture_restores_fields_and_user_tables_at_the_requested_commit() -> Re
         .join("ltx/9")
         .join(format!("{:016x}-{first:016x}.ltx", 1));
     tokio::fs::create_dir_all(&obsolete).await?;
-    let delta = capture.capture(&SqliteState::position(second)).await?;
+    let delta = capture.capture(second).await?;
     assert!(delta.iter().all(|file| file.first > first));
     let mut combined = files;
     combined.extend(delta);
@@ -53,11 +53,6 @@ async fn missing_replication_files_cannot_be_acknowledged() -> Result<()> {
     let position = replication.sync(&capture.path()).await?;
     let files = read_ltx_files(&capture.path(), capture.published, 0, position).await?;
     tokio::fs::remove_file(files.last().unwrap().path(&capture.replica())).await?;
-    assert!(
-        capture
-            .capture(&SqliteState::position(position))
-            .await
-            .is_err()
-    );
+    assert!(capture.capture(position).await.is_err());
     Ok(())
 }

@@ -254,7 +254,6 @@ jobs:
             - name: Install dependencies
               run: bun install --frozen-lockfile
 
-            - uses: ./.github/actions/setup-test-litestream
             - name: Check formatting
               run: bun run --bun --cwd sdk format:check
 

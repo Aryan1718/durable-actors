@@ -1,7 +1,7 @@
 import subprocess
-import sys
 
 import pytest
+from fixtures.typecheck import checker_command
 
 from durable_actors import Actor, persisted
 from durable_actors.codegen import generate_client
@@ -42,7 +42,7 @@ def check() -> int:
 """)
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, str(source)],
+            checker_command(checker, source),
             cwd=tmp_path,
             capture_output=True,
             text=True,
@@ -53,7 +53,7 @@ def check() -> int:
     )
     for checker in ("mypy", "pyright"):
         result = subprocess.run(
-            [sys.executable, "-m", checker, str(source)],
+            checker_command(checker, source),
             cwd=tmp_path,
             capture_output=True,
             text=True,

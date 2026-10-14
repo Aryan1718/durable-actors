@@ -1,5 +1,5 @@
 name: Install upstream Litestream for tests
-description: Install the Go CLI used by SQLite test fixtures; the runtime embeds terse-litestream through Cargo.
+description: Install the Go CLI used by Rust SQLite test fixtures; the runtime embeds terse-litestream through Cargo.
 runs:
     using: composite
     steps:

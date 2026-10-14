@@ -1,7 +1,6 @@
 use super::tests::test_issuer;
 use super::*;
 use crate::request_tracking::HostState;
-use crate::state_transport::{SqlitePersisted, SqlitePersistenceMode, SqliteWrite, SqliteWriter};
 use crate::{
     actor::{ActorExecutorListener, ActorSocketPublisher, ActorSocketSource},
     control_plane::{ActorTokenPurpose, ControlPlaneClient, admin::LocalAdminRegistry},
@@ -690,25 +689,26 @@ impl Stack {
         ));
         let replication = Arc::new(crate::litestream::Litestream::default());
         let (child, connection) = start_worker(directory.path()).await?;
-        let host = Arc::new(ActorHost::new(
-            HostEndpoint {
-                id: host_id.clone(),
-                route: host_route.clone(),
-            },
-            connection.executor(),
+        let endpoint = HostEndpoint {
+            id: host_id.clone(),
+            route: host_route.clone(),
+        };
+        let database = crate::host::HostDatabase::new(
+            endpoint.clone(),
             storage.clone(),
             storage.runtime.clone(),
-            local_sockets.clone(),
             replication.clone(),
+        );
+        let host = Arc::new(ActorHost::new(
+            endpoint,
+            connection.executor(),
+            database,
+            local_sockets.clone(),
         ));
         connection
             .mark_ready(
                 Some(local_sockets.clone()),
                 Some(source.unwrap_or_else(|| local_sockets.clone())),
-                Arc::new(TestSqlitePersistence {
-                    replication,
-                    host: host.clone(),
-                }),
             )
             .await?;
         host.activate_actor(actor.clone()).await?;
@@ -1240,22 +1240,4 @@ fn assert_completed_invocation(mut reply: serde_json::Value, result: serde_json:
     assert!(queue_wait.is_finite() && queue_wait >= 0.0 && queue_wait <= duration);
     assert_eq!(metadata["hostState"], "warm");
     assert!(metadata["routingMs"].as_f64().unwrap() >= 0.0);
-}
-
-struct TestSqlitePersistence {
-    replication: Arc<dyn crate::litestream::Replicator>,
-    host: Arc<ActorHost>,
-}
-
-#[async_trait]
-impl SqliteWriter for TestSqlitePersistence {
-    async fn persist_sqlite(&self, write: &SqliteWrite) -> Result<SqlitePersisted> {
-        match write.mode {
-            SqlitePersistenceMode::AtomicSnapshot => Ok(SqlitePersisted {
-                txid: self.replication.sync(&write.path).await?,
-                state_version: None,
-            }),
-            SqlitePersistenceMode::DurableWrite => self.host.persist_sqlite(write).await,
-        }
-    }
 }

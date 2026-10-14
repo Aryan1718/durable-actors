@@ -115,7 +115,6 @@ jobs:
             - run: bun run --bun --cwd sdk format:check
             - run: bun run --bun --cwd packages/observer-ui format:check
             - run: bun run --bun --cwd packages/observer-ui test
-            - uses: ./.github/actions/setup-test-litestream
             - run: bun run --bun --cwd sdk test
             - name: Validate HTTP and build TypeScript documentation
               run: bun run --bun docs:build
