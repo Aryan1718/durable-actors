@@ -1,4 +1,4 @@
-use crate::request_tracking::HostState;
+use crate::{request_tracking::HostState, sockets::operations::SocketOperation};
 use anyhow::Context;
 use axum::{
     Json,
@@ -190,31 +190,39 @@ pub(super) async fn publish(
         return Err(ApiError::unauthorized("bearer token required"));
     }
     let Json(request) = body.map_err(ApiError::json)?;
-    let route = gateway
-        .invocation_route(&actor, request.owner_epoch, authorization)
+
+    let owner_epoch = gateway
+        .authorize_publish(&actor, authorization)
         .map_err(|_| ApiError::unauthorized("actor invocation credential was rejected"))?;
+    if owner_epoch != request.owner_epoch {
+        return Err(ApiError::unauthorized(
+            "actor invocation credential was rejected",
+        ));
+    }
     crate::actor::validate_socket_effects(&request.effects).map_err(ApiError::bad_request)?;
-    let url = format!(
-        "{}/v1/projects/{}/actors/{}/{}/socket-effects",
-        route.trim_end_matches('/'),
-        actor.project_id,
-        actor.actor_name,
-        actor.actor_id
-    );
-    let response = state
-        .hosts
-        .post(url)
-        .header(header::AUTHORIZATION, authorization)
-        .json(&request)
-        .send()
+
+    gateway
+        .connections
+        .operation(
+            &actor,
+            SocketOperation::Publish {
+                effects: request.effects,
+            },
+            authorization,
+        )
         .await
-        .map_err(|_| outcome_unknown())?;
-    let status = response.status();
-    let body = response.bytes().await.map_err(|_| outcome_unknown())?;
-    Ok((status, [(header::CACHE_CONTROL, "no-store")], body).into_response())
+        .map_err(|error| {
+            tracing::warn!(error = %format!("{error:#}"), "socket effects could not be delivered");
+            ApiError::unavailable("socket effects could not be delivered")
+        })?;
+    Ok((
+        StatusCode::NO_CONTENT,
+        [(header::CACHE_CONTROL, "no-store")],
+    )
+        .into_response())
 }
 
-#[derive(serde::Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct PublishRequest {
     owner_epoch: u64,

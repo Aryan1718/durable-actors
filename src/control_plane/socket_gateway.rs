@@ -1,4 +1,5 @@
 use super::{
+    gateway::Gateway,
     service::{ActorTarget, ControlPlaneService},
     socket_directory::{GATEWAY_LEASE, GatewayOwner, SocketDirectory},
     socket_ticket::SocketTicket,
@@ -375,24 +376,40 @@ pub(super) async fn internal_operation(
             .get(header::AUTHORIZATION)
             .and_then(|value| value.to_str().ok())
             .unwrap_or("");
-        let principal = service.auth.authenticate_authorization(authorization)?;
-        service
-            .authorize_socket_host(&principal, &request.actor)
-            .await?;
-        let gateway = &service
+        let gateway = service
             .gateway
             .as_ref()
-            .context("socket gateway unavailable")?
-            .connections;
+            .context("socket gateway unavailable")?;
+        authorize_operation(&service, gateway, &request, authorization).await?;
+        let connections = &gateway.connections;
         ensure!(
-            gateway.owner(&request.actor).await?.id == gateway.owner.id
-                && gateway.owner.id == request.gateway_id,
+            connections.owner(&request.actor).await?.id == connections.owner.id
+                && connections.owner.id == request.gateway_id,
             "socket gateway ownership changed"
         );
-        gateway.apply(&request.actor, request.operation).await
+        connections.apply(&request.actor, request.operation).await
     }
     .await;
     result
         .map(Json)
         .map_err(|error: anyhow::Error| (StatusCode::FORBIDDEN, format!("{error:#}")))
+}
+
+async fn authorize_operation(
+    service: &ControlPlaneService,
+    gateway: &Gateway,
+    request: &GatewayOperationRequest,
+    authorization: &str,
+) -> Result<()> {
+    if let Ok(principal) = service.auth.authenticate_authorization(authorization) {
+        return service
+            .authorize_socket_host(&principal, &request.actor)
+            .await;
+    }
+    ensure!(
+        matches!(request.operation, SocketOperation::Publish { .. }),
+        "actor tickets can only publish socket effects"
+    );
+    gateway.authorize_publish(&request.actor, authorization)?;
+    Ok(())
 }

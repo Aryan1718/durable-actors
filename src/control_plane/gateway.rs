@@ -7,18 +7,28 @@ use axum::{
     },
     http::StatusCode,
     response::Response,
-    routing::get,
+    routing::{get, post},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
+use std::sync::Arc;
 use tokio_tungstenite::{
     connect_async_with_config,
     tungstenite::{Message as UpstreamMessage, protocol::WebSocketConfig},
 };
 
 use super::{
-    ActorJwtVerifier, issuer::ActorJwtIssuer, service::ControlPlaneService,
+    ActorJwtVerifier, auth::ActorInvocationCapability, issuer::ActorJwtIssuer,
+    service::ControlPlaneService, socket_gateway::SocketGateway,
     socket_ticket::SocketTicketVerifier,
+};
+use crate::{
+    actor::ActorKey,
+    control_plane::socket_gateway::GatewaySocketDispatcher,
+    sockets::{
+        MAX_MESSAGE_BYTES, READ_BUFFER_BYTES, WRITE_BUFFER_BYTES,
+        browser::{SocketServerState, run},
+    },
 };
 
 #[derive(Clone)]
@@ -26,14 +36,14 @@ pub(super) struct Gateway {
     pub origin: String,
     invocations: ActorJwtVerifier,
     sockets: SocketTicketVerifier,
-    pub(super) connections: std::sync::Arc<super::socket_gateway::SocketGateway>,
+    pub(super) connections: Arc<SocketGateway>,
 }
 
 impl Gateway {
     pub(super) fn new(
         issuer: &ActorJwtIssuer,
         origin: String,
-        connections: std::sync::Arc<super::socket_gateway::SocketGateway>,
+        connections: Arc<SocketGateway>,
     ) -> Result<Self> {
         Ok(Self {
             origin,
@@ -45,19 +55,22 @@ impl Gateway {
 
     pub fn invocation_route(
         &self,
-        actor: &crate::actor::ActorKey,
+        actor: &ActorKey,
         epoch: u64,
         authorization: &str,
     ) -> Result<String> {
-        let principal = self.invocations.authenticate_authorization(authorization)?;
-        let capability = principal
-            .invocation
-            .context("invocation capability missing")?;
-        ensure!(
-            capability.actor == *actor && capability.owner_epoch == epoch,
-            "invocation target mismatch"
-        );
+        let capability = self.capability(actor, authorization)?;
+        ensure!(capability.owner_epoch == epoch, "invalid owner epoch");
         Ok(backend_origin(&capability.route)?.to_string())
+    }
+
+    pub fn authorize_publish(&self, actor: &ActorKey, authorization: &str) -> Result<u64> {
+        let capability = self.capability(actor, authorization)?;
+        ensure!(
+            capability.grant.is_none(),
+            "delegated tickets cannot publish socket effects"
+        );
+        Ok(capability.owner_epoch)
     }
 
     pub fn router(self, service: ControlPlaneService, admin: super::admin::AdminService) -> Router {
@@ -70,11 +83,24 @@ impl Gateway {
                 Router::new()
                     .route(
                         "/internal/socket-operation",
-                        axum::routing::post(super::socket_gateway::internal_operation),
+                        post(super::socket_gateway::internal_operation),
                     )
                     .layer(axum::extract::DefaultBodyLimit::disable())
                     .with_state(service),
             )
+    }
+
+    fn capability(
+        &self,
+        actor: &ActorKey,
+        authorization: &str,
+    ) -> Result<ActorInvocationCapability> {
+        let principal = self.invocations.authenticate_authorization(authorization)?;
+        let capability = principal
+            .invocation
+            .context("invocation capability missing")?;
+        ensure!(capability.actor == *actor, "invocation target mismatch");
+        Ok(capability)
     }
 }
 
@@ -114,20 +140,20 @@ async fn connect(
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     if owner.id == gateway.connections.owner.id {
-        let state = crate::sockets::browser::SocketServerState {
+        let state = SocketServerState {
             registry: gateway.connections.registry.clone(),
-            dispatcher: std::sync::Arc::new(super::socket_gateway::GatewaySocketDispatcher {
+            dispatcher: Arc::new(GatewaySocketDispatcher {
                 gateway: gateway.connections.clone(),
                 service,
             }),
             stop: gateway.connections.stop.clone(),
         };
         return Ok(upgrade
-            .read_buffer_size(crate::sockets::READ_BUFFER_BYTES)
-            .write_buffer_size(crate::sockets::WRITE_BUFFER_BYTES)
-            .max_message_size(crate::sockets::MAX_MESSAGE_BYTES)
-            .max_frame_size(crate::sockets::MAX_MESSAGE_BYTES)
-            .on_upgrade(move |socket| crate::sockets::browser::run(socket, state, ticket)));
+            .read_buffer_size(READ_BUFFER_BYTES)
+            .write_buffer_size(WRITE_BUFFER_BYTES)
+            .max_message_size(MAX_MESSAGE_BYTES)
+            .max_frame_size(MAX_MESSAGE_BYTES)
+            .on_upgrade(move |socket| run(socket, state, ticket)));
     }
     let mut url = backend_origin(&owner.route).map_err(|_| StatusCode::BAD_GATEWAY)?;
     let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
@@ -136,8 +162,8 @@ async fn connect(
     url.set_path("/v1/socket");
     url.query_pairs_mut().append_pair("key", &key);
     let config = WebSocketConfig::default()
-        .read_buffer_size(crate::sockets::READ_BUFFER_BYTES)
-        .write_buffer_size(crate::sockets::WRITE_BUFFER_BYTES)
+        .read_buffer_size(READ_BUFFER_BYTES)
+        .write_buffer_size(WRITE_BUFFER_BYTES)
         .max_message_size(None)
         .max_frame_size(None);
     let (upstream, _) = tokio::time::timeout(
@@ -148,10 +174,10 @@ async fn connect(
     .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
     .map_err(|_| StatusCode::BAD_GATEWAY)?;
     Ok(upgrade
-        .read_buffer_size(crate::sockets::READ_BUFFER_BYTES)
-        .write_buffer_size(crate::sockets::WRITE_BUFFER_BYTES)
-        .max_message_size(crate::sockets::MAX_MESSAGE_BYTES)
-        .max_frame_size(crate::sockets::MAX_MESSAGE_BYTES)
+        .read_buffer_size(READ_BUFFER_BYTES)
+        .write_buffer_size(WRITE_BUFFER_BYTES)
+        .max_message_size(MAX_MESSAGE_BYTES)
+        .max_frame_size(MAX_MESSAGE_BYTES)
         .on_upgrade(|socket| bridge(socket, upstream)))
 }
 

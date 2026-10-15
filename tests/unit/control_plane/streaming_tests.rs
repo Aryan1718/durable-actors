@@ -1000,6 +1000,7 @@ async fn http_invocations_and_socket_delivery_are_actor_bound() -> Result<()> {
         .json()
         .await?;
     let route = &stack.host_route;
+    let gateway = &stack.gateway;
     let token = target["token"].as_str().context("token missing")?;
     let epoch = target["ownerEpoch"].as_u64().context("epoch missing")?;
     let url = format!("{route}/v1/projects/default/actors/Counter/counter-1");
@@ -1026,12 +1027,14 @@ async fn http_invocations_and_socket_delivery_are_actor_bound() -> Result<()> {
     assert_eq!(update["changes"]["count"], 2);
     let command = serde_json::json!({"ownerEpoch":epoch, "effects":[{"type":"broadcast", "message":{"type":"text", "data":"{\"notice\":\"hello\"}"}, "except_connection_ids":[], "tags":[]}]});
     assert_eq!(
-        http.post(format!("{url}/socket-effects"))
-            .bearer_auth(token)
-            .json(&command)
-            .send()
-            .await?
-            .status(),
+        http.post(format!(
+            "{gateway}/v1/projects/default/actors/Counter/counter-1/socket-effects"
+        ))
+        .bearer_auth(token)
+        .json(&command)
+        .send()
+        .await?
+        .status(),
         reqwest::StatusCode::NO_CONTENT
     );
     assert_eq!(
@@ -1056,14 +1059,14 @@ async fn http_invocations_and_socket_delivery_are_actor_bound() -> Result<()> {
         wrong["ownerEpoch"] = owner_epoch.into();
         assert_eq!(
             http.post(format!(
-                "{route}/v1/projects/default/actors/Counter/{actor_id}/socket-effects"
+                "{gateway}/v1/projects/default/actors/Counter/{actor_id}/socket-effects"
             ))
             .bearer_auth(token)
             .json(&wrong)
             .send()
             .await?
             .status(),
-            reqwest::StatusCode::FORBIDDEN
+            reqwest::StatusCode::UNAUTHORIZED
         );
     }
     let mut malformed = invocation.clone();
@@ -1076,19 +1079,6 @@ async fn http_invocations_and_socket_delivery_are_actor_bound() -> Result<()> {
             .await?
             .status(),
         reqwest::StatusCode::UNPROCESSABLE_ENTITY
-    );
-    stack
-        .storage
-        .unregister(&stack.host_id, "00000000-0000-4000-8000-000000000001")
-        .await?;
-    assert_eq!(
-        http.post(format!("{url}/socket-effects"))
-            .bearer_auth(token)
-            .json(&command)
-            .send()
-            .await?
-            .status(),
-        reqwest::StatusCode::SERVICE_UNAVAILABLE
     );
     stack.child.kill().await?;
     Ok(())
@@ -1142,13 +1132,16 @@ async fn delegated_http_invocations_enforce_methods_and_socket_boundaries() -> R
         assert_eq!(reply["code"], "forbidden");
     }
     assert_eq!(
-        http.post(format!("{url}/socket-effects"))
-            .bearer_auth(&ticket)
-            .json(&serde_json::json!({"ownerEpoch":epoch,"effects":[]}))
-            .send()
-            .await?
-            .status(),
-        reqwest::StatusCode::FORBIDDEN
+        http.post(format!(
+            "{}/v1/projects/default/actors/Counter/counter-1/socket-effects",
+            stack.gateway
+        ))
+        .bearer_auth(&ticket)
+        .json(&serde_json::json!({"ownerEpoch":epoch,"effects":[]}))
+        .send()
+        .await?
+        .status(),
+        reqwest::StatusCode::UNAUTHORIZED
     );
     let reply: serde_json::Value = http.post(format!("{url}/invoke")).bearer_auth(&ticket)
         .json(&serde_json::json!({"requestId":uuid::Uuid::new_v4().to_string(), "ownerEpoch":epoch, "routingMs":0.0, "method":"readHistory", "args":[]}))

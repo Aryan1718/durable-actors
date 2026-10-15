@@ -1,4 +1,6 @@
+use super::super::super::socket_gateway::{SocketEventReply, SocketEventRequest};
 use super::*;
+use crate::actor::{ActorSocketEffect, ActorSocketMessage};
 use axum::{
     Json, Router,
     extract::State,
@@ -6,11 +8,13 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
+use futures_util::StreamExt;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     sync::atomic::{AtomicUsize, Ordering},
 };
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
 #[tokio::test]
 async fn combined_invocation_resolves_and_dispatches_with_a_scoped_host_token() -> Result<()> {
@@ -255,51 +259,46 @@ async fn gateway_forwards_cached_calls_and_rejects_wrong_capabilities() -> Resul
 }
 
 #[tokio::test]
-async fn gateway_forwards_socket_effects_with_the_original_capability() -> Result<()> {
-    let fixture = Fixture::start(vec![
-        (StatusCode::OK, json!({"type":"completed","result":1})),
-        (StatusCode::NO_CONTENT, Value::Null),
-    ])
-    .await?;
-    let first: Value = fixture
-        .call(
-            "api-key",
-            json!({"requestId":"first","method":"clear","args":[]}),
-        )
-        .await?
-        .json()
+async fn backend_socket_effects_reach_connected_clients() -> Result<()> {
+    let fixture = Fixture::start(vec![]).await?;
+    let mut socket = fixture.connect().await?;
+    let target = fixture.find_actor().await?;
+    let token = target["token"].as_str().unwrap();
+    let response = fixture
+        .post("socket-effects", token, broadcast(&target))
         .await?;
-    let token = first["target"]["token"].as_str().unwrap();
-    let url = format!(
-        "{}/v1/projects/default/actors/ChatRoom/one/socket-effects",
-        fixture.origin
-    );
-    let body = json!({"ownerEpoch":1,"effects":[]});
-    let client = reqwest::Client::new();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(
-        client.post(&url).json(&body).send().await?.status(),
-        StatusCode::UNAUTHORIZED
+        next_message(&mut socket).await?,
+        Message::Text("hello".into())
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn backend_socket_effects_reach_clients_connected_to_another_replica() -> Result<()> {
+    let fixture = Fixture::start(vec![]).await?;
+    let mut socket = fixture.connect().await?;
+    let target = fixture.find_actor().await?;
+    let token = target["token"].as_str().unwrap();
+    let response = post_actor(
+        &fixture.replica,
+        "socket-effects",
+        token,
+        broadcast(&target),
+    )
+    .await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert_eq!(
-        client
-            .post(&url)
-            .bearer_auth(token)
-            .json(&body)
-            .send()
-            .await?
-            .status(),
-        StatusCode::NO_CONTENT
-    );
-    assert_eq!(fixture.host.calls.load(Ordering::SeqCst), 2);
-    assert_eq!(
-        fixture.host.requests.lock().unwrap()[1].0,
-        format!("Bearer {token}")
+        next_message(&mut socket).await?,
+        Message::Text("hello".into())
     );
     Ok(())
 }
 
 struct Fixture {
     origin: String,
+    replica: String,
     admin: AdminService,
     verifier: ActorJwtVerifier,
     host: Arc<HostFixture>,
@@ -328,8 +327,8 @@ impl Fixture {
                 post(host_invoke),
             )
             .route(
-                "/v1/projects/default/actors/ChatRoom/one/socket-effects",
-                post(host_invoke),
+                "/v1/projects/default/actors/ChatRoom/one/socket-events",
+                post(host_socket_event),
             )
             .with_state(host.clone());
         let host_server = tokio::spawn(async move { axum::serve(host_listener, routes).await });
@@ -389,7 +388,7 @@ impl Fixture {
                 "north-america-east",
             )?;
         }
-        let mut service = ControlPlaneService::new(
+        let service = ControlPlaneService::new(
             placements.clone(),
             auth,
             registry,
@@ -399,40 +398,50 @@ impl Fixture {
                 placements,
             }),
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let origin = format!("http://{}", listener.local_addr()?);
-        service.gateway = Some(super::super::super::gateway::Gateway::new(
-            &issuer,
-            origin.clone(),
-            super::super::super::socket_gateway::SocketGateway::start(
-                origin.clone(),
-                Arc::new(super::super::super::socket_directory::MemorySocketDirectory::default()),
-                32768,
-                true,
-                tokio_util::sync::CancellationToken::new(),
-            )
-            .await?,
-        )?);
-        let routes = super::super::super::public_api::router(service, admin.clone());
-        let server = tokio::spawn(async move { axum::serve(listener, routes).await });
+        let directory =
+            Arc::new(super::super::super::socket_directory::MemorySocketDirectory::default());
+        let (origin, server) = serve_replica(&service, &admin, &issuer, directory.clone()).await?;
+        let (replica, replica_server) = serve_replica(&service, &admin, &issuer, directory).await?;
         Ok(Self {
             origin,
+            replica,
             admin,
             verifier,
             host,
-            servers: vec![server, host_server],
+            servers: vec![server, replica_server, host_server],
         })
     }
 
     async fn call(&self, token: &str, body: Value) -> Result<reqwest::Response> {
-        Ok(reqwest::Client::new()
-            .post(format!(
-                "{}/v1/projects/default/actors/ChatRoom/one/invoke",
-                self.origin
-            ))
-            .bearer_auth(token)
-            .json(&body)
-            .send()
+        self.post("invoke", token, body).await
+    }
+
+    async fn post(&self, endpoint: &str, token: &str, body: Value) -> Result<reqwest::Response> {
+        post_actor(&self.origin, endpoint, token, body).await
+    }
+
+    async fn connect(&self) -> Result<Socket> {
+        let grant: Value = self
+            .post("find-websocket", "api-key", json!({"metadata":{}}))
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(grant["websocketUrl"].as_str().unwrap()).await?;
+        ensure!(
+            next_message(&mut socket).await? == Message::Text("ready".into()),
+            "socket connection was not admitted"
+        );
+        Ok(socket)
+    }
+
+    async fn find_actor(&self) -> Result<Value> {
+        Ok(self
+            .post("find-actor", "api-key", json!({}))
+            .await?
+            .error_for_status()?
+            .json()
             .await?)
     }
 }
@@ -443,6 +452,60 @@ impl Drop for Fixture {
             server.abort();
         }
     }
+}
+
+async fn serve_replica(
+    service: &ControlPlaneService,
+    admin: &AdminService,
+    issuer: &ActorJwtIssuer,
+    directory: Arc<super::super::super::socket_directory::MemorySocketDirectory>,
+) -> Result<(String, tokio::task::JoinHandle<std::io::Result<()>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let origin = format!("http://{}", listener.local_addr()?);
+    let sockets = super::super::super::socket_gateway::SocketGateway::start(
+        origin.clone(),
+        directory,
+        32768,
+        true,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await?;
+    let mut service = service.clone();
+    service.gateway = Some(super::super::super::gateway::Gateway::new(
+        issuer,
+        origin.clone(),
+        sockets,
+    )?);
+    let routes = super::super::super::public_api::router(service, admin.clone());
+    let server = tokio::spawn(async move { axum::serve(listener, routes).await });
+    Ok((origin, server))
+}
+
+async fn post_actor(
+    origin: &str,
+    endpoint: &str,
+    token: &str,
+    body: Value,
+) -> Result<reqwest::Response> {
+    Ok(reqwest::Client::new()
+        .post(format!(
+            "{origin}/v1/projects/default/actors/ChatRoom/one/{endpoint}"
+        ))
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await?)
+}
+
+fn broadcast(target: &Value) -> Value {
+    json!({"ownerEpoch":target["ownerEpoch"], "effects":[{"type":"broadcast", "message":{"type":"text", "data":"hello"}, "except_connection_ids":[], "tags":[]}]})
+}
+
+type Socket = WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
+
+async fn next_message(socket: &mut Socket) -> Result<Message> {
+    let message = tokio::time::timeout(Duration::from_secs(5), socket.next()).await?;
+    Ok(message.context("socket closed")??)
 }
 
 struct HostFixture {
@@ -469,6 +532,19 @@ async fn host_invoke(
         .pop_front()
         .expect("unexpected replay");
     (status, Json(reply)).into_response()
+}
+
+async fn host_socket_event(Json(request): Json<SocketEventRequest>) -> Json<SocketEventReply> {
+    let effects = match request.invocation.event {
+        ActorSocketEvent::Connect { connection } => vec![ActorSocketEffect::Send {
+            connection_id: connection.id,
+            message: ActorSocketMessage::Text {
+                data: "ready".into(),
+            },
+        }],
+        _ => vec![],
+    };
+    Json(SocketEventReply::Completed { effects })
 }
 
 struct InvocationProvisioner {

@@ -261,11 +261,6 @@ paths:
                 "415": { description: Expected application/json. }
                 "422": { description: Invalid invocation document. }
     /v1/projects/{project_id}/actors/{actor_name}/{actor_id}/socket-effects:
-        servers:
-            - url: "{actorHost}"
-              description: Use the route returned by findActor.
-              variables:
-                  actorHost: { default: "http://127.0.0.1:7101" }
         parameters:
             - { $ref: "#/components/parameters/ProjectId" }
             - { $ref: "#/components/parameters/ActorName" }
@@ -273,9 +268,9 @@ paths:
         post:
             operationId: publishActorSocketEffects
             tags: [WebSockets]
-            summary: Deliver socket effects to the owning host
+            summary: Deliver socket effects
             security: [{ ActorTicket: [] }]
-            description: Used by backend broadcasts. Actor method effects are already delivered by invokeActor. Do not retry an uncertain delivery.
+            description: Send socket effects such as broadcast from backend to connected clients.
             requestBody:
                 required: true
                 content:
@@ -302,7 +297,6 @@ paths:
                 "204": { description: Effects delivered. }
                 "400": { $ref: "#/components/responses/InvalidRequest" }
                 "401": { description: Ticket rejected. }
-                "403": { description: "Ticket belongs to another actor, host session or ownership epoch." }
                 "413": { $ref: "#/components/responses/PayloadTooLarge" }
                 "415": { description: Expected application/json. }
                 "422": { description: Invalid effects document. }
@@ -1199,7 +1193,8 @@ components:
                 nextBefore: { type: [integer, "null"], minimum: 1 }
         TraceRecord:
             type: object
-            required: [projectId, sequence, eventId, hostId, sessionId, requestId, actorName, actorId, kind, operation, connectionId, startedAtMs, routingMs, durationMs, queueWaitMs, hostState, outcome]
+            required:
+                [projectId, sequence, eventId, hostId, sessionId, requestId, actorName, actorId, kind, operation, connectionId, startedAtMs, routingMs, durationMs, queueWaitMs, hostState, outcome]
             properties:
                 projectId: { type: string, pattern: "^[A-Za-z0-9._-]{1,64}$" }
                 metadata: { description: Bounded JSON metadata from an onConnect event, when retained. }

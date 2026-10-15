@@ -13,7 +13,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use crate::{
-    actor::{ActorExecutionResult, ActorInvocation, ActorKey, ActorSocketEffect},
+    actor::{ActorExecutionResult, ActorInvocation, ActorKey},
     control_plane::{ActorJwtVerifier, ActorPrincipal},
     host::{ActorHost, HostId, sockets::HostSockets},
 };
@@ -49,10 +49,6 @@ impl ActorHostHttpService {
             .route(
                 "/v1/projects/{project_id}/actors/{actor_name}/{actor_id}/invoke",
                 post(invoke),
-            )
-            .route(
-                "/v1/projects/{project_id}/actors/{actor_name}/{actor_id}/socket-effects",
-                post(publish),
             )
             .layer(DefaultBodyLimit::disable())
             .with_state(Arc::new(self))
@@ -230,42 +226,6 @@ async fn invoke(
     ))
 }
 
-async fn publish(
-    State(service): State<Arc<ActorHostHttpService>>,
-    Path(actor): Path<ActorKey>,
-    headers: HeaderMap,
-    body: Result<Json<PublishRequest>, JsonRejection>,
-) -> Result<StatusCode, HttpError> {
-    let principal = service.authenticate(&headers)?;
-    authorize_grant(
-        principal
-            .invocation
-            .as_ref()
-            .and_then(|capability| capability.grant.as_ref()),
-        None,
-    )?;
-    let Json(request) = body.map_err(json_error)?;
-    service.authorize(&principal, &actor, request.owner_epoch)?;
-    crate::actor::validate_socket_effects(&request.effects).map_err(bad_request)?;
-    service
-        .sockets
-        .publish_authorized(
-            &actor,
-            service.host.id(),
-            request.owner_epoch,
-            request.effects,
-        )
-        .await
-        .map_err(|error| {
-            warn!(error = %format!("{error:#}"), "socket effects could not be delivered");
-            HttpError(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "socket effects could not be delivered".into(),
-            )
-        })?;
-    Ok(StatusCode::NO_CONTENT)
-}
-
 fn authorize_grant(
     grant: Option<&crate::control_plane::session::InvocationGrant>,
     method: Option<&str>,
@@ -332,13 +292,6 @@ struct InvokeRequest {
     owner_epoch: u64,
     method: String,
     args: Vec<Value>,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct PublishRequest {
-    owner_epoch: u64,
-    effects: Vec<ActorSocketEffect>,
 }
 
 #[derive(Serialize)]
