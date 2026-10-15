@@ -4,7 +4,9 @@ use super::{
 };
 use crate::host::HostEndpoint;
 use crate::{
-    actor::{ActorExecutionResult, ActorInvocation, ActorInvocationFailure, DatabaseCall},
+    actor::{
+        ActorExecutionResult, ActorInvocation, ActorInvocationFailure, DatabaseCall, DatabaseResult,
+    },
     litestream::{Replicator, storage::SqliteCapture},
     request_tracking::RequestStage,
     state_log::{SqliteSnapshot, StateSnapshot},
@@ -123,6 +125,30 @@ impl DatabaseSession {
             cached.owner_epoch == owner_epoch,
             "database call ownership changed"
         );
+        match &call {
+            DatabaseCall::Alarm => {
+                let timestamp_ms = self.storage.get_alarm().await?;
+                return Ok(DatabaseReply::Executed {
+                    result: DatabaseResult::Alarm { timestamp_ms },
+                    committed: None,
+                });
+            }
+            DatabaseCall::SetAlarm { timestamp_ms, .. } => {
+                self.storage.update_alarm(Some(*timestamp_ms)).await?;
+                return Ok(DatabaseReply::Executed {
+                    result: DatabaseResult::Done,
+                    committed: None,
+                });
+            }
+            DatabaseCall::DeleteAlarm { .. } => {
+                self.storage.update_alarm(None).await?;
+                return Ok(DatabaseReply::Executed {
+                    result: DatabaseResult::Done,
+                    committed: None,
+                });
+            }
+            _ => {}
+        }
         let immediate = call.immediate();
         let commit = matches!(call, DatabaseCall::Commit);
         let executed = match cached.database.call(call).await {

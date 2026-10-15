@@ -39,8 +39,12 @@ function publicMethods(checker: ts.TypeChecker, actor: ts.ClassDeclaration) {
                 throw new ActorDefinitionError(`${label}: callable fields must be declared as async methods`)
             continue
         }
+        if (name === "onAlarm") {
+            validateAlarmLifecycle(label, member)
+            continue
+        }
         if (["onConnect", "onMessage", "onDisconnect"].includes(name)) continue
-        if (["then", "connect", "broadcast", "db"].includes(name))
+        if (["then", "connect", "broadcast", "db", "alarm"].includes(name))
             throw new ActorDefinitionError(`${label}: reserved RPC method name`)
         validateActorComponent("actor method", name)
         if (symbol?.declarations?.filter(ts.isMethodDeclaration).length !== 1)
@@ -53,6 +57,13 @@ function publicMethods(checker: ts.TypeChecker, actor: ts.ClassDeclaration) {
         methods.push({ name, declaration: member })
     }
     return methods.sort((left, right) => (left.name < right.name ? -1 : left.name > right.name ? 1 : 0))
+}
+
+function validateAlarmLifecycle(label: string, member: ts.MethodDeclaration): void {
+    if (!member.modifiers?.some(modifier => modifier.kind === ts.SyntaxKind.AsyncKeyword) || member.asteriskToken)
+        throw new ActorDefinitionError(`${label}: lifecycle hook must be async`)
+    if (member.parameters.length !== 0)
+        throw new ActorDefinitionError(`${label}: lifecycle hook must take no arguments`)
 }
 
 function isPublicInstance(member: ts.ClassElement): boolean {

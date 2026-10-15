@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Generic
+from typing import TYPE_CHECKING, Generic
 
 from typing_extensions import TypeVar
 
 from .json import JsonValue
+
+if TYPE_CHECKING:
+    from .database import RuntimeActorContext
 
 Metadata = TypeVar("Metadata", default=JsonValue)
 Incoming = TypeVar("Incoming", default=JsonValue)
@@ -16,10 +19,15 @@ Tag = TypeVar("Tag", bound=str, default=str)
 
 
 class ActorBase(Generic[Metadata, Incoming, Outgoing, Tag]):
-    def __init__(self) -> None:
+    __slots__ = ("__runtime_context",)
+
+    def __init__(self, context: RuntimeActorContext | None = None) -> None:
         """Initialize independent field defaults; the runtime restores persisted values afterward."""
         from .contract import describe_actor
 
+        self.__runtime_context = context
+        if context is not None:
+            context.bind(self)
         for field in describe_actor(type(self)).fields.values():
             value = (
                 field.default_factory()
@@ -27,6 +35,11 @@ class ActorBase(Generic[Metadata, Incoming, Outgoing, Tag]):
                 else deepcopy(field.default)
             )
             setattr(self, field.name, value)
+
+    def _runtime_context(self) -> RuntimeActorContext:
+        if self.__runtime_context is None:
+            raise RuntimeError("actor runtime context is unavailable during construction")
+        return self.__runtime_context
 
     @property
     def id(self) -> str:

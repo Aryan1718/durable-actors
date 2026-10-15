@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Literal, Self, TypeVar
 from typing_extensions import TypeVar as DefaultTypeVar
 
 from .actor_base import ActorBase
-from .database import ActorDatabase, actor_database
+from .database import ActorAlarm, ActorDatabase
 from .json import JsonValue
 
 if TYPE_CHECKING:
@@ -53,7 +53,12 @@ class Actor(ActorBase[Metadata, Incoming, Outgoing, Tag]):
     @property
     def db(self) -> ActorDatabase:
         """Actor-local SQLite. Changes commit with persisted fields after a successful invocation."""
-        return actor_database(self)
+        return self._runtime_context().database
+
+    @property
+    def alarm(self) -> ActorAlarm:
+        """The actor's single durable alarm slot."""
+        return self._runtime_context().alarm
 
     def on_connect(self, socket: ActorSocket[Metadata, Outgoing, Tag]) -> None:
         """Handle a new WebSocket connection before it is accepted.
@@ -82,6 +87,10 @@ class Actor(ActorBase[Metadata, Incoming, Outgoing, Tag]):
             reason: WebSocket close reason.
             was_clean: Whether the connection completed a clean closing handshake.
         """
+        pass
+
+    def on_alarm(self) -> None:
+        """Handle a due alarm. It is cleared afterward unless this hook sets a new one."""
         pass
 
     def get_connections(self, tag: Tag | None = None) -> list[ActorSocket[Metadata, Outgoing, Tag]]:

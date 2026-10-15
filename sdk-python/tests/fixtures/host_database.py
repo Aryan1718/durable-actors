@@ -22,6 +22,10 @@ class HostDatabase:
             "CREATE TABLE IF NOT EXISTS __terse_fields"
             "(name TEXT PRIMARY KEY, value TEXT NOT NULL CHECK(json_valid(value)))"
         )
+        self.connection.execute(
+            "CREATE TABLE IF NOT EXISTS __terse_alarm"
+            "(singleton INTEGER PRIMARY KEY CHECK(singleton = 1), timestamp INTEGER)"
+        )
         self.synced = self.change_token()
 
     @classmethod
@@ -39,6 +43,12 @@ class HostDatabase:
             return self.write(call["immediate"], lambda: self.exec(call["sql"], call["bindings"]))
         if op == "fields":
             return {"type": "fields", "fields": self.fields()}
+        if op == "alarm":
+            return {"type": "alarm", "timestamp_ms": self.alarm()}
+        if op == "set_alarm":
+            return self.write(call["immediate"], lambda: self.update_alarm(call["timestamp_ms"]))
+        if op == "delete_alarm":
+            return self.write(call["immediate"], lambda: self.update_alarm(None))
         if op == "replace_fields":
             return self.write(False, lambda: self.replace(call["fields"]))
         if op == "commit":
@@ -56,6 +66,19 @@ class HostDatabase:
             name: json.loads(value)
             for name, value in self.connection.execute("SELECT name, value FROM __terse_fields")
         }
+
+    def alarm(self):
+        row = self.connection.execute(
+            "SELECT timestamp FROM __terse_alarm WHERE singleton = 1"
+        ).fetchone()
+        return None if row is None else row[0]
+
+    def update_alarm(self, timestamp_ms):
+        self.connection.execute(
+            "INSERT INTO __terse_alarm VALUES (1, ?) "
+            "ON CONFLICT(singleton) DO UPDATE SET timestamp=excluded.timestamp",
+            (timestamp_ms,),
+        )
 
     def close(self):
         if self.connection.in_transaction:

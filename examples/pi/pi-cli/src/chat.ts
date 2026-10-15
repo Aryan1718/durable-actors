@@ -5,4 +5,3 @@ export interface StreamingAgent {
     prompt(text: string, update: (text: string) => void): Promise<string>
     close(): void
 }
-

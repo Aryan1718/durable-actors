@@ -410,7 +410,7 @@ impl ActorExecutor for JsActorExecutor {
             ExecutorReply::Failed { code, message } => {
                 anyhow::bail!("actor hydration failed ({code}): {message}")
             }
-            _ => anyhow::bail!("unexpected actor hydration reply"),
+            reply => anyhow::bail!("unexpected actor hydration reply: {reply:?}"),
         }
     }
 
@@ -457,12 +457,7 @@ impl ActorExecutor for JsActorExecutor {
                     message,
                 }))
             }
-            ExecutorReply::Hydrated | ExecutorReply::Evicted => {
-                anyhow::bail!("actor executor returned eviction reply to invocation")
-            }
-            ExecutorReply::WebsocketHandled { .. } => {
-                anyhow::bail!("actor executor returned socket reply to invocation")
-            }
+            reply => anyhow::bail!("unexpected actor invocation reply: {reply:?}"),
         }
     }
 
@@ -489,9 +484,7 @@ impl ActorExecutor for JsActorExecutor {
                     message,
                 }))
             }
-            ExecutorReply::Hydrated | ExecutorReply::Invoked { .. } | ExecutorReply::Evicted => {
-                anyhow::bail!("actor executor returned the wrong reply to socket event")
-            }
+            reply => anyhow::bail!("unexpected actor socket reply: {reply:?}"),
         }
     }
 
@@ -504,12 +497,7 @@ impl ActorExecutor for JsActorExecutor {
             ExecutorReply::Failed { code, message } => {
                 anyhow::bail!("actor executor rejected eviction ({code}): {message}")
             }
-            ExecutorReply::Hydrated | ExecutorReply::Invoked { .. } => {
-                anyhow::bail!("actor executor returned the wrong reply to eviction")
-            }
-            ExecutorReply::WebsocketHandled { .. } => {
-                anyhow::bail!("actor executor returned socket reply to eviction")
-            }
+            reply => anyhow::bail!("unexpected actor eviction reply: {reply:?}"),
         }
     }
 }

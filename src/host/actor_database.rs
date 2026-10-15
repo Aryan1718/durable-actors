@@ -49,6 +49,8 @@ pub(crate) trait ActorStorage: Send + Sync {
         actor: &crate::actor::ActorKey,
         bytes: &[u8],
     ) -> Result<SqliteSnapshot>;
+    async fn get_alarm(&self) -> Result<Option<i64>>;
+    async fn update_alarm(&self, timestamp_ms: Option<i64>) -> Result<()>;
     fn ensure_authority(&self) -> Result<()>;
     async fn prepare_state_write(
         &self,

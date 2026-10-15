@@ -63,6 +63,23 @@ impl ControlPlaneClient {
         }
     }
 
+    pub(crate) async fn get_alarm(&self) -> Result<Option<i64>> {
+        match self.execute(ControlPlaneCommand::GetAlarm).await? {
+            ControlPlaneCommandReply::Alarm { timestamp_ms } => Ok(timestamp_ms),
+            _ => anyhow::bail!("unexpected alarm response"),
+        }
+    }
+
+    pub(crate) async fn update_alarm(&self, timestamp_ms: Option<i64>) -> Result<()> {
+        match self
+            .execute(ControlPlaneCommand::UpdateAlarm { timestamp_ms })
+            .await?
+        {
+            ControlPlaneCommandReply::Unit => Ok(()),
+            _ => anyhow::bail!("unexpected alarm update response"),
+        }
+    }
+
     pub(crate) fn token_expires_at_ms(&self) -> Result<u64> {
         use base64::Engine;
         let authorization = self

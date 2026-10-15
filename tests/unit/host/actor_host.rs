@@ -1319,6 +1319,14 @@ struct FakeAuthority {
 
 #[async_trait]
 impl ActorStorage for FakeAuthority {
+    async fn get_alarm(&self) -> Result<Option<i64>> {
+        Ok(None)
+    }
+
+    async fn update_alarm(&self, _timestamp_ms: Option<i64>) -> Result<()> {
+        Ok(())
+    }
+
     async fn acquire_actor(
         &self,
         _actor: &ActorKey,

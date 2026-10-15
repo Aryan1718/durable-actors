@@ -151,6 +151,19 @@
         "memoryMiB"
       ]
     },
+    "alarms": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "pollIntervalMs": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "required": [
+        "pollIntervalMs"
+      ]
+    },
     "resources": {
       "type": "object"
     },
@@ -211,6 +224,7 @@
     "ingress",
     "replicaCount",
     "actors",
+    "alarms",
     "resources",
     "images",
     "sandboxNamespace",

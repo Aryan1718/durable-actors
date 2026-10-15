@@ -36,6 +36,7 @@ pub struct ControlPlaneProcessConfig {
     pub sandbox_provider: SandboxProviderConfig,
     pub socket_event_sink: Option<SocketEventSinkConfig>,
     pub region: Option<String>,
+    pub alarm_poll_interval: Duration,
 }
 
 pub struct ControlPlaneStorageConfig {
@@ -197,9 +198,9 @@ async fn control_plane_routes(
         config.sandbox_provider,
         &issuer,
         runtime_access.clone(),
-        database,
+        database.clone(),
         registry.clone(),
-        stop,
+        stop.clone(),
     )
     .await?;
     let socket_events = config
@@ -217,11 +218,13 @@ async fn control_plane_routes(
         provisioner,
     )
     .with_runtime_access(runtime_access)
+    .with_alarm_store(Arc::new(super::alarms::PostgresAlarmStore::new(database)))
     .with_traces(traces)
     .with_socket_event_sink(socket_events);
     service.changes = changes;
     service.gateway = Some(gateway);
     service.region = config.region;
+    service.start_alarm_scheduler(config.alarm_poll_interval, stop);
     let inventory = Arc::new(super::socket_inventory::GatewayInventoryReader::new(
         storage.clone(),
         service.gateway.as_ref().unwrap().connections.clone(),
@@ -344,6 +347,7 @@ impl ControlPlaneProcessConfig {
             "default region has no configured GKE zone"
         );
         let socket_event_sink = socket_event_sink_config(&mut get)?;
+        let alarm_poll_interval = alarm_poll_interval(&mut get)?;
         let gateway_route = validated_http_url(
             &required(&mut get, "DURABLE_ACTORS_GATEWAY_ROUTE")?,
             "DURABLE_ACTORS_GATEWAY_ROUTE",
@@ -368,6 +372,7 @@ impl ControlPlaneProcessConfig {
             sandbox_provider,
             socket_event_sink,
             region,
+            alarm_poll_interval,
         })
     }
 }
@@ -433,6 +438,19 @@ fn trace_retention(get: &mut impl FnMut(&str) -> Option<String>) -> Result<Durat
         "DURABLE_ACTORS_ANALYTICS_RETENTION_DAYS must be between 1 and 3650"
     );
     Ok(Duration::from_secs(days * 86400))
+}
+
+fn alarm_poll_interval(get: &mut impl FnMut(&str) -> Option<String>) -> Result<Duration> {
+    let milliseconds: u64 = get("DURABLE_ACTORS_ALARM_POLL_INTERVAL_MS")
+        .map(|value| value.parse())
+        .transpose()
+        .context("DURABLE_ACTORS_ALARM_POLL_INTERVAL_MS must be an integer")?
+        .unwrap_or(super::alarms::DEFAULT_POLL_INTERVAL.as_millis() as u64);
+    ensure!(
+        milliseconds > 0,
+        "DURABLE_ACTORS_ALARM_POLL_INTERVAL_MS must be positive"
+    );
+    Ok(Duration::from_millis(milliseconds))
 }
 
 fn socket_event_sink_config(

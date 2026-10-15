@@ -30,6 +30,7 @@ When upgrading from the shared image configuration, replace `image.repository` a
 
 - One controller handles API requests and WebSockets.
 - Actor pods start on demand: `actors.warm: 0`.
+- The controller checks for due alarms every 100 milliseconds; configure `alarms.pollIntervalMs` to change the cadence.
 - Each actor requests and is limited to 500 millicores and 256 MiB unless its deployment overrides resources.
 - The controller requests 250 millicores and 512 MiB, with a 1 GiB memory limit. Measure and adjust `resources` for your workload.
 - The sandbox namespace defaults to `<release-namespace>-<release-name>`; use one unique sandbox namespace per installation.

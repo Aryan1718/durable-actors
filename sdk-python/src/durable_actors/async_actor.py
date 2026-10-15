@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal, Self
 
 from .actor_base import ActorBase, Incoming, Metadata, Outgoing, Tag
-from .database import AsyncActorDatabase, actor_database
+from .database import AsyncActorAlarm, AsyncActorDatabase
 from .json import JsonValue
 
 if TYPE_CHECKING:
@@ -33,7 +33,12 @@ class AsyncActor(ActorBase[Metadata, Incoming, Outgoing, Tag]):
     @property
     def db(self) -> AsyncActorDatabase:
         """Await SQLite statements; changes commit with fields after a successful call."""
-        return AsyncActorDatabase(actor_database(self))
+        return AsyncActorDatabase(self._runtime_context().database)
+
+    @property
+    def alarm(self) -> AsyncActorAlarm:
+        """The actor's single durable alarm slot."""
+        return AsyncActorAlarm(self._runtime_context().alarm)
 
     async def on_connect(self, socket: ActorSocket[Metadata, Outgoing, Tag]) -> None:
         """Inspect, accept, or reject a connecting socket. The default accepts it."""
@@ -47,6 +52,10 @@ class AsyncActor(ActorBase[Metadata, Incoming, Outgoing, Tag]):
     async def on_disconnect(
         self, socket: ActorSocket[Metadata, Outgoing, Tag], code: int, reason: str, was_clean: bool
     ) -> None:
+        pass
+
+    async def on_alarm(self) -> None:
+        """Handle a due alarm. It is cleared afterward unless this hook sets a new one."""
         pass
 
     async def get_connections(

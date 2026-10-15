@@ -57,6 +57,7 @@ moka = { version = "0.12", features = ["future"] }
 rusqlite = { version = "0.40.2", features = ["bundled", "hooks"], default-features = false }
 gcp_auth = { version = "0.12.7", default-features = false, features = ["aws-lc-rs"] }
 memmap2 = "0.9"
+backon = "1"
 
 [build-dependencies]
 protoc-bin-vendored = "3"

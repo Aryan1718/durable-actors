@@ -40,6 +40,16 @@ pub enum DatabaseCall {
     ReplaceFields {
         fields: BTreeMap<String, Box<RawValue>>,
     },
+    Alarm,
+    SetAlarm {
+        timestamp_ms: i64,
+        #[serde(default)]
+        immediate: bool,
+    },
+    DeleteAlarm {
+        #[serde(default)]
+        immediate: bool,
+    },
     Commit,
     Rollback,
 }
@@ -71,6 +81,16 @@ enum DatabaseCallWire {
     },
     ReplaceFields {
         fields: BTreeMap<String, Value>,
+    },
+    Alarm,
+    SetAlarm {
+        timestamp_ms: i64,
+        #[serde(default)]
+        immediate: bool,
+    },
+    DeleteAlarm {
+        #[serde(default)]
+        immediate: bool,
     },
     Commit,
     Rollback,
@@ -107,6 +127,15 @@ impl<'de> Deserialize<'de> for DatabaseCall {
             DatabaseCallWire::ReplaceFields { fields } => Self::ReplaceFields {
                 fields: raw_fields(fields)?,
             },
+            DatabaseCallWire::Alarm => Self::Alarm,
+            DatabaseCallWire::SetAlarm {
+                timestamp_ms,
+                immediate,
+            } => Self::SetAlarm {
+                timestamp_ms,
+                immediate,
+            },
+            DatabaseCallWire::DeleteAlarm { immediate } => Self::DeleteAlarm { immediate },
             DatabaseCallWire::Commit => Self::Commit,
             DatabaseCallWire::Rollback => Self::Rollback,
         })
@@ -135,6 +164,12 @@ impl DatabaseCall {
             } | Self::DeleteField {
                 immediate: true,
                 ..
+            } | Self::SetAlarm {
+                immediate: true,
+                ..
+            } | Self::DeleteAlarm {
+                immediate: true,
+                ..
             }
         )
     }
@@ -149,6 +184,9 @@ pub enum DatabaseResult {
     },
     Fields {
         fields: BTreeMap<String, Box<RawValue>>,
+    },
+    Alarm {
+        timestamp_ms: Option<i64>,
     },
     Done,
 }

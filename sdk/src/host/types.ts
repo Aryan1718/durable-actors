@@ -2,14 +2,7 @@ import type { ActorIdentity } from "../actor/identity.js"
 import type { SocketEffect, SocketSource } from "../actor/socketProtocol.js"
 
 import type { DatabaseCall, DatabaseResult } from "./database.js"
-import type {
-    ActorExecutorCommand,
-    ActorExecutorReply,
-    ActorWorkerData,
-    HydrateCommand,
-    InvokeCommand,
-    WebSocketEventCommand
-} from "./protocol.js"
+import type { ActorExecutorCommand, ActorExecutorReply, ActorWorkerCommand, ActorWorkerData } from "./protocol.js"
 import type { ActorWorkerSupervisor } from "./worker-supervisor.js"
 
 interface ActorHostSettings {
@@ -54,7 +47,7 @@ interface ActorWorkerHandle {
     readonly state: ActorWorkerState
     ready(): Promise<readonly string[]>
     execute(
-        command: InvokeCommand | WebSocketEventCommand | HydrateCommand,
+        command: ActorWorkerCommand,
         allowNextInvocation: () => void,
         database: DatabaseRequester,
         publish?: SocketPublisher,

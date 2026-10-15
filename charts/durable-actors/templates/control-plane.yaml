@@ -65,6 +65,7 @@ spec:
           env:
             - {name: DURABLE_ACTORS_PROCESS_ROLE, value: control_plane}
             - {name: DURABLE_ACTORS_CONTROL_PLANE_BIND, value: "0.0.0.0:7100"}
+            - {name: DURABLE_ACTORS_ALARM_POLL_INTERVAL_MS, value: {{ .Values.alarms.pollIntervalMs | quote }}}
             - name: DURABLE_ACTORS_GATEWAY_IP
               valueFrom:
                 fieldRef: {fieldPath: status.podIP}

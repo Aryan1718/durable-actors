@@ -42,6 +42,22 @@ class DatabaseProxy:
             for row in result["rows"]
         ]
 
+    def get_alarm(self) -> int | None:
+        result = expect(self.request({"op": "alarm"}), "alarm")
+        timestamp_ms = result["timestamp_ms"]
+        if timestamp_ms is not None and type(timestamp_ms) is not int:
+            raise ValueError("invalid actor alarm timestamp")
+        return timestamp_ms
+
+    def set_alarm(self, timestamp_ms: int) -> None:
+        expect(
+            self.request({"op": "set_alarm", "timestamp_ms": timestamp_ms, "immediate": False}),
+            "done",
+        )
+
+    def delete_alarm(self) -> None:
+        expect(self.request({"op": "delete_alarm", "immediate": False}), "done")
+
     async def fields(self) -> Document:
         return cast(Document, expect(await self.call({"op": "fields"}), "fields")["fields"])
 

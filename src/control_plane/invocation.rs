@@ -1,4 +1,5 @@
 use crate::request_tracking::HostState;
+use anyhow::Context;
 use axum::{
     Json,
     extract::{Path, State, rejection::JsonRejection},
@@ -12,6 +13,39 @@ use super::public_api::{
     ActorPath, ActorTargetReply, ApiError, FindActorRequest, PublicApiState, resolve_actor_target,
 };
 use crate::actor::ActorInvocation;
+
+pub(super) async fn invoke_alarm(
+    service: &super::ControlPlaneService,
+    client: &reqwest::Client,
+    alarm: &super::alarms::ClaimedAlarm,
+) -> anyhow::Result<()> {
+    let started = tokio::time::Instant::now();
+    let target = service
+        .resolve_actor_route(&alarm.actor, None, None, None)
+        .await
+        .context("could not route alarm")?;
+    let invocation = ActorInvocation {
+        actor: alarm.actor.clone(),
+        request_id: format!("alarm-{}", alarm.revision),
+        method: "onAlarm".into(),
+        args: vec![],
+    };
+    let outcome = dispatch(
+        client,
+        &target.route,
+        &target.token,
+        target.owner_epoch,
+        &invocation,
+        target.host_state,
+        started.elapsed().as_secs_f64() * 1000.0,
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("alarm outcome could not be confirmed"))?;
+    match outcome["type"].as_str() {
+        Some("completed" | "failed") => Ok(()),
+        _ => anyhow::bail!("alarm was not executed: {outcome}"),
+    }
+}
 
 pub(super) async fn invoke(
     State(state): State<PublicApiState>,

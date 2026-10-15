@@ -228,11 +228,12 @@ test("ephemeral caches survive resident calls and reset after atomic failure or 
 
 test("failed state recovery reports a fatal error instead of keeping a damaged instance", async () => {
     let rejectConstruction = false
+    const restore = () => {
+        if (rejectConstruction) throw new Error("cannot restore")
+        return true
+    }
     class RecoveryFailure extends Actor {
-        constructor() {
-            super()
-            if (rejectConstruction) throw new Error("cannot restore")
-        }
+        @Ephemeral restored = restore()
 
         async fail(): Promise<void> {
             rejectConstruction = true
@@ -240,7 +241,10 @@ test("failed state recovery reports a fatal error instead of keeping a damaged i
         }
     }
     const runtime = new ActorRuntime(
-        registerActorClass(RecoveryFailure, { actorName: "RecoveryFailure", fields: [] }),
+        registerActorClass(RecoveryFailure, {
+            actorName: "RecoveryFailure",
+            fields: [{ name: "restored", persistence: Persistence.Ephemeral }]
+        }),
         () => {}
     )
     const command = {

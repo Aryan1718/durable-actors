@@ -133,6 +133,7 @@ pub async fn serve_local(
         .watch
         .then(|| super::local_watch::Sources::new(&project, &directory))
         .transpose()?;
+    let stop = CancellationToken::new();
     let (routes, reload) = local_routes(
         &options,
         &project,
@@ -140,9 +141,10 @@ pub async fn serve_local(
         &storage,
         provider.clone(),
         &directory,
+        stop.clone(),
     )
     .await?;
-    let server = LocalServer::start(listener, routes, provider);
+    let server = LocalServer::start(listener, routes, provider, stop);
     let ready = notify_launcher(
         &origin,
         options.api_key.as_deref(),
@@ -192,8 +194,8 @@ impl LocalServer {
         listener: TcpListener,
         routes: tonic::service::Routes,
         provider: Arc<LocalSandboxProvider>,
+        stop: CancellationToken,
     ) -> Self {
-        let stop = CancellationToken::new();
         let stopped = stop.clone();
         let server = tokio::spawn(async move {
             axum::serve(listener, logged_routes(routes))
@@ -320,6 +322,7 @@ async fn local_routes(
     storage: &LocalState,
     provider: Arc<LocalSandboxProvider>,
     directory: &Path,
+    stop: CancellationToken,
 ) -> Result<(tonic::service::Routes, LocalReload)> {
     let issuer = local_issuer()?;
     let auth = ActorJwtVerifier::for_scope(
@@ -359,7 +362,7 @@ async fn local_routes(
         Arc::new(super::socket_directory::MemorySocketDirectory::default()),
         max_socket_connections,
         true,
-        CancellationToken::new(),
+        stop.child_token(),
     )
     .await?;
     let gateway = super::gateway::Gateway::new(&issuer, origin.to_owned(), socket_gateway)?;
@@ -380,6 +383,7 @@ async fn local_routes(
     )))
     .with_traces(storage.traces.clone());
     service.gateway = Some(gateway);
+    service.start_alarm_scheduler(super::alarms::DEFAULT_POLL_INTERVAL, stop);
     let admin = AdminService::new(options.api_key.clone(), registry, issuer)?;
     service.deploy_source(&admin, &spec, None).await?;
     let inventory = Arc::new(super::socket_inventory::GatewayInventoryReader::new(

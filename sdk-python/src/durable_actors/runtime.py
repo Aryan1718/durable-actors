@@ -10,7 +10,7 @@ from typing import Any
 
 from .actor_base import ActorBase
 from .contract import Document, Method, decode, describe_actor, encode
-from .database import actor_database_invocation, bind_actor_database
+from .database import RuntimeActorContext, actor_database_invocation
 from .socket import Effects, SocketScope, scope_context
 from .sqlite import DatabaseCommitError, DatabaseProxy
 from .threads import run_in_thread
@@ -69,6 +69,8 @@ class ActorRuntime:
     async def run(self, command: Document) -> Document:
         await self.serial.acquire()
         name = command.get("method") or "on_" + command.get("event", {}).get("type", "")
+        if name == "onAlarm":
+            name = "on_alarm"
         released = False
 
         def admit() -> None:
@@ -107,7 +109,10 @@ class ActorRuntime:
         assert instance is not None
         socket_event = command["type"] == "websocket_event"
         name = "on_" + command["event"]["type"] if socket_event else command["method"]
-        if not socket_event and name not in self.definition.methods:
+        alarm_event = not socket_event and name == "onAlarm"
+        if alarm_event:
+            name = "on_alarm"
+        if not socket_event and not alarm_event and name not in self.definition.methods:
             return failed("method_not_found", name)
         before = self.snapshot()
         connecting = socket_event and command["event"]["type"] == "connect"
@@ -126,6 +131,10 @@ class ActorRuntime:
                 admit()
                 if hasattr(instance, name):
                     await invoke_handler(scope, getattr(instance, name), *args)
+                result = None
+            elif alarm_event:
+                admit()
+                await invoke_handler(scope, getattr(instance, name))
                 result = None
             else:
                 method = self.definition.methods[name]
@@ -216,8 +225,7 @@ class ActorRuntime:
         return effects
 
     def restore(self, state: Any) -> None:
-        instance = self.definition.actor()
-        bind_actor_database(instance, self.database)
+        instance = self.definition.actor(RuntimeActorContext(self.database))
         if state is not None:
             if not isinstance(state, dict):
                 raise ValueError("persisted state must be an object")

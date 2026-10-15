@@ -12,7 +12,7 @@ interface Connection {
     prepare(sql: string): {
         all(...bindings: Binding[]): Record<string, Binding>[]
         run(...bindings: Binding[]): unknown
-        get(...bindings: Binding[]): Record<string, Binding> | undefined
+        get(...bindings: Binding[]): Record<string, Binding> | null | undefined
     }
     close(): void
 }
@@ -76,6 +76,12 @@ export class HostDatabase {
                         if (!Object.hasOwn(call.fields, name))
                             this.connection.prepare("DELETE FROM __terse_fields WHERE name = ?").run(name)
                 })
+            case "alarm":
+                return this.write(false, () => this.alarm())
+            case "set_alarm":
+                return this.write(call.immediate, () => this.updateAlarm(call.timestamp_ms))
+            case "delete_alarm":
+                return this.write(call.immediate, () => this.updateAlarm(null))
             case "commit":
                 this.commit()
                 return { type: "done" }
@@ -126,6 +132,30 @@ export class HostDatabase {
                 "INSERT INTO __terse_fields VALUES (?, ?) ON CONFLICT(name) DO UPDATE SET value = excluded.value WHERE value <> excluded.value"
             )
             .run(name, JSON.stringify(value))
+    }
+
+    private alarm(): DatabaseResult {
+        this.ensureAlarmTable()
+        const row = this.connection.prepare("SELECT timestamp FROM __terse_alarm WHERE singleton = 1").get()
+        return {
+            type: "alarm",
+            timestamp_ms: row == null || row.timestamp === null ? null : Number(row.timestamp)
+        }
+    }
+
+    private updateAlarm(timestampMs: number | null): void {
+        this.ensureAlarmTable()
+        this.connection
+            .prepare(
+                "INSERT INTO __terse_alarm (singleton, timestamp) VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET timestamp = excluded.timestamp"
+            )
+            .run(timestampMs)
+    }
+
+    private ensureAlarmTable(): void {
+        this.connection.exec(
+            "CREATE TABLE IF NOT EXISTS __terse_alarm (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), timestamp INTEGER)"
+        )
     }
 
     private commit(): void {

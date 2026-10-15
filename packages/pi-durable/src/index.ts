@@ -1,16 +1,15 @@
+import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context"
 import { contentText } from "@earendil-works/pi-ai"
 import { AssistantEntry, Harness, type HarnessOptions, type ModelRef } from "@earendil-works/pi-durable"
 import type { Actor, ActorResource, ActorResourceContext } from "durable-actors"
 
 import { ActorStorage } from "./storage.js"
-import { BACKGROUND_CONTEXT } from "@earendil-works/chord/context"
 
-const context = BACKGROUND_CONTEXT;
+const context = BACKGROUND_CONTEXT
 
 export class DurablePiAgent implements ActorResource {
     private _harness?: Harness
     private readonly options: HarnessOptions
-
 
     get harness(): Harness {
         if (!this._harness) {
@@ -24,37 +23,33 @@ export class DurablePiAgent implements ActorResource {
     }
 
     async prompt(text: string, model: ModelRef): Promise<string> {
-         const root = await this.harness.root(context)
-         await root.configure({ model }, context)
+        const root = await this.harness.root(context)
+        await root.configure({ model }, context)
 
-         const job = {
+        const job = {
             type: "input",
-            content: text,
-        } as const;
-        
-        const submission = await root.submit(job, context);
-        const settled = await submission.wait(context);
+            content: text
+        } as const
 
-        if (settled.status === "unanswered") 
-            throw new Error(`Pi did not answer: ${settled.reason}${typeof settled.detail === "string" ? `: ${settled.detail}` : ""}`)
+        const submission = await root.submit(job, context)
+        const settled = await submission.wait(context)
 
-        if (settled.status !== "done" || settled.type !== "input")
-            throw new Error(`Pi did not answer: ${settled.reason}`)
+        if (settled.status === "unanswered") throw new Error(`Pi did not answer: ${settled.reason}${typeof settled.detail === "string" ? `: ${settled.detail}` : ""}`)
 
-        const answer = await root.commit((tx) => tx.entry(AssistantEntry, settled.answer), context);
+        if (settled.status !== "done" || settled.type !== "input") throw new Error(`Pi did not answer: ${settled.reason}`)
 
-        if (answer === undefined)
-            throw new Error("Pi did not answer")
+        const answer = await root.commit(tx => tx.entry(AssistantEntry, settled.answer), context)
 
-        if (answer.model === undefined)
-            throw new Error("The Pi model did not provide an answer")
+        if (answer === undefined) throw new Error("Pi did not answer")
+
+        if (answer.model === undefined) throw new Error("The Pi model did not provide an answer")
 
         return contentText(answer.model[0].content)
     }
 
     async onResume({ db }: ActorResourceContext): Promise<void> {
         this._harness = await Harness.open(new ActorStorage(db), this.options, context)
-        this._harness.resume();
+        this._harness.resume()
     }
 
     async onGracefulShutdown({ db }: ActorResourceContext): Promise<void> {

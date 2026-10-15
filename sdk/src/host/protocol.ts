@@ -2,11 +2,11 @@ import { z } from "zod"
 
 import type { ActorIdentity } from "../actor/identity.js"
 import { actorComponentSchema, actorIdentitySchema } from "../actor/identity.js"
-import { socketConnectionSchema, socketEventSchema } from "../actor/socketProtocol.js"
 import type { SocketEffect, SocketLookup, SocketQuery } from "../actor/socketProtocol.js"
+import { socketConnectionSchema, socketEventSchema } from "../actor/socketProtocol.js"
 import { ActorProtocolError } from "../errors.js"
-import { jsonValueSchema } from "../json.js"
 import type { JsonValue } from "../json.js"
+import { jsonValueSchema } from "../json.js"
 
 import type { DatabaseRequest } from "./database-bridge.js"
 import type { DatabaseCall } from "./database.js"
@@ -38,6 +38,10 @@ const databaseValueSchema = z.discriminatedUnion("type", [
 const databaseResultSchema = z.discriminatedUnion("type", [
     z.object({ type: z.literal("rows"), columns: z.array(z.string()), rows: z.array(z.array(databaseValueSchema)) }),
     z.object({ type: z.literal("fields"), fields: z.record(z.string(), jsonValueSchema) }),
+    z.object({
+        type: z.literal("alarm"),
+        timestamp_ms: z.number().int().safe().nullable()
+    }),
     z.object({ type: z.literal("done") })
 ])
 
@@ -106,6 +110,7 @@ type HydrateCommand = z.infer<typeof hydrateCommandSchema>
 type InvokeCommand = z.infer<typeof invokeCommandSchema>
 type EvictCommand = z.infer<typeof evictCommandSchema>
 type ActorExecutorCommand = z.infer<typeof executorCommandSchema>
+type ActorWorkerCommand = InvokeCommand | WebSocketEventCommand | HydrateCommand
 type ActorSessionServerMessage = z.infer<typeof actorSessionServerMessageSchema>
 type ActorExecutorReply =
     InvokedReply | WebSocketHandledReply | FailedReply | EvictedReply | { readonly type: "hydrated" }
@@ -163,7 +168,7 @@ type ActorWorkerRequest =
     | {
           readonly type: "execute"
           readonly messageId: number
-          readonly command: InvokeCommand | WebSocketEventCommand | HydrateCommand
+          readonly command: ActorWorkerCommand
       }
     | { readonly type: "socket_effects_published"; readonly messageId: number; readonly error?: string }
     | {
@@ -198,10 +203,11 @@ export type {
     ActorSessionClientMessage,
     ActorSessionServerMessage,
     ActorWorkerData,
+    ActorWorkerCommand,
     ActorWorkerMessage,
     ActorWorkerRequest,
     EvictCommand,
-    InvokeCommand,
     HydrateCommand,
+    InvokeCommand,
     WebSocketEventCommand
 }

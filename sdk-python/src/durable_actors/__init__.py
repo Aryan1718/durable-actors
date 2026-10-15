@@ -16,7 +16,9 @@ from .compute import ComputeRegion as ComputeRegion
 from .compute import compute as compute
 from .connection import StateSnapshot as StateSnapshot
 from .connection import StateUpdate as StateUpdate
+from .database import ActorAlarm as ActorAlarm
 from .database import ActorDatabase as ActorDatabase
+from .database import AsyncActorAlarm as AsyncActorAlarm
 from .database import AsyncActorDatabase as AsyncActorDatabase
 from .database import SqliteValue as SqliteValue
 from .fields import emitted as emitted

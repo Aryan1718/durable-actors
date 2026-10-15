@@ -38,6 +38,18 @@ def test_contract_describes_models_methods_and_public_state():
     assert "Message" in actor["rpc"]["schema"]["definitions"]
 
 
+def test_alarm_lifecycle_is_not_published_as_an_rpc():
+    class Reminder(Actor):
+        def on_alarm(self) -> None:
+            pass
+
+        def schedule(self) -> None:
+            pass
+
+    methods = public_contract([Reminder])["actors"][0]["rpc"]["methods"]
+    assert [method["name"] for method in methods] == ["schedule"]
+
+
 def test_mutable_defaults_are_per_actor():
     left, right = Chat(), Chat()
     left.messages.append(Message(text="hello", role="user"))

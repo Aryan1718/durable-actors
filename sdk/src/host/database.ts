@@ -1,3 +1,4 @@
+import type { ActorAlarmState, ActorAlarmStorage } from "../actor/alarm.js"
 import { actorDatabaseMode } from "../actor/database.js"
 import type { ActorDatabase, SqliteValue } from "../actor/database.js"
 import { errorMessage } from "../errors.js"
@@ -17,19 +18,23 @@ type DatabaseCall =
     | { readonly op: "persist_field"; readonly name: string; readonly value: JsonValue; readonly immediate: boolean }
     | { readonly op: "delete_field"; readonly name: string; readonly immediate: boolean }
     | { readonly op: "replace_fields"; readonly fields: JsonObject }
+    | { readonly op: "alarm" }
+    | { readonly op: "set_alarm"; readonly timestamp_ms: number; readonly immediate: boolean }
+    | { readonly op: "delete_alarm"; readonly immediate: boolean }
     | { readonly op: "commit" }
     | { readonly op: "rollback" }
 
 type DatabaseResult =
     | { readonly type: "rows"; readonly columns: string[]; readonly rows: DatabaseValue[][] }
     | { readonly type: "fields"; readonly fields: JsonObject }
+    | { readonly type: "alarm"; readonly timestamp_ms: number | null }
     | { readonly type: "done" }
 
 type DatabaseTransport = (call: DatabaseCall) => DatabaseResult
 
 class DatabaseCommitError extends Error {}
 
-class DatabaseProxy implements ActorDatabase {
+class DatabaseProxy implements ActorDatabase, ActorAlarmStorage {
     constructor(private readonly transport: DatabaseTransport) {}
 
     exec<Row extends object>(sql: string, ...bindings: SqliteValue[]): Row[] {
@@ -44,6 +49,20 @@ class DatabaseProxy implements ActorDatabase {
         const result = this.transport({ op: "fields" })
         if (result.type !== "fields") throw unexpected(result)
         return result.fields
+    }
+
+    getAlarmState(): ActorAlarmState {
+        const result = this.transport({ op: "alarm" })
+        if (result.type !== "alarm") throw unexpected(result)
+        return { timestampMs: result.timestamp_ms }
+    }
+
+    setAlarm(timestampMs: number): void {
+        this.transport({ op: "set_alarm", timestamp_ms: timestampMs, immediate: immediate() })
+    }
+
+    deleteAlarm(): void {
+        this.transport({ op: "delete_alarm", immediate: immediate() })
     }
 
     initializeFields(fields: JsonObject): void {

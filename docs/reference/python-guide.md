@@ -230,6 +230,26 @@ with account.connect(actors.BankAccount.Metadata(user_id="ada")) as socket:
             print(message)
 ```
 
+## Scheduling an alarm
+
+Each actor has one alarm. Setting it again replaces the previous timestamp. When the timestamp is due, the runtime wakes the actor and runs `on_alarm`.
+
+```python
+import time
+
+from durable_actors import Actor, persisted
+
+
+class Reminder(Actor):
+    sent: bool = persisted(False)
+
+    def schedule(self, delay_ms: int) -> None:
+        self.alarm.set(time.time_ns() // 1_000_000 + delay_ms)
+
+    def on_alarm(self) -> None:
+        self.sent = True
+```
+
 ## Interleaving calls
 
 An actor runs one call at a time by default. Python methods run in a worker thread, and an `@interleave` method does not hold the actor while it runs: other calls can start at any point during it, not only while it waits on I/O. Protect state that overlapping calls share, for example with a `threading.Lock` in an `ephemeral()` field.

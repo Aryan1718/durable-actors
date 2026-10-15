@@ -413,10 +413,10 @@ test("rejects unsupported persistence targets and syntax", () => {
         "@Persisted #count = 0",
         "@Persisted [Symbol.iterator] = 0",
         "@Persisted() count = 0",
-        "constructor(public count = 0) { super() }",
+        "constructor(context: ActorContext, public count = 0) { super(context) }",
         "@Persisted declare count: number"
     ]) {
-        const result = analyze(`import { Actor, Persisted } from "./sdk.js"
+        const result = analyze(`import { Actor, type ActorContext, Persisted } from "./sdk.js"
             export class Counter extends Actor { ${member} }`)
         assert.ok(result.diagnostics.length > 0, member)
         assert.deepEqual(result.schemas, [], member)
@@ -503,7 +503,8 @@ function analyze(source: string, extra: Record<string, string> = {}) {
     const files = new Map(
         Object.entries({
             "actors.ts": source,
-            "sdk.ts": `export abstract class Actor { protected constructor() {} }
+            "sdk.ts": `export interface ActorContext { readonly actorContext: unique symbol }
+            export abstract class Actor { protected constructor(context: ActorContext) {} }
             export abstract class ActorResource { private readonly actorResource!: void }
             export function Persisted(...args: unknown[]) {}
             export function Emittable(...args: unknown[]) {}

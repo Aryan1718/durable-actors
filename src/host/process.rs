@@ -103,7 +103,7 @@ pub(super) async fn serve_assigned_host(
             return Err(error);
         }
     };
-    let PreparedActorHost {
+    let PreparedActorHostResources {
         invocation_auth,
         listener,
         route,
@@ -343,7 +343,7 @@ impl HostMetadataFile {
     }
 }
 
-struct PreparedActorHost {
+struct PreparedActorHostResources {
     storage: Arc<super::storage::HostStorage>,
     credentials: DropGuard,
     sockets: Arc<super::sockets::HostSockets>,
@@ -361,7 +361,7 @@ async fn prepare_actor_host(
     config: &ActorHostConfig,
     timings: &mut HostStartupTimings,
     warm: Option<super::spare::WarmHost>,
-) -> Result<PreparedActorHost> {
+) -> Result<PreparedActorHostResources> {
     let replication = warm
         .as_ref()
         .map(|warm| warm.replication.clone())
@@ -464,7 +464,7 @@ async fn prepare_actor_host(
         )),
     );
     timings.lease_registered_at_ms = Some(timings.elapsed_ms());
-    Ok(PreparedActorHost {
+    Ok(PreparedActorHostResources {
         storage,
         credentials,
         sockets,

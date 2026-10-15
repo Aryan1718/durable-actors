@@ -1,4 +1,5 @@
 pub(crate) mod admin;
+mod alarms;
 mod auth;
 mod client;
 mod contract_api;

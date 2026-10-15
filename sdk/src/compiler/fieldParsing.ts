@@ -82,7 +82,7 @@ export function validateField(actorName: string, member: ParsedMember): FieldVal
     return { field }
 }
 
-const fieldDenyList = ["db"]
+const fieldDenyList = ["db", "alarm"]
 
 export function readPersistence(use: DecoratorUse, mode: Persistence): DecoratorResult {
     const name = mode === Persistence.Persisted ? "Persisted" : "Ephemeral"

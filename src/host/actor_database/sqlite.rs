@@ -92,6 +92,11 @@ impl Engine {
             }
             DatabaseCall::Rollback => self.rollback()?,
             DatabaseCall::Fields => self.fields()?,
+            DatabaseCall::Alarm
+            | DatabaseCall::SetAlarm { .. }
+            | DatabaseCall::DeleteAlarm { .. } => {
+                unreachable!("alarm calls are handled by the control plane")
+            }
             call => {
                 self.begin()?;
                 self.write(call)?
@@ -108,7 +113,12 @@ impl Engine {
             DatabaseCall::PersistField { name, value, .. } => self.persist(&name, &value)?,
             DatabaseCall::DeleteField { name, .. } => self.delete(&name)?,
             DatabaseCall::ReplaceFields { fields } => self.replace(&fields)?,
-            DatabaseCall::Fields | DatabaseCall::Commit | DatabaseCall::Rollback => {
+            DatabaseCall::Fields
+            | DatabaseCall::Alarm
+            | DatabaseCall::SetAlarm { .. }
+            | DatabaseCall::DeleteAlarm { .. }
+            | DatabaseCall::Commit
+            | DatabaseCall::Rollback => {
                 unreachable!("read and lifecycle calls are not writes")
             }
         }

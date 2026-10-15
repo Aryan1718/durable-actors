@@ -26,6 +26,7 @@ test("parses database results", () => {
             }
         },
         { result: { type: "fields", fields: { count: 1 } } },
+        { result: { type: "alarm", timestamp_ms: 1_000 } },
         { result: { type: "done" } },
         { error: "storage rejected write" }
     ]) {

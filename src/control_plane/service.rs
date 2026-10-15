@@ -46,6 +46,7 @@ pub struct ControlPlaneService {
     host_token_issuer: ActorJwtIssuer,
     registry: Arc<dyn AdminRegistry>,
     provisioner: Arc<dyn HostProvisioner>,
+    alarms: Arc<dyn super::alarms::AlarmStore>,
     socket_events: Option<Arc<dyn super::event_sink::SocketMessageEventSink>>,
     local_builds: Option<Arc<super::local_build::LocalBuilds>>,
 }
@@ -85,9 +86,23 @@ impl ControlPlaneService {
             host_token_issuer: issuer,
             registry,
             provisioner,
+            alarms: Arc::new(super::alarms::MemoryAlarmStore::default()),
             socket_events: None,
             local_builds: None,
         }
+    }
+
+    pub(super) fn with_alarm_store(mut self, alarms: Arc<dyn super::alarms::AlarmStore>) -> Self {
+        self.alarms = alarms;
+        self
+    }
+
+    pub(crate) fn start_alarm_scheduler(
+        &self,
+        poll_interval: std::time::Duration,
+        stop: tokio_util::sync::CancellationToken,
+    ) {
+        super::alarms::start(self.clone(), self.alarms.clone(), poll_interval, stop);
     }
 
     pub(crate) fn with_socket_event_sink(
@@ -464,6 +479,16 @@ impl ControlPlaneService {
                         dropped,
                     )
                     .await?;
+                Ok(ControlPlaneCommandReply::Unit)
+            }
+            ControlPlaneCommand::GetAlarm => {
+                self.require_active_host(principal).await?;
+                let timestamp_ms = self.alarms.get(&principal.actor).await?;
+                Ok(ControlPlaneCommandReply::Alarm { timestamp_ms })
+            }
+            ControlPlaneCommand::UpdateAlarm { timestamp_ms } => {
+                self.require_active_host(principal).await?;
+                self.alarms.update(&principal.actor, timestamp_ms).await?;
                 Ok(ControlPlaneCommandReply::Unit)
             }
             ControlPlaneCommand::InventoryChanged => {

@@ -3,6 +3,7 @@ import { afterEach, test } from "node:test"
 
 import { Actor, registerActorClass } from "../../src/actor/actor.js"
 import type { ActorDefinition } from "../../src/actor/actor.js"
+import { Ephemeral } from "../../src/actor/decorators.js"
 import { Persistence } from "../../src/actor/schema.js"
 import type { InvokeCommand } from "../../src/host/protocol.js"
 import { ActorRuntime, DatabaseProxy } from "../fixtures/actor-runtime.js"
@@ -267,6 +268,31 @@ test("database handles cannot write after their invocation completes", async () 
     assert.throws(escaped, /outside its invocation/)
     release()
     await assert.rejects(pending, /outside its invocation/)
+})
+
+test("field initializers read the actor identity and SQLite during construction", async () => {
+    class InitializedSqlite extends Actor {
+        @Ephemeral identity = this.id
+        @Ephemeral created = this.db.exec("CREATE TABLE IF NOT EXISTS initialized (id INTEGER)")
+
+        async read() {
+            return {
+                identity: this.identity,
+                tables: this.db.exec("SELECT name FROM sqlite_schema WHERE name = 'initialized'")
+            }
+        }
+    }
+    const { runtime } = createRuntime(
+        registerActorClass(InitializedSqlite, {
+            actorName: "InitializedSqlite",
+            fields: [
+                { name: "identity", persistence: Persistence.Ephemeral },
+                { name: "created", persistence: Persistence.Ephemeral }
+            ]
+        })
+    )
+    const reply = await invoke(runtime, "read", [], "InitializedSqlite")
+    assert.deepEqual(Reflect.get(reply, "result"), { identity: "one", tables: [{ name: "initialized" }] })
 })
 
 test("a commit failure prevents further execution until the actor is reloaded", async () => {

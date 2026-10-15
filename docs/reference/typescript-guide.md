@@ -195,6 +195,26 @@ socket.addEventListener("message", event => {
 })
 ```
 
+## Scheduling an alarm
+
+Each actor has one alarm. Setting it again replaces the previous timestamp. When the timestamp is due, the runtime wakes the actor and runs `onAlarm`.
+
+```typescript
+import { Actor, Persisted } from "durable-actors"
+
+export class Reminder extends Actor {
+    @Persisted private sent = false
+
+    async schedule(delayMs: number): Promise<void> {
+        this.alarm.set(Date.now() + delayMs)
+    }
+
+    async onAlarm(): Promise<void> {
+        this.sent = true
+    }
+}
+```
+
 ## Interleaving calls
 
 An actor runs one call at a time, and a call holds the actor until it finishes, including across an `await`. `@Interleave` lets other calls run while that method awaits.
@@ -253,8 +273,21 @@ export class BankAccount extends Actor {
 - Reassign objects and arrays to persist changes: `this.messages = [...this.messages, message]`. Nested mutations such as `this.messages.push(message)` only change memory; they are not saved, even at method completion. Assign `undefined` to remove a saved field value rather than using `delete`.
 - Saved fields are restored before persistence tracking begins. Defaults are inserted only for fields missing from SQLite, so adding a persisted property initializes existing actors without replacing their saved values. Initialization does not delete existing rows.
 - Bind values with `?` placeholders. Values can be strings, numbers, bigints, byte arrays, or `null`.
-- `this.db` is available in constructors and field initializers, as well as methods and socket hooks. SQLite is restored before construction; `@Persisted` fields are hydrated afterward.
-- Keep constructor SQL synchronous and repeatable (for example, `CREATE TABLE IF NOT EXISTS`): constructors run again when actors are restored. Constructor writes commit with the next successful method or socket hook; a throwing constructor rolls them back.
+- Actor constructors must accept the opaque `ActorContext` and pass it to `super(context)` before using `this`. Classes without a constructor forward the context automatically.
+- `this.db` and `this.id` are available after `super(context)` in constructors and in field initializers, methods, and socket hooks. SQLite is restored before construction; `@Persisted` fields are hydrated afterward.
+- Keep constructor and field-initializer SQL synchronous and repeatable (for example, `CREATE TABLE IF NOT EXISTS`): both run again when actors are restored. Their writes commit with the next successful method or socket hook; a throwing constructor or initializer rolls them back.
+
+```typescript
+import { Actor, type ActorContext } from "durable-actors"
+
+export class Ledger extends Actor {
+    constructor(context: ActorContext) {
+        super(context)
+        this.db.exec("CREATE TABLE IF NOT EXISTS entries (amount INTEGER)")
+    }
+}
+```
+
 - The runtime owns transactions and the database file, so `BEGIN`, `COMMIT`, `END`, `ROLLBACK`, `SAVEPOINT`, `RELEASE`, `ATTACH`, `DETACH`, and `VACUUM` are rejected.
 - The only allowed PRAGMAs are `table_info`, `table_xinfo`, `index_info`, `index_xinfo`, `index_list`, `foreign_key_list`, `foreign_key_check`, `integrity_check`, `quick_check`, and `user_version`.
 - Names beginning with `__terse_` or `_litestream_` are reserved.

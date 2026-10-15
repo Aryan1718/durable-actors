@@ -2,25 +2,22 @@ import { Worker } from "node:worker_threads"
 
 import type { ActorIdentity } from "../actor/identity.js"
 import { actorKey } from "../actor/identity.js"
-import type { SocketQuery } from "../actor/socketProtocol.js"
-import type { SocketEffect } from "../actor/socketProtocol.js"
+import type { SocketEffect, SocketQuery } from "../actor/socketProtocol.js"
 import { errorMessage } from "../errors.js"
 
-import { completeDatabaseCall } from "./database-bridge.js"
 import type { DatabaseRequest } from "./database-bridge.js"
+import { completeDatabaseCall } from "./database-bridge.js"
 import type { DatabaseCall } from "./database.js"
-import { failedReply } from "./protocol.js"
 import type {
     ActorExecutorCommand,
     ActorExecutorReply,
+    ActorWorkerCommand,
     ActorWorkerData,
     ActorWorkerMessage,
     ActorWorkerRequest,
-    EvictCommand,
-    HydrateCommand,
-    InvokeCommand,
-    WebSocketEventCommand
+    EvictCommand
 } from "./protocol.js"
+import { failedReply } from "./protocol.js"
 import type {
     ActorWorkerFactory,
     ActorWorkerHandle,
@@ -153,7 +150,7 @@ class ActorWorker implements ActorWorkerHandle {
     }
 
     async execute(
-        command: InvokeCommand | WebSocketEventCommand | HydrateCommand,
+        command: ActorWorkerCommand,
         allowNextInvocation: () => void,
         database: DatabaseRequester,
         publish?: SocketPublisher,
@@ -353,7 +350,7 @@ class ActorWorkerSupervisor {
     }
 
     private execute(
-        command: InvokeCommand | WebSocketEventCommand | HydrateCommand,
+        command: ActorWorkerCommand,
         allowNextInvocation: () => void,
         database: DatabaseRequester,
         publish?: SocketPublisher,
@@ -421,7 +418,7 @@ class ResidentActorWorker {
     }
 
     async execute(
-        command: InvokeCommand | WebSocketEventCommand | HydrateCommand,
+        command: ActorWorkerCommand,
         allowNextInvocation: () => void,
         database: DatabaseRequester,
         publish?: SocketPublisher,

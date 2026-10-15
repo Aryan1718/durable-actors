@@ -64,6 +64,7 @@ test("public contracts survive JSON transport without actor source and with expl
             async onConnect() {}
             async onMessage() {}
             async onDisconnect() {}
+            async onAlarm() {}
         }
         throw new Error("generation must not execute actor code")
     `)
@@ -80,7 +81,7 @@ test("public contracts survive JSON transport without actor source and with expl
     )
     assert.deepEqual(actor.rpc.methods[0].result, { kind: "void" })
     assert.deepEqual(actor.socket.emittable, ["messages"])
-    for (const absent of [project.root, "secret", "hidden", "internal", "onConnect"])
+    for (const absent of [project.root, "secret", "hidden", "internal", "onConnect", "onAlarm"])
         assert.equal(serialized.includes(absent), false, absent)
     await rm(project.root, { recursive: true, force: true })
     const fetched = JSON.parse(serialized)

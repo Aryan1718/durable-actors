@@ -127,6 +127,19 @@ impl HostStorage {
             .context("activation lease missing")
     }
 
+    pub(super) async fn get_alarm(&self) -> Result<Option<i64>> {
+        self.ensure_authority()?;
+        let timestamp_ms = self.observer.get_alarm().await?;
+        self.ensure_authority()?;
+        Ok(timestamp_ms)
+    }
+
+    pub(super) async fn update_alarm(&self, timestamp_ms: Option<i64>) -> Result<()> {
+        self.ensure_authority()?;
+        self.observer.update_alarm(timestamp_ms).await?;
+        self.ensure_authority()
+    }
+
     pub(super) async fn finish(&self, deadline: tokio::time::Instant) -> Result<()> {
         let started = Instant::now();
         let actor = self.actor.as_ref().context("host actor identity missing")?;
@@ -195,6 +208,14 @@ impl HostStorage {
 
 #[async_trait]
 impl ActorStorage for HostStorage {
+    async fn get_alarm(&self) -> Result<Option<i64>> {
+        HostStorage::get_alarm(self).await
+    }
+
+    async fn update_alarm(&self, timestamp_ms: Option<i64>) -> Result<()> {
+        HostStorage::update_alarm(self, timestamp_ms).await
+    }
+
     fn ensure_authority(&self) -> Result<()> {
         ensure!(
             !self.stop.is_cancelled(),
