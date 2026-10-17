@@ -38,6 +38,9 @@ pub(super) async fn run(
             args: vec![],
         });
         let result = activate(actor, &executor, &database).await;
+        if let Ok(activation) = &result {
+            request.owner_epoch = activation.owner_epoch;
+        }
         let stop = result.is_err();
         request.tracker.state_version(database.state_version());
         let _ = reply.send(result);
@@ -103,6 +106,7 @@ pub(super) async fn run(
     };
     let result = finish(
         &request.operation,
+        request.owner_epoch,
         outcome,
         &executor,
         &database,
@@ -197,6 +201,7 @@ async fn execute(
 
 async fn finish(
     operation: &ActorOperation,
+    owner_epoch: u64,
     outcome: Result<ActorMethodOutcome>,
     executor: &Arc<dyn ActorExecutor>,
     database: &Arc<HostDatabase>,
@@ -213,7 +218,7 @@ async fn finish(
                 failure.code.as_str(),
                 "actor_method_failed" | "actor_socket_failed"
             ) {
-                evict(operation.actor(), executor, database, true).await;
+                evict(operation.actor(), owner_epoch, executor, database, true).await;
             }
             let code = if failure.code == "resource_exhausted" {
                 "resource_exhausted"
@@ -223,7 +228,7 @@ async fn finish(
             return Ok(failed(code, failure.message));
         }
         Err(error) => {
-            evict(operation.actor(), executor, database, true).await;
+            evict(operation.actor(), owner_epoch, executor, database, true).await;
             return Ok(failed(
                 "actor_error",
                 format!("actor executor failed: {error:#}"),
@@ -231,7 +236,7 @@ async fn finish(
         }
     };
     if let Err(error) = validate_socket_effects(&effects) {
-        evict(operation.actor(), executor, database, true).await;
+        evict(operation.actor(), owner_epoch, executor, database, true).await;
         return Ok(failed(
             "actor_error",
             format!("actor returned invalid socket effects: {error:#}"),
@@ -241,7 +246,7 @@ async fn finish(
         Ok(version) => version,
         Err(error) if error.is::<PublicationError>() || sequence.is_some() => {
             warn!(error = %format!("{error:#}"), "actor completed but state publication could not be confirmed");
-            evict(operation.actor(), executor, database, false).await;
+            evict(operation.actor(), owner_epoch, executor, database, false).await;
             return Ok(ActorExecutionResult::Failed {
                 failure: ActorInvocationFailure::outcome_unknown_after_execution(),
             });
@@ -261,21 +266,46 @@ async fn finish(
 
 async fn evict(
     actor: &ActorKey,
+    owner_epoch: u64,
     executor: &Arc<dyn ActorExecutor>,
-    database: &HostDatabase,
+    database: &Arc<HostDatabase>,
     reset: bool,
 ) {
-    if let Err(error) = executor
-        .evict(ActorMethodEviction {
-            actor: actor.clone(),
-        })
-        .await
-    {
+    if let Err(error) = evict_actor(actor, owner_epoch, executor, database, false).await {
         warn!(%error, "failed to evict actor after invocation failure");
     }
     if reset {
         let _ = database.reset().await;
     }
+}
+
+pub(super) async fn evict_actor(
+    actor: &ActorKey,
+    owner_epoch: u64,
+    executor: &Arc<dyn ActorExecutor>,
+    database: &Arc<HostDatabase>,
+    graceful: bool,
+) -> Result<()> {
+    let scope = database.invocation(
+        ActorInvocation {
+            actor: actor.clone(),
+            request_id: "evict".into(),
+            method: "evict".into(),
+            args: vec![],
+        },
+        owner_epoch,
+        Default::default(),
+    );
+    let _guard = ScopeGuard(scope.clone());
+    executor
+        .evict(
+            ActorMethodEviction {
+                actor: actor.clone(),
+                graceful,
+            },
+            scope,
+        )
+        .await
 }
 
 async fn complete_with_state(

@@ -428,7 +428,7 @@ impl HostDispatcher {
             active: self.active,
             last_active: self.last_active,
         });
-        if self.active == 0 {
+        if self.active == 0 && self.tasks.is_empty() {
             for waiter in self.drained.drain(..) {
                 let _ = waiter.send(());
             }

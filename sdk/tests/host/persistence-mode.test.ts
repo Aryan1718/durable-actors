@@ -48,7 +48,7 @@ test("entrypoint selects persistence mode for SQL, properties, awaits and nested
         undefined,
         new RecordingDatabase()
     )
-    t.after(() => runtime.close())
+    t.after(() => runtime.close(true))
     for (const [method, expected] of [
         ["atomic", "atomic"],
         ["ordinary", "immediate"]

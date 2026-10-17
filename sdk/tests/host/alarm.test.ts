@@ -59,7 +59,7 @@ function createRuntime() {
 test("actors can read, replace, and delete their alarm", async context => {
     const { runtime, host } = createRuntime()
     context.after(async () => {
-        await runtime.close()
+        await runtime.close(true)
         host.close()
     })
     const invoke = actorInvoker(runtime)
@@ -72,7 +72,7 @@ test("actors can read, replace, and delete their alarm", async context => {
 test("delivers alarms to onAlarm", async context => {
     const { runtime, host } = createRuntime()
     context.after(async () => {
-        await runtime.close()
+        await runtime.close(true)
         host.close()
     })
     assertReply(await actorInvoker(runtime)("onAlarm"), { type: "invoked", result: null })

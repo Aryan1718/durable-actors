@@ -55,7 +55,7 @@ const definition = registerActorClass(SqliteCounter, {
 const runtimes: ActorRuntime[] = []
 const hosts: HostDatabase[] = []
 afterEach(() => {
-    runtimes.splice(0).forEach(runtime => void runtime.close())
+    runtimes.splice(0).forEach(runtime => void runtime.close(true))
     hosts.splice(0).forEach(host => host.close())
 })
 

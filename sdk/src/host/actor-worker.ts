@@ -24,7 +24,6 @@ let runtime: ActorRuntime | undefined
 // Bun 1.3 can drain microtasks after process.exit().
 process.once("exit", () => {
     exiting = true
-    void runtime?.close().catch(() => undefined)
 })
 
 let assigned = false

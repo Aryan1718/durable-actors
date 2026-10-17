@@ -1,6 +1,5 @@
 use super::execution::{self, Completion};
 use super::*;
-use crate::actor::ActorMethodEviction;
 use futures_util::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 
 pub(super) async fn run(
@@ -15,6 +14,7 @@ pub(super) async fn run(
     mut admission: Option<watch::Receiver<()>>,
 ) {
     let stopped = database.stopped.clone();
+    let mut draining = accepting.clone();
     let mut mailbox = Mailbox {
         actor,
         endpoint,
@@ -27,6 +27,7 @@ pub(super) async fn run(
         blocked_on: None,
         interleaved: false,
         hydrating: false,
+        owner_epoch: 0,
     };
     let mut open = true;
     while open || !mailbox.running.is_empty() {
@@ -35,7 +36,7 @@ pub(super) async fn run(
             Some(completion) = mailbox.running.next(), if !mailbox.running.is_empty() => {
                 if !mailbox.executed(completion).await { return; }
             }
-            _ = stopped.cancelled() => { mailbox.evict().await; return; }
+            _ = stopped.cancelled() => { mailbox.evict(false).await; return; }
             permission = admitted(&mut admission), if mailbox.blocked_on.is_some() && !mailbox.hydrating => {
                 if permission.is_err() { return; }
                 mailbox.interleaved = true;
@@ -49,6 +50,10 @@ pub(super) async fn run(
                 }
                 None => open = false,
             },
+            () = draining.wait_for(|accepting| !*accepting).map(drop), if mailbox.running.is_empty() => {
+                mailbox.evict(true).await;
+                return;
+            }
         }
     }
 }
@@ -74,6 +79,7 @@ struct Mailbox {
     blocked_on: Option<u64>,
     interleaved: bool,
     hydrating: bool,
+    owner_epoch: u64,
 }
 
 impl Mailbox {
@@ -112,6 +118,7 @@ impl Mailbox {
             executed,
         } = completion;
         self.hydrating = false;
+        self.owner_epoch = request.owner_epoch;
         let unexpected = executed
             && self.interleaved
             && !interleaved
@@ -126,7 +133,7 @@ impl Mailbox {
             });
         self.interleaved |= interleaved;
         if stop || unexpected || self.database.stopped.is_cancelled() {
-            self.evict().await;
+            self.evict(false).await;
             self.finish(
                 request,
                 Ok(ActorExecutionResult::Failed {
@@ -143,15 +150,17 @@ impl Mailbox {
         true
     }
 
-    async fn evict(&mut self) {
-        if let Err(error) = self
-            .executor
-            .evict(ActorMethodEviction {
-                actor: self.actor.clone(),
-            })
-            .await
+    async fn evict(&mut self, graceful: bool) {
+        if let Err(error) = execution::evict_actor(
+            &self.actor,
+            self.owner_epoch,
+            &self.executor,
+            &self.database,
+            graceful,
+        )
+        .await
         {
-            tracing::warn!(%error, "failed to evict stopped actor");
+            tracing::warn!(%error, "failed to evict actor");
         }
     }
 

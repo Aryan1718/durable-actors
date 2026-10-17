@@ -47,7 +47,7 @@ class ActorRuntime {
     }
 
     async handle(command: ActorWorkerCommand): Promise<ActorExecutorReply> {
-        if (command.type === "hydrate") return this.execute(command)
+        if (command.type === "hydrate" || command.type === "evict") return this.execute(command)
         const method = command.type === "invoke" ? command.method : lifecycleMethod(command)
         const interleave = method !== undefined && (this.definition.state.interleaveMethods?.includes(method) ?? false)
         const operation = this.serial.then(() => this.execute(command))
@@ -55,8 +55,8 @@ class ActorRuntime {
         return operation
     }
 
-    async close(): Promise<void> {
-        await this.shutdown()
+    async close(isGracefuleShutdown: boolean): Promise<void> {
+        if (isGracefuleShutdown) await this.shutdown()
         this.reset()
     }
 
@@ -81,6 +81,12 @@ class ActorRuntime {
                 return prepared instanceof Actor ? { type: "hydrated" } : prepared
             }
             if (command.type === "invoke") return await this.invoke(command)
+            if (command.type === "evict") {
+                const isGracefuleShutdown = command.graceful
+                await this.close(isGracefuleShutdown)
+                this.reset()
+                return { type: "evicted" }
+            }
             return await this.handleSocketEvent(command)
         } catch (error) {
             this.reset()

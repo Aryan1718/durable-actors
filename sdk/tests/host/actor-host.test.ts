@@ -169,7 +169,8 @@ test("the actor session carries only owned execution commands", async t => {
                 message_id: 4,
                 command: {
                     type: "evict",
-                    actor: actorIdentity()
+                    actor: actorIdentity(),
+                    graceful: false
                 }
             })}\n`
         )

@@ -63,7 +63,8 @@ const websocketEventCommandSchema = z.object({
 
 const evictCommandSchema = z.object({
     type: z.literal("evict"),
-    actor: actorIdentitySchema
+    actor: actorIdentitySchema,
+    graceful: z.boolean()
 })
 
 const hydrateCommandSchema = z.object({
@@ -110,7 +111,7 @@ type HydrateCommand = z.infer<typeof hydrateCommandSchema>
 type InvokeCommand = z.infer<typeof invokeCommandSchema>
 type EvictCommand = z.infer<typeof evictCommandSchema>
 type ActorExecutorCommand = z.infer<typeof executorCommandSchema>
-type ActorWorkerCommand = InvokeCommand | WebSocketEventCommand | HydrateCommand
+type ActorWorkerCommand = InvokeCommand | WebSocketEventCommand | HydrateCommand | EvictCommand
 type ActorSessionServerMessage = z.infer<typeof actorSessionServerMessageSchema>
 type ActorExecutorReply =
     InvokedReply | WebSocketHandledReply | FailedReply | EvictedReply | { readonly type: "hydrated" }

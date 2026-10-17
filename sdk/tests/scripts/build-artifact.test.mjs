@@ -185,7 +185,7 @@ test("built actors run without source, compiler, or TypeScript loader", { timeou
             effects: [{ type: "state_update", changes: { count: 3 }, removed: [] }]
         }
     })
-    send({ type: "command", message_id: 2, command: { type: "evict", actor } })
+    send({ type: "command", message_id: 2, command: { type: "evict", actor, graceful: false } })
     assert.equal((await receive()).reply.type, "evicted")
     invoke(3)
     const resumed = await receive()

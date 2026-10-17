@@ -48,11 +48,13 @@ export class DurablePiAgent implements ActorResource {
     }
 
     async onResume({ db }: ActorResourceContext): Promise<void> {
+        console.log("onResume")
         this._harness = await Harness.open(new ActorStorage(db), this.options, context)
         this._harness.resume()
     }
 
     async onGracefulShutdown({ db }: ActorResourceContext): Promise<void> {
+        console.log("onGracefulShutdown")
         if (this.harness === undefined) return
         await this.harness.close(context)
         this._harness = undefined

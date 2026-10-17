@@ -107,19 +107,28 @@ class Room(Actor[Payload, Payload, Payload]):
             update = connection.receive(timeout=5)
             assert isinstance(update, StateUpdate)
             assert update.changes.count == 3
-            assert room.count_connections() == 1
+            wait_for_connections(room, 1)
             room.broadcast(models.Payload(value=17))
             assert connection.receive(timeout=5).value == 17
             with pytest.raises(TimeoutError):
                 connection.receive(timeout=0.01)
         source = importlib.import_module("socket_actors")
         reference = source.Room.get("lobby", client)
+        wait_for_connections(reference, 0)
         with reference.connect(metadata=source.Payload(value=2)) as connection:
             snapshot = connection.receive(timeout=5)
             assert isinstance(snapshot, StateSnapshot)
             assert snapshot.state == {"count": 3}
+            wait_for_connections(reference, 1)
             reference.broadcast(source.Payload(value=19))
             assert connection.receive(timeout=5).value == 19
+
+
+def wait_for_connections(room, expected):
+    deadline = time.monotonic() + 5
+    while (actual := room.count_connections()) != expected:
+        assert time.monotonic() < deadline, f"expected {expected} active connections, got {actual}"
+        time.sleep(0.01)
 
 
 @pytest.mark.skipif(

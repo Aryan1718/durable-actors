@@ -40,7 +40,7 @@ test("persisted assignments update SQLite before the method finishes", async t =
         undefined,
         new DatabaseProxy(host.call)
     )
-    t.after(() => runtime.close())
+    t.after(() => runtime.close(true))
     assertReply(
         await runtime.handle({
             type: "invoke",
@@ -81,7 +81,7 @@ test("hydration does not write defaults over restored persisted fields", async t
         undefined,
         database
     )
-    t.after(() => runtime.close())
+    t.after(() => runtime.close(true))
     assertReply(
         await runtime.handle({
             type: "invoke",
@@ -126,13 +126,13 @@ test("persisted objects require reassignment, including across actor restoration
         ["assign", ["saved"]]
     ] as const) {
         const runtime = new ActorRuntime(definition, () => {}, undefined, undefined, new DatabaseProxy(host.call))
-        t.after(() => runtime.close())
+        t.after(() => runtime.close(true))
         const reply = await runtime.handle({ ...command, method })
         assert.equal(reply.type, "invoked")
         assert.deepEqual(host.fields(), { items: expected })
         host = host.reopen()
         const restored = new ActorRuntime(definition, () => {}, undefined, undefined, new DatabaseProxy(host.call))
-        t.after(() => restored.close())
+        t.after(() => restored.close(true))
         assertReply(await restored.handle({ ...command, method: "read" }), {
             type: "invoked",
             result: [...expected]
@@ -176,7 +176,7 @@ test("initializing added fields preserves stored values and survives restoration
     for (const commits of [1, 0]) {
         host = host.reopen()
         const runtime = new ActorRuntime(definition, () => {}, undefined, undefined, new DatabaseProxy(host.call))
-        t.after(() => runtime.close())
+        t.after(() => runtime.close(true))
         assertReply(await runtime.handle(command), {
             type: "invoked",
             result: { count: 42, theme: "light", enabled: true }
