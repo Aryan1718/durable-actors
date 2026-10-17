@@ -19,11 +19,7 @@ impl ActorExecutor for SleepingExecutor {
         self.inner.invoke(invocation, database).await
     }
 
-    async fn evict(
-        &self,
-        _: crate::actor::ActorMethodEviction,
-        database: Arc<dyn ActorDatabase>,
-    ) -> Result<()> {
+    async fn evict(&self, _: bool, database: Arc<dyn ActorDatabase>) -> Result<()> {
         persist_fields(&*database, json!({"slept": true}), true).await?;
         self.evictions.fetch_add(1, Ordering::Relaxed);
         Ok(())

@@ -45,6 +45,8 @@ class Counter(Actor):
                         def receive():
                             while True:
                                 message = json.loads(messages.readline())
+                                if message["type"] == "residency":
+                                    continue
                                 if message["type"] != "database_call":
                                     return message
                                 send(
@@ -55,7 +57,7 @@ class Counter(Actor):
                                     }
                                 )
 
-                        assert receive() == {"type": "warm", "protocol": 27}
+                        assert receive() == {"type": "warm", "protocol": 28}
                         send(
                             {
                                 "type": "load",
@@ -65,11 +67,11 @@ class Counter(Actor):
                         )
                         assert receive() == {
                             "type": "attach",
-                            "protocol": 27,
+                            "protocol": 28,
                             "actor_names": ["Counter"],
                         }
-                        send({"type": "attached", "protocol": 27})
                         actor = {"project_id": "local", "actor_name": "Counter", "actor_id": "one"}
+                        send({"type": "attached", "protocol": 28, "actor": actor})
                         send(
                             {
                                 "type": "command",
@@ -77,7 +79,6 @@ class Counter(Actor):
                                 "command": {
                                     "type": "invoke",
                                     "request_id": f"request-{expected}",
-                                    "actor": actor,
                                     "method": "increment",
                                     "args": [],
                                 },
@@ -90,7 +91,7 @@ class Counter(Actor):
                             {
                                 "type": "command",
                                 "message_id": 10 + expected,
-                                "command": {"type": "evict", "actor": actor},
+                                "command": {"type": "evict"},
                             }
                         )
                         assert receive()["reply"]["type"] == "evicted"

@@ -122,10 +122,6 @@ async fn combined_invocation_retries_known_non_execution_through_handoff() -> Re
     for (status, outcome) in [
         (
             StatusCode::OK,
-            json!({"type":"not_executed", "reason":"stale_owner"}),
-        ),
-        (
-            StatusCode::OK,
             json!({"type":"not_executed", "reason":"host_unavailable"}),
         ),
         (

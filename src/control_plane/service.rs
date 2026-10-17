@@ -888,7 +888,7 @@ impl HostProvisioner for SandboxHostProvisioner {
             .code_snapshot
             .as_deref()
             .context("hosted deployments require a compiled bundle")?;
-        let manifest = crate::artifacts::ArtifactManifest::decode(snapshot)?;
+        let manifest = crate::bundle::ActorBundle::decode(snapshot)?;
         self.runtime_access
             .as_ref()
             .context("hosted deployments require artifact storage access")?

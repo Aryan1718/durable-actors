@@ -109,21 +109,19 @@ async fn host_registers_claims_reads_and_writes_without_a_control_plane() -> Res
     let bucket = Arc::new(MemoryBucket::default());
     let storage = host_storage(bucket.clone()).await?;
     let host = storage.host.clone();
-    let actor = ActorKey {
-        project_id: "default".into(),
-        actor_name: "Counter".into(),
-        actor_id: "one".into(),
-    };
-    assert!(storage.acquire_actor(&actor, &host).await.is_err());
+    assert!(storage.acquire_actor().await.is_err());
     storage
-        .register(&HostLeaseRequest {
-            id: host.clone(),
-            session_id: "session".into(),
-            route: "http://host".into(),
-            duration_ms: 30_000,
-        })
+        .register(
+            &HostLeaseRequest {
+                id: host.clone(),
+                session_id: "session".into(),
+                route: "http://host".into(),
+                duration_ms: 30_000,
+            },
+            ActivationInventory::default(),
+        )
         .await?;
-    let activation = storage.acquire_actor(&actor, &host).await?;
+    let activation = storage.acquire_actor().await?;
     assert_eq!(activation.owner_epoch, 1);
     assert_eq!(activation.state_version, 0);
     assert_eq!(
@@ -138,7 +136,7 @@ async fn host_registers_claims_reads_and_writes_without_a_control_plane() -> Res
         serde_json::json!(1),
     )?
     .encode()?;
-    let ticket = storage.prepare_state_write(&actor, &host, 1, 0).await?;
+    let ticket = storage.prepare_state_write(1, 0).await?;
     assert_eq!(
         bucket.owner_reads.load(std::sync::atomic::Ordering::SeqCst),
         0,
@@ -148,24 +146,13 @@ async fn host_registers_claims_reads_and_writes_without_a_control_plane() -> Res
         .runtime
         .write_snapshot(&ticket, snapshot.clone())
         .await?;
-    let (version, loaded) = storage.load_actor_state(&actor, &host, 1).await?;
+    let (version, loaded) = storage.load_actor_state(1).await?;
     assert_eq!(version, 1);
     assert_eq!(loaded.as_ref(), snapshot.as_ref());
-    assert!(
-        storage
-            .prepare_state_write(&actor, &host, 2, 1)
-            .await
-            .is_err()
-    );
-    assert!(
-        storage
-            .acquire_actor(&actor, &HostId::new("another-host"))
-            .await
-            .is_err()
-    );
+    assert!(storage.prepare_state_write(2, 1).await.is_err());
     storage.unregister(&host, "session").await?;
     assert!(storage.ensure_authority().is_err());
-    assert!(storage.acquire_actor(&actor, &host).await.is_err());
+    assert!(storage.acquire_actor().await.is_err());
     Ok(())
 }
 
@@ -180,11 +167,11 @@ async fn host_storage(bucket: Arc<MemoryBucket>) -> Result<HostStorage> {
         host,
         session: "session".into(),
         region: "us-east".into(),
-        actor: Some(ActorKey {
+        actor: ActorKey {
             project_id: "default".into(),
             actor_name: "Counter".into(),
             actor_id: "one".into(),
-        }),
+        },
         new_actor: true,
         owner_hint: None,
         activation: Mutex::new(None),
@@ -199,17 +186,17 @@ async fn persistence_failure_fences_the_host_and_requests_replacement() -> Resul
     let bucket = Arc::new(MemoryBucket::default());
     let storage = Arc::new(host_storage(bucket.clone()).await?);
     storage
-        .register(&HostLeaseRequest {
-            id: storage.host.clone(),
-            session_id: storage.session.clone(),
-            route: "http://host".into(),
-            duration_ms: 30_000,
-        })
+        .register(
+            &HostLeaseRequest {
+                id: storage.host.clone(),
+                session_id: storage.session.clone(),
+                route: "http://host".into(),
+                duration_ms: 30_000,
+            },
+            ActivationInventory::default(),
+        )
         .await?;
-    let actor = storage.actor.as_ref().unwrap();
-    let plan = storage
-        .prepare_state_write(actor, &storage.host, 1, 0)
-        .await?;
+    let plan = storage.prepare_state_write(1, 0).await?;
     let bytes = StateSnapshot::new(
         1,
         1,
@@ -273,16 +260,17 @@ async fn pending_write() -> Result<(Arc<MemoryBucket>, Arc<HostStorage>, WritePl
     let bucket = Arc::new(MemoryBucket::default());
     let storage = Arc::new(host_storage(bucket.clone()).await?);
     storage
-        .register(&HostLeaseRequest {
-            id: storage.host.clone(),
-            session_id: storage.session.clone(),
-            route: "http://host".into(),
-            duration_ms: 30_000,
-        })
+        .register(
+            &HostLeaseRequest {
+                id: storage.host.clone(),
+                session_id: storage.session.clone(),
+                route: "http://host".into(),
+                duration_ms: 30_000,
+            },
+            ActivationInventory::default(),
+        )
         .await?;
-    let plan = storage
-        .prepare_state_write(storage.actor.as_ref().unwrap(), &storage.host, 1, 0)
-        .await?;
+    let plan = storage.prepare_state_write(1, 0).await?;
     let bytes = StateSnapshot::new(
         1,
         1,
@@ -297,39 +285,16 @@ async fn pending_write() -> Result<(Arc<MemoryBucket>, Arc<HostStorage>, WritePl
 #[tokio::test]
 async fn socket_authorization_checks_persisted_ownership_without_reading_snapshots() -> Result<()> {
     let (bucket, storage, _, _) = pending_write().await?;
-    let actor = storage.actor.as_ref().unwrap();
     let sockets = crate::host::sockets::HostSockets::new(
+        storage.actor.clone(),
         storage.clone(),
         Arc::new(crate::sockets::SocketRegistry::default()),
     );
     bucket
         .reject_snapshot_reads
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    sockets
-        .publish_authorized(actor, &storage.host, 1, vec![])
-        .await?;
-    assert!(
-        sockets
-            .publish_authorized(actor, &storage.host, 2, vec![])
-            .await
-            .is_err()
-    );
-    assert!(
-        sockets
-            .publish_authorized(actor, &HostId::new("other"), 1, vec![])
-            .await
-            .is_err()
-    );
-    let other_actor = ActorKey {
-        actor_id: "other".into(),
-        ..actor.clone()
-    };
-    assert!(
-        sockets
-            .publish_authorized(&other_actor, &storage.host, 1, vec![])
-            .await
-            .is_err()
-    );
+    sockets.publish_authorized(1, vec![]).await?;
+    assert!(sockets.publish_authorized(2, vec![]).await.is_err());
     {
         let mut objects = bucket.objects.lock().unwrap();
         let owner = objects
@@ -342,19 +307,9 @@ async fn socket_authorization_checks_persisted_ownership_without_reading_snapsho
         owner.bytes = crate::payload::encode(&record)?;
         owner.generation += 1;
     }
-    assert!(
-        sockets
-            .publish_authorized(actor, &storage.host, 1, vec![])
-            .await
-            .is_err()
-    );
+    assert!(sockets.publish_authorized(1, vec![]).await.is_err());
     storage.stop.cancel();
-    assert!(
-        sockets
-            .publish_authorized(actor, &storage.host, 1, vec![])
-            .await
-            .is_err()
-    );
+    assert!(sockets.publish_authorized(1, vec![]).await.is_err());
     Ok(())
 }
 
@@ -389,7 +344,7 @@ impl crate::bucket::SnapshotStore for DelayedFinish {
 
 #[tokio::test(start_paused = true)]
 async fn storage_drain_renews_ownership_and_only_seals_archived_state() -> Result<()> {
-    use crate::{bucket::PersistenceConfig, placement::ObjectPlacementStore};
+    use crate::{bucket::SnapshotStoreConfig, placement::ObjectPlacementStore};
     for (fail, stall) in [(false, false), (true, false), (false, true)] {
         let bucket = Arc::new(MemoryBucket::default());
         let delayed = Arc::new(DelayedFinish {
@@ -401,7 +356,7 @@ async fn storage_drain_renews_ownership_and_only_seals_archived_state() -> Resul
         let mut storage = host_storage(bucket.clone()).await?;
         storage.runtime = Arc::new(
             RuntimeStorage::new(bucket, Arc::new(SystemClock))?
-                .with_persistence(PersistenceConfig::Local, delayed.clone())?,
+                .with_persistence(SnapshotStoreConfig::Local, delayed.clone())?,
         );
         let storage = Arc::new(storage);
         let request = HostLeaseRequest {
@@ -410,14 +365,18 @@ async fn storage_drain_renews_ownership_and_only_seals_archived_state() -> Resul
             route: "http://host".into(),
             duration_ms: 30_000,
         };
-        storage.register(&request).await?;
+        storage
+            .register(&request, ActivationInventory::default())
+            .await?;
         let finishing = {
             let storage = storage.clone();
             tokio::spawn(async move { storage.unregister(&storage.host, &storage.session).await })
         };
         delayed.entered.notified().await;
         tokio::time::advance(Duration::from_secs(6)).await;
-        storage.register(&request).await?;
+        storage
+            .register(&request, ActivationInventory::default())
+            .await?;
         storage.ensure_authority()?;
         if stall {
             tokio::time::advance(Duration::from_secs(16)).await;
@@ -425,10 +384,15 @@ async fn storage_drain_renews_ownership_and_only_seals_archived_state() -> Resul
             delayed.resume.notify_one();
         }
         finishing.await??;
-        assert!(storage.register(&request).await.is_err());
+        assert!(
+            storage
+                .register(&request, ActivationInventory::default())
+                .await
+                .is_err()
+        );
         let (_, hint) = storage
             .runtime
-            .get_owner_with_hint(&storage.actor.as_ref().unwrap().storage_key())
+            .get_owner_with_hint(&storage.actor.storage_key())
             .await?;
         let record = serde_json::to_value(hint.unwrap())?;
         assert_eq!(record["record"]["sealed"], !fail && !stall);
@@ -448,13 +412,19 @@ async fn shutdown_releases_ownership_while_a_renewal_is_stuck() -> Result<()> {
         route: "http://host".into(),
         duration_ms: 30_000,
     };
-    storage.register(&request).await?;
+    storage
+        .register(&request, ActivationInventory::default())
+        .await?;
     let entered = Arc::new(tokio::sync::Semaphore::new(0));
     let resume = Arc::new(tokio::sync::Semaphore::new(0));
     *bucket.delay_ownership.lock().unwrap() = Some((entered.clone(), resume.clone()));
     let renewing = {
         let storage = storage.clone();
-        tokio::spawn(async move { storage.register(&request).await })
+        tokio::spawn(async move {
+            storage
+                .register(&request, ActivationInventory::default())
+                .await
+        })
     };
     entered.acquire().await?.forget();
     tokio::time::timeout(
@@ -467,7 +437,7 @@ async fn shutdown_releases_ownership_while_a_renewal_is_stuck() -> Result<()> {
     assert!(renewing.await?.is_err());
     let (_, hint) = storage
         .runtime
-        .get_owner_with_hint(&storage.actor.as_ref().unwrap().storage_key())
+        .get_owner_with_hint(&storage.actor.storage_key())
         .await?;
     let record = serde_json::to_value(hint.unwrap())?;
     assert_eq!(record["record"]["lease"]["expires_at_ms"], 0);
@@ -480,12 +450,15 @@ async fn shutdown_stays_fenced_when_ownership_release_times_out() -> Result<()> 
     let bucket = Arc::new(MemoryBucket::default());
     let storage = Arc::new(host_storage(bucket.clone()).await?);
     storage
-        .register(&HostLeaseRequest {
-            id: storage.host.clone(),
-            session_id: storage.session.clone(),
-            route: "http://host".into(),
-            duration_ms: 30_000,
-        })
+        .register(
+            &HostLeaseRequest {
+                id: storage.host.clone(),
+                session_id: storage.session.clone(),
+                route: "http://host".into(),
+                duration_ms: 30_000,
+            },
+            ActivationInventory::default(),
+        )
         .await?;
     *bucket.delay_ownership.lock().unwrap() = Some((
         Arc::new(tokio::sync::Semaphore::new(0)),

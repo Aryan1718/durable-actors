@@ -213,7 +213,6 @@ async def test_socket_tag_contract_rejects_values_outside_the_declared_set():
     reply = await runtime.handle(
         {
             "type": "websocket_event",
-            "actor": {"project_id": "local", "actor_name": "Room", "actor_id": "one"},
             "event": {
                 "type": "connect",
                 "connection": {"id": "socket", "metadata": "Ada", "tags": []},

@@ -273,7 +273,7 @@ async fn dispatch(
         Some("not_executed")
             if matches!(
                 reply["reason"].as_str(),
-                Some("stale_owner" | "host_unavailable" | "upstream_not_reached")
+                Some("host_unavailable" | "upstream_not_reached")
             ) =>
         {
             Ok(reply)

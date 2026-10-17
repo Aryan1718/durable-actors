@@ -38,7 +38,6 @@ class Supervisor(Channel):
         self.worker: Worker | None = None
         self.pump: asyncio.Task[None] | None = None
         self.pending: dict[int, Pending] = {}
-        self.assigned: Document | None = None
         self.attached: Document = {}
         self.entrypoint = ""
         self.environment: Environment = {}
@@ -47,9 +46,11 @@ class Supervisor(Channel):
         self.offset = 0
 
     async def run(self, entrypoint: str | None, generic: bool) -> None:
+        from .host import attached_actor
+
         try:
             if generic:
-                await self.send({"type": "warm", "protocol": 27})
+                await self.send({"type": "warm", "protocol": 28})
                 load = await self.read()
                 if load.get("type") != "load":
                     raise ValueError("expected actor code assignment")
@@ -62,10 +63,9 @@ class Supervisor(Channel):
             self.entrypoint = entrypoint
             self.worker = await self.create_worker(entrypoint, self.environment)
             self.actor_names = self.worker.actor_names
-            await self.send({"type": "attach", "protocol": 27, "actor_names": self.actor_names})
+            await self.send({"type": "attach", "protocol": 28, "actor_names": self.actor_names})
             self.attached = await self.read()
-            if self.attached.get("type") != "attached" or self.attached.get("protocol") != 27:
-                raise ValueError("unsupported executor protocol")
+            attached_actor(self.attached, self.actor_names)
             await self.start_pump()
             while True:
                 await self.accept(await self.read())
@@ -83,24 +83,13 @@ class Supervisor(Channel):
 
         validate_command(message)
         command, identifier = message["command"], message["message_id"]
-        actor = command["actor"]
-        if self.assigned is not None and actor != self.assigned:
-            await self.reply(
-                identifier,
-                failed(
-                    "actor_identity_mismatch", "sandbox is permanently assigned to another actor"
-                ),
-            )
-        elif actor["actor_name"] not in self.actor_names:
-            await self.reply(identifier, failed("actor_name_not_found", "actor is not loaded"))
-        elif command["type"] == "evict":
+        if command["type"] == "evict":
             await self.stop_worker()
             await self.fail_pending("actor_evicted", "actor was evicted by the Rust host")
             await self.reply(identifier, {"type": "evicted"})
         else:
             if len(self.pending) >= 512 or identifier in self.pending:
                 raise ValueError("executor command queue is full or message ID is duplicated")
-            self.assigned = actor
             if self.worker is None:
                 self.worker = await self.create_worker(self.entrypoint, self.environment)
                 if self.worker.actor_names != self.actor_names:
@@ -163,8 +152,7 @@ class Supervisor(Channel):
         for identifier in list(self.pending):
             self.pending[identifier].reply = failed(code, message)
             await self.complete(identifier)
-        if self.attached.get("supports_residency"):
-            await self.send({"type": "residency", "actors": []})
+        await self.send({"type": "residency", "resident": False})
 
     async def complete(self, identifier: int) -> None:
         pending = self.pending[identifier]
@@ -220,7 +208,7 @@ class Worker(Channel):
             worker = cls(reader, writer, process)
             async with asyncio.timeout(60):
                 attach = await worker.read()
-            if attach.get("type") != "attach" or attach.get("protocol") != 27:
+            if attach.get("type") != "attach" or attach.get("protocol") != 28:
                 raise ValueError("worker did not attach")
             worker.actor_names = attach["actor_names"]
             return worker

@@ -23,7 +23,6 @@ class Settings(Actor):
         return os.environ.get(name)
 """,
     )
-    actor = {"project_id": "local", "actor_name": "Settings", "actor_id": "one"}
 
     async def send(message_id, command):
         host.send({"type": "command", "message_id": message_id, "command": command})
@@ -32,14 +31,34 @@ class Settings(Actor):
     read = {
         "type": "invoke",
         "request_id": "read",
-        "actor": actor,
         "method": "read",
         "args": ["PAYMENTS_API_KEY"],
     }
     async with warm_executor(entrypoint, {"PAYMENTS_API_KEY": "secret"}) as host:
         assert (await send(1, read))["result"] == "secret"
-        assert await send(2, {"type": "evict", "actor": actor}) == {"type": "evicted"}
+        assert await send(2, {"type": "evict"}) == {"type": "evicted"}
         assert (await send(3, read))["result"] == "secret"
+
+
+async def test_executor_reports_whether_its_attached_actor_is_resident(tmp_path):
+    entrypoint = build(
+        tmp_path,
+        "residency_actors",
+        """from durable_actors import Actor
+class Counter(Actor):
+    def ping(self) -> None:
+        return None
+""",
+    )
+    invoke = {"type": "invoke", "request_id": "ping", "method": "ping", "args": []}
+    async with warm_executor(entrypoint, {}) as host:
+        async with asyncio.timeout(5):
+            await host.residency(False)
+            host.send({"type": "command", "message_id": 1, "command": invoke})
+            assert (await host.receive())["reply"]["type"] == "invoked"
+            await host.residency(True)
+            host.send({"type": "command", "message_id": 2, "command": {"type": "evict"}})
+            await host.residency(False)
 
 
 @pytest.mark.parametrize("generic", [False, True])
@@ -67,7 +86,7 @@ class Counter(Actor):
                 host = ExecutorHost(reader, writer, database)
                 try:
                     if generic:
-                        assert await host.receive() == {"type": "warm", "protocol": 27}
+                        assert await host.receive() == {"type": "warm", "protocol": 28}
                         host.send(
                             {
                                 "type": "load",
@@ -77,10 +96,10 @@ class Counter(Actor):
                         )
                     assert await host.receive() == {
                         "type": "attach",
-                        "protocol": 27,
+                        "protocol": 28,
                         "actor_names": ["Counter"],
                     }
-                    host.send({"type": "attached", "protocol": 27})
+                    host.send({"type": "attached", "protocol": 28, "actor": actor})
                     host.send(
                         {
                             "type": "command",
@@ -88,7 +107,6 @@ class Counter(Actor):
                             "command": {
                                 "type": "invoke",
                                 "request_id": "r1",
-                                "actor": actor,
                                 "method": "increment",
                                 "args": [2],
                             },
@@ -173,12 +191,11 @@ class Counter(Actor):
                 host = ExecutorHost(reader, writer, HostDatabase())
                 receive, send = host.receive, host.send
                 assert (await receive())["type"] == "attach"
-                send({"type": "attached", "protocol": 27})
                 actor = {"project_id": "local", "actor_name": "Counter", "actor_id": "one"}
+                send({"type": "attached", "protocol": 28, "actor": actor})
                 invocation = {
                     "type": "invoke",
                     "request_id": "r1",
-                    "actor": actor,
                     "method": "hold",
                     "args": [],
                 }
@@ -212,7 +229,7 @@ class Counter(Actor):
                     {
                         "type": "command",
                         "message_id": 2,
-                        "command": {"type": "evict", "actor": actor},
+                        "command": {"type": "evict"},
                     }
                 )
                 send({"type": "socket_effects_published", "message_id": 1})

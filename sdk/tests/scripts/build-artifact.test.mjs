@@ -154,6 +154,7 @@ test("built actors run without source, compiler, or TypeScript loader", { timeou
     const receive = async () => {
         for (;;) {
             const message = JSON.parse((await lines.next()).value)
+            if (message.type === "residency") continue
             if (message.type !== "database_call") return message
             let reply
             try {
@@ -164,15 +165,14 @@ test("built actors run without source, compiler, or TypeScript loader", { timeou
             send({ type: "database_result", message_id: message.message_id, ...reply })
         }
     }
-    assert.deepEqual(await receive(), { type: "attach", protocol: 27, actor_names: ["BuiltCounter"] })
+    assert.deepEqual(await receive(), { type: "attach", protocol: 28, actor_names: ["BuiltCounter"] })
     const send = message => socket.write(JSON.stringify(message) + "\n")
-    send({ type: "attached", protocol: 27 })
-    const actor = { project_id: "default", actor_name: "BuiltCounter", actor_id: "counter" }
+    send({ type: "attached", protocol: 28, actor: { project_id: "default", actor_name: "BuiltCounter", actor_id: "counter" } })
     const invoke = messageId =>
         send({
             type: "command",
             message_id: messageId,
-            command: { type: "invoke", request_id: `request-${messageId}`, actor, method: "add", args: [2] }
+            command: { type: "invoke", request_id: `request-${messageId}`, method: "add", args: [2] }
         })
     invoke(1)
     const first = await receive()
@@ -185,7 +185,7 @@ test("built actors run without source, compiler, or TypeScript loader", { timeou
             effects: [{ type: "state_update", changes: { count: 3 }, removed: [] }]
         }
     })
-    send({ type: "command", message_id: 2, command: { type: "evict", actor, graceful: false } })
+    send({ type: "command", message_id: 2, command: { type: "evict", graceful: false } })
     assert.equal((await receive()).reply.type, "evicted")
     invoke(3)
     const resumed = await receive()
@@ -204,7 +204,6 @@ test("built actors run without source, compiler, or TypeScript loader", { timeou
         command: {
             type: "invoke",
             request_id: "invalid-state",
-            actor,
             method: "invalidState",
             args: []
         }

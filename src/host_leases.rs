@@ -44,13 +44,7 @@ pub struct ActorSocketInventory {
     pub connections: Vec<crate::actor::ActorSocketConnection>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ActorQueueInventory {
-    pub actor: ActorKey,
-    pub waiting: Vec<WaitingOperation>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WaitingOperation {
     pub id: String,
     pub operation: String,
@@ -58,23 +52,10 @@ pub struct WaitingOperation {
 
 #[async_trait]
 pub trait HostLeaseRegistry: Send + Sync {
-    async fn register(&self, request: &HostLeaseRequest) -> Result<HostLease>;
-    async fn register_with_residents(
+    async fn register(
         &self,
         request: &HostLeaseRequest,
-        _residents: Option<&[ActorKey]>,
-    ) -> Result<HostLease> {
-        self.register(request).await
-    }
-
-    async fn register_with_inventory(
-        &self,
-        request: &HostLeaseRequest,
-        residents: Option<&[ActorKey]>,
-        _queues: Option<&[ActorQueueInventory]>,
-    ) -> Result<HostLease> {
-        self.register_with_residents(request, residents).await
-    }
-
+        inventory: ActivationInventory,
+    ) -> Result<HostLease>;
     async fn unregister(&self, id: &HostId, session_id: &str) -> Result<()>;
 }

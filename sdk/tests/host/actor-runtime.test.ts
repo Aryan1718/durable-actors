@@ -382,31 +382,6 @@ test("batches pending stream output in order and surfaces publish failures", asy
     if (reply.type === "failed") assert.match(reply.message, /publish denied/)
 })
 
-test("a resident actor rejects another type or ID without changing its state", async () => {
-    const runtime = new ActorRuntime(counterDefinition, () => {})
-    const command = {
-        type: "invoke" as const,
-        request_id: "identity-1",
-        actor: actorIdentity,
-        method: "increment",
-        args: [1]
-    }
-    assertReply(await runtime.handle(command), { type: "invoked", result: 1 })
-    for (const actor of [
-        { ...actorIdentity, actor_name: "OtherCounter" },
-        { ...actorIdentity, actor_id: "other" }
-    ]) {
-        const reply = await runtime.handle({ ...command, actor })
-        assert.equal(reply.type, "failed")
-        if (reply.type === "failed")
-            assert.equal(
-                reply.code,
-                actor.actor_name === actorIdentity.actor_name ? "actor_identity_mismatch" : "actor_name_not_found"
-            )
-    }
-    assertReply(await runtime.handle(command), { type: "invoked", result: 2 })
-})
-
 test("keeps a successful actor instance resident and restores it after atomic failure", async () => {
     const runtime = new ActorRuntime(counterDefinition, () => {})
     assertReply(

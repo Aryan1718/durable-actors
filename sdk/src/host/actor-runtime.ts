@@ -1,11 +1,9 @@
 import { isDeepStrictEqual } from "node:util"
 
 import type { ActorDefinition, AnyActor } from "../actor/actor.js"
-import { Actor } from "../actor/actor.js"
 import { RuntimeActorContext } from "../actor/context.js"
 import { runWithActorDatabase } from "../actor/database.js"
 import type { ActorIdentity } from "../actor/identity.js"
-import { actorKey } from "../actor/identity.js"
 import { ActorResource } from "../actor/resource.js"
 import type { ActorSchema } from "../actor/schema.js"
 import { Persistence } from "../actor/schema.js"
@@ -26,7 +24,6 @@ import type { SocketPublisher, SocketSource } from "./types.js"
 
 class ActorRuntime {
     private instance: AnyActor | undefined
-    private identity: ActorIdentity | undefined
     private readonly schemas: ActorSchemas
     private serial: Promise<unknown> = Promise.resolve()
     private completion: Promise<unknown> = Promise.resolve()
@@ -77,8 +74,8 @@ class ActorRuntime {
         if (this.fatal !== undefined) return this.fatal
         try {
             if (command.type === "hydrate") {
-                const prepared = await this.prepare(command)
-                return prepared instanceof Actor ? { type: "hydrated" } : prepared
+                await this.prepare(command)
+                return { type: "hydrated" }
             }
             if (command.type === "invoke") return await this.invoke(command)
             if (command.type === "evict") {
@@ -105,9 +102,7 @@ class ActorRuntime {
     }
 
     private async invoke(command: InvokeCommand): Promise<ActorExecutorReply> {
-        const prepared = await this.prepare(command)
-        if (!(prepared instanceof Actor)) return prepared
-        const instance = prepared
+        const instance = await this.prepare(command)
         if (!this.definition.methods.has(command.method) && command.method !== "onAlarm") {
             return failedReply(
                 "method_not_found",
@@ -164,9 +159,7 @@ class ActorRuntime {
     }
 
     private async handleSocketEvent(command: WebSocketEventCommand): Promise<ActorExecutorReply> {
-        const prepared = await this.prepare(command)
-        if (!(prepared instanceof Actor)) return prepared
-        const instance = prepared
+        const instance = await this.prepare(command)
         const methodName = lifecycleMethod(command)
         const method: unknown = Reflect.get(instance, methodName)
         const before = this.database.fields()
@@ -226,22 +219,9 @@ class ActorRuntime {
         if (this.definition.state.interleaveMethods?.includes(method)) this.allowNextInvocation()
     }
 
-    private async prepare(command: ActorWorkerCommand): Promise<AnyActor | ActorExecutorReply> {
-        const identity = command.actor
-        if (identity.actor_name !== this.definition.actorName) {
-            return failedReply(
-                "actor_name_not_found",
-                `actor name ${identity.actor_name} is not loaded in this customer process`
-            )
-        }
-        if (this.identity !== undefined && actorKey(this.identity) !== actorKey(identity)) {
-            return failedReply(
-                "actor_identity_mismatch",
-                "resident actor Worker received an invocation for a different actor"
-            )
-        }
+    private async prepare(command: ActorWorkerCommand): Promise<AnyActor> {
         if (this.instance !== undefined) return this.instance
-        return await this.createInstance(identity, this.database.fields())
+        return await this.createInstance(command.actor, this.database.fields())
     }
 
     private completeInOrder(operation: () => Promise<ActorExecutorReply>): Promise<ActorExecutorReply> {
@@ -272,7 +252,6 @@ class ActorRuntime {
 
     private reset(): void {
         this.instance = undefined
-        this.identity = undefined
     }
 
     private async createInstance(identity: ActorIdentity, state: JsonValue | null): Promise<AnyActor> {
@@ -283,7 +262,6 @@ class ActorRuntime {
         this.database.initializeFields(snapshotActorState(instance, this.definition.state))
         bindPersistedFields(instance, context, this.definition.state, this.database)
         if (this.interleaved) this.lastCompletedState = this.database.fields()
-        this.identity = { ...identity }
         this.instance = instance
 
         const resources = this.definition.state.fields.filter(field => field.resource)

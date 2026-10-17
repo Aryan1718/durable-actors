@@ -4,8 +4,8 @@ use base64::{Engine, engine::general_purpose::STANDARD};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use super::ActorSocketConnection;
 use super::executor_connection::{ActorSocketEffect, ActorSocketMessage};
-use super::{ActorKey, ActorSocketConnection};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -24,7 +24,7 @@ pub(crate) enum SocketLookup {
 
 #[async_trait]
 pub(crate) trait ActorSocketSource: Send + Sync {
-    async fn query(&self, actor: &ActorKey, query: SocketQuery) -> Result<SocketLookup>;
+    async fn query(&self, query: SocketQuery) -> Result<SocketLookup>;
 }
 
 pub(crate) const MAX_SOCKET_METADATA_BYTES: usize = 16 * 1024;

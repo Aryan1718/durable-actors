@@ -44,7 +44,7 @@ pub struct ControlPlaneStorageConfig {
     pub token_issuer: String,
     pub trace_retention: Duration,
     pub bucket: String,
-    pub persistence: crate::bucket::PersistenceConfig,
+    pub persistence: crate::bucket::SnapshotStoreConfig,
     pub artifact_bucket: String,
 }
 
@@ -56,9 +56,9 @@ pub struct RuntimeImages {
 impl RuntimeImages {
     pub(crate) fn for_entrypoint(&self, entrypoint: &str) -> Result<&str> {
         Ok(
-            match crate::artifacts::ActorRuntime::from_entrypoint(entrypoint)? {
-                crate::artifacts::ActorRuntime::Typescript => &self.typescript,
-                crate::artifacts::ActorRuntime::Python => &self.python,
+            match crate::bundle::ActorRuntime::from_entrypoint(entrypoint)? {
+                crate::bundle::ActorRuntime::Typescript => &self.typescript,
+                crate::bundle::ActorRuntime::Python => &self.python,
             },
         )
     }
@@ -242,7 +242,7 @@ async fn control_plane_routes(
 
 async fn snapshot_store(
     authority: Arc<GcsBucket>,
-    persistence: &crate::bucket::PersistenceConfig,
+    persistence: &crate::bucket::SnapshotStoreConfig,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<Arc<dyn crate::bucket::SnapshotStore>> {
     if persistence.rapid_settings().is_none() {
@@ -379,7 +379,7 @@ impl ControlPlaneProcessConfig {
 
 fn persistence_config(
     get: &mut impl FnMut(&str) -> Option<String>,
-) -> Result<crate::bucket::PersistenceConfig> {
+) -> Result<crate::bucket::SnapshotStoreConfig> {
     match get("DURABLE_ACTORS_PERSISTENCE")
         .as_deref()
         .unwrap_or("standard")
@@ -397,7 +397,7 @@ fn persistence_config(
                 );
             }
             // Local names the existing snapshot format, including snapshots backed by GCS.
-            Ok(crate::bucket::PersistenceConfig::Local)
+            Ok(crate::bucket::SnapshotStoreConfig::Local)
         }
         "rapid" => rapid_persistence(get),
         _ => anyhow::bail!("DURABLE_ACTORS_PERSISTENCE must be standard or rapid"),
@@ -406,8 +406,8 @@ fn persistence_config(
 
 fn rapid_persistence(
     get: &mut impl FnMut(&str) -> Option<String>,
-) -> Result<crate::bucket::PersistenceConfig> {
-    let persistence = crate::bucket::PersistenceConfig::Rapid {
+) -> Result<crate::bucket::SnapshotStoreConfig> {
+    let persistence = crate::bucket::SnapshotStoreConfig::Rapid {
         archive_bucket: required(get, "DURABLE_ACTORS_ARCHIVE_BUCKET")?,
         buckets: serde_json::from_str(&required(get, "DURABLE_ACTORS_RAPID_BUCKETS")?)?,
         archive_batch: crate::bucket::ArchiveBatchConfig {

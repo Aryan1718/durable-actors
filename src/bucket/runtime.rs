@@ -42,12 +42,12 @@ pub struct RuntimeStorageReader {
     clock: Arc<dyn crate::clock::Clock>,
     authority: Arc<dyn Bucket>,
     snapshots: Arc<dyn super::SnapshotStore>,
-    pub(crate) persistence: super::PersistenceConfig,
+    pub(crate) persistence: super::SnapshotStoreConfig,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 struct Ownership {
-    persistence: super::PersistenceConfig,
+    persistence: super::SnapshotStoreConfig,
     #[serde(default)]
     sealed: bool,
     inventory: ActivationInventory,
@@ -128,7 +128,7 @@ impl RuntimeStorage {
 
     pub(crate) fn with_persistence(
         mut self,
-        config: super::PersistenceConfig,
+        config: super::SnapshotStoreConfig,
         snapshots: Arc<dyn super::SnapshotStore>,
     ) -> Result<Self> {
         self.reader = self.reader.with_persistence(config, snapshots)?;
@@ -161,14 +161,14 @@ impl RuntimeStorageReader {
             restore,
             clock,
             snapshots: Arc::new(super::BucketSnapshots(authority.clone())),
-            persistence: super::PersistenceConfig::Local,
+            persistence: super::SnapshotStoreConfig::Local,
             authority,
         })
     }
 
     pub(crate) fn with_persistence(
         mut self,
-        config: super::PersistenceConfig,
+        config: super::SnapshotStoreConfig,
         snapshots: Arc<dyn super::SnapshotStore>,
     ) -> Result<Self> {
         config.validate()?;

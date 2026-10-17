@@ -16,7 +16,7 @@ use cache::SharedTokens;
 #[serde(rename_all = "camelCase")]
 pub(crate) struct HostStorageConfig {
     pub bucket: BucketLocation,
-    pub persistence: super::PersistenceConfig,
+    pub persistence: super::SnapshotStoreConfig,
     pub region: String,
     pub token: Option<StorageToken>,
 }
@@ -51,11 +51,11 @@ impl std::fmt::Debug for StorageToken {
 pub(crate) struct RuntimeAccess {
     location: BucketLocation,
     tokens: Option<StorageTokens>,
-    persistence: super::PersistenceConfig,
+    persistence: super::SnapshotStoreConfig,
 }
 
 impl RuntimeAccess {
-    pub fn new(location: BucketLocation, persistence: super::PersistenceConfig) -> Result<Self> {
+    pub fn new(location: BucketLocation, persistence: super::SnapshotStoreConfig) -> Result<Self> {
         Ok(Self {
             tokens: match &location {
                 BucketLocation::Gcs { .. } => Some(StorageTokens {
@@ -88,7 +88,7 @@ impl RuntimeAccess {
         self
     }
 
-    pub(crate) fn validate_code(&self, code: &crate::artifacts::ArtifactManifest) -> Result<()> {
+    pub(crate) fn validate_code(&self, code: &crate::bundle::ActorBundle) -> Result<()> {
         let BucketLocation::Gcs {
             artifact_bucket, ..
         } = &self.location
@@ -130,7 +130,7 @@ impl RuntimeAccess {
             return Ok(None);
         };
         let code = code_snapshot
-            .map(crate::artifacts::ArtifactManifest::decode)
+            .map(crate::bundle::ActorBundle::decode)
             .transpose()?;
         let boundary = boundary(
             bucket,
@@ -251,10 +251,10 @@ impl StorageCredentials {
 
 fn boundary(
     bucket: &str,
-    persistence: &super::PersistenceConfig,
+    persistence: &super::SnapshotStoreConfig,
     artifact_bucket: Option<&str>,
     actor: &crate::actor::ActorKey,
-    code: Option<&crate::artifacts::ArtifactManifest>,
+    code: Option<&crate::bundle::ActorBundle>,
 ) -> Result<Value> {
     let owner = format!(
         "projects/_/buckets/{bucket}/objects/{}",
@@ -267,8 +267,8 @@ fn boundary(
     )];
     let prefix = crate::storage_paths::snapshots(actor)?;
     match persistence {
-        super::PersistenceConfig::Local => rules.push(snapshot_rule(bucket, &[&prefix], false)?),
-        super::PersistenceConfig::Rapid {
+        super::SnapshotStoreConfig::Local => rules.push(snapshot_rule(bucket, &[&prefix], false)?),
+        super::SnapshotStoreConfig::Rapid {
             archive_bucket,
             buckets,
             ..
@@ -320,7 +320,7 @@ fn snapshot_rule(bucket: &str, prefixes: &[&str], mutable: bool) -> Result<Value
     Ok(rule(bucket, roles, expressions.join(" || ")))
 }
 
-fn artifact_prefix(code: &crate::artifacts::ArtifactManifest) -> Result<String> {
+fn artifact_prefix(code: &crate::bundle::ActorBundle) -> Result<String> {
     let root = format!("{}artifacts/", crate::storage_paths::ROOT);
     let first = code.files.first().context("code artifact is empty")?;
     let relative = first

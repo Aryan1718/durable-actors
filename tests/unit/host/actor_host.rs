@@ -25,7 +25,7 @@ struct EmptySocketPublisher;
 
 #[async_trait]
 impl ActorSocketPublisher for EmptySocketPublisher {
-    async fn publish(&self, _: &ActorKey, _: Vec<ActorSocketEffect>) -> Result<()> {
+    async fn publish(&self, _: Vec<ActorSocketEffect>) -> Result<()> {
         Ok(())
     }
 }
@@ -38,6 +38,14 @@ struct IncrementingExecutor {
 mod sqlite;
 use sqlite::{exec, fields, persist_fields, replication, write_fields};
 
+fn counter() -> ActorKey {
+    ActorKey {
+        project_id: "default".into(),
+        actor_name: "Counter".into(),
+        actor_id: "counter-1".into(),
+    }
+}
+
 fn create_host(
     endpoint: HostEndpoint,
     executor: Arc<dyn ActorExecutor>,
@@ -47,7 +55,7 @@ fn create_host(
     replication: Arc<dyn crate::litestream::Replicator>,
 ) -> ActorHost {
     let database = HostDatabase::new(endpoint.clone(), storage, writer, replication);
-    ActorHost::new(endpoint, executor, database, publisher)
+    ActorHost::new(endpoint, counter(), executor, database, publisher)
 }
 
 type RestoredDatabase = (Value, Vec<Vec<SqlValue>>);
@@ -345,7 +353,7 @@ async fn assert_reentrant_commit_order(fail_write: bool) -> Result<()> {
                 invoke(&host, "after-failure").await?,
                 ActorExecutionResult::HostUnavailable
             );
-            assert!(*host.stopped().borrow());
+            assert_eq!(host.status().borrow().phase, ActorPhase::Stopped);
             return Ok(());
         }
         assert_eq!(first?, completed(1));
@@ -370,6 +378,61 @@ async fn assert_reentrant_commit_order(fail_write: bool) -> Result<()> {
     };
     tokio::time::timeout(Duration::from_secs(2), operation).await??;
     host.drain(Duration::from_secs(1)).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_unconfirmed_interleaved_commit_evicts_once_and_stops_the_actor() -> Result<()> {
+    struct Executor {
+        evictions: AtomicUsize,
+    }
+    #[async_trait]
+    impl ActorExecutor for Executor {
+        fn supports(&self, _: &str) -> bool {
+            true
+        }
+        async fn invoke(
+            &self,
+            _: ActorMethodInvocation,
+            database: Arc<dyn ActorDatabase>,
+        ) -> Result<ActorMethodOutcome> {
+            write_fields(&*database, json!({ "count": 1 })).await?;
+            Ok(ActorMethodOutcome::Interleaved(
+                crate::actor::ActorInterleavedOutcome {
+                    sequence: 1,
+                    result: json!(1),
+                    effects: vec![],
+                },
+            ))
+        }
+        async fn evict(&self, _: bool, _: Arc<dyn ActorDatabase>) -> Result<()> {
+            self.evictions.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+    }
+    let executor = Arc::new(Executor {
+        evictions: AtomicUsize::new(0),
+    });
+    let state = Arc::new(FakeStateTransport::default());
+    state.failures.store(1, Ordering::SeqCst);
+    let host = create_host(
+        HostEndpoint {
+            id: super::super::HostId::new("host-1"),
+            route: "http://host.invalid/".into(),
+        },
+        executor.clone(),
+        Arc::new(FakeAuthority::default()),
+        state,
+        Arc::new(EmptySocketPublisher),
+        replication().await,
+    );
+    assert!(matches!(
+        invoke(&host, "first").await?,
+        ActorExecutionResult::Failed { failure } if failure.code == "outcome_unknown"
+    ));
+    host.drain(Duration::from_secs(1)).await?;
+    assert_eq!(host.status().borrow().phase, ActorPhase::Stopped);
+    assert_eq!(executor.evictions.load(Ordering::SeqCst), 1);
     Ok(())
 }
 
@@ -508,11 +571,7 @@ async fn application_errors_preserve_the_worker_and_committed_state() -> Result<
             increment(&*database).await
         }
 
-        async fn evict(
-            &self,
-            _: crate::actor::ActorMethodEviction,
-            _: Arc<dyn ActorDatabase>,
-        ) -> Result<()> {
+        async fn evict(&self, _: bool, _: Arc<dyn ActorDatabase>) -> Result<()> {
             self.evictions.fetch_add(1, Ordering::Relaxed);
             Ok(())
         }
@@ -589,7 +648,6 @@ impl ActorExecutor for ControlledExecutor {
             .invoke(
                 ActorMethodInvocation {
                     request_id: invocation.request_id,
-                    actor: invocation.actor,
                     method: "onMessage".into(),
                     args: Vec::new(),
                 },
@@ -636,7 +694,7 @@ async fn controlled_host() -> (
 async fn a_failed_actor_task_releases_admission_and_does_not_restart_unknown_state() -> Result<()> {
     for _ in 0..64 {
         let (host, mut started, release) = controlled_host().await;
-        let mut activity = host.activity();
+        let mut status = host.status();
         let caller = host.clone();
         let first = tokio::spawn(async move { invoke(&caller, "first").await });
         assert_eq!(started.recv().await.as_deref(), Some("first"));
@@ -644,7 +702,7 @@ async fn a_failed_actor_task_releases_admission_and_does_not_restart_unknown_sta
         let panicking = tokio::spawn(async move { invoke(&caller, "panic").await });
         tokio::time::timeout(
             Duration::from_secs(2),
-            activity.wait_for(|activity| activity.active == 2),
+            status.wait_for(|status| status.waiting.len() == 1),
         )
         .await??;
         release.add_permits(1);
@@ -661,9 +719,62 @@ async fn a_failed_actor_task_releases_admission_and_does_not_restart_unknown_sta
             ActorExecutionResult::HostUnavailable
         );
         host.drain(Duration::from_secs(1)).await?;
-        assert_eq!(activity.borrow().active, 0);
-        assert!(host.queues().inventory().is_empty());
+        assert_eq!(status.borrow().phase, ActorPhase::Stopped);
+        assert!(status.borrow().waiting.is_empty());
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn requests_that_never_started_are_unavailable_when_the_actor_stops() -> Result<()> {
+    struct Executor(tokio::sync::Semaphore);
+    #[async_trait]
+    impl ActorExecutor for Executor {
+        fn supports(&self, _: &str) -> bool {
+            true
+        }
+        async fn invoke(
+            &self,
+            _: ActorMethodInvocation,
+            _: Arc<dyn ActorDatabase>,
+        ) -> Result<ActorMethodOutcome> {
+            self.0.acquire().await?.forget();
+            panic!("actor executor panicked");
+        }
+    }
+    let executor = Arc::new(Executor(tokio::sync::Semaphore::new(0)));
+    let host = Arc::new(create_host(
+        HostEndpoint {
+            id: super::super::HostId::new("host-1"),
+            route: "http://host.invalid/".into(),
+        },
+        executor.clone(),
+        Arc::new(FakeAuthority::default()),
+        Arc::new(FakeStateTransport::default()),
+        Arc::new(EmptySocketPublisher),
+        replication().await,
+    ));
+    let mut status = host.status();
+    let caller = host.clone();
+    let first = tokio::spawn(async move { invoke(&caller, "first").await });
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        status.wait_for(|status| status.idle_since.is_none()),
+    )
+    .await??;
+    let caller = host.clone();
+    let queued = tokio::spawn(async move { invoke(&caller, "queued").await });
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        status.wait_for(|status| status.waiting.len() == 1),
+    )
+    .await??;
+    executor.0.add_permits(1);
+    assert!(matches!(
+        first.await??,
+        ActorExecutionResult::Failed { failure } if failure.code == "outcome_unknown"
+    ));
+    assert_eq!(queued.await??, ActorExecutionResult::HostUnavailable);
     Ok(())
 }
 
@@ -773,24 +884,21 @@ async fn interleaved_admission_continues_while_database_publication_is_pending()
         tokio::time::timeout(Duration::from_secs(2), saving.recv())
             .await?
             .unwrap();
-        let mut queues = host.queues().changes();
+        let mut status = host.status();
         let caller = host.clone();
         let second = tokio::spawn(async move { invoke(&caller, "second").await });
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while queues.borrow_and_update().is_empty() {
-                queues.changed().await?;
-            }
-            Ok::<_, anyhow::Error>(())
-        })
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            status.wait_for(|status| !status.waiting.is_empty()),
+        )
         .await??;
         executor.admission.send_replace(());
-        let admitted = tokio::time::timeout(Duration::from_secs(1), async {
-            while !queues.borrow_and_update().is_empty() {
-                queues.changed().await?;
-            }
-            Ok::<_, anyhow::Error>(())
-        })
-        .await;
+        let admitted = tokio::time::timeout(
+            Duration::from_secs(1),
+            status.wait_for(|status| status.waiting.is_empty()),
+        )
+        .await
+        .is_ok();
         assert!(!first.is_finished(), "write acknowledged before storage");
         release.add_permits(1);
         assert_eq!(
@@ -802,7 +910,7 @@ async fn interleaved_admission_continues_while_database_publication_is_pending()
             completed(2)
         );
         assert!(
-            admitted.is_ok(),
+            admitted,
             "pending database publication blocked mailbox admission (immediate={immediate})"
         );
         host.drain(Duration::from_secs(1)).await?;
@@ -867,10 +975,10 @@ async fn traces_measure_queue_wait_and_record_panics() -> Result<()> {
     assert_eq!(started.recv().await.as_deref(), Some("first"));
     let caller = host.clone();
     let second = tokio::spawn(async move { invoke(&caller, "second").await });
-    let mut activity = host.activity();
+    let mut status = host.status();
     tokio::time::timeout(
         Duration::from_secs(2),
-        activity.wait_for(|activity| activity.active == 2),
+        status.wait_for(|status| status.waiting.len() == 1),
     )
     .await??;
     tokio::time::sleep(Duration::from_millis(25)).await;
@@ -948,9 +1056,9 @@ async fn cancelled_callers_do_not_interrupt_accepted_actor_operations() -> Resul
 }
 
 #[tokio::test]
-async fn queued_actor_bursts_preserve_identity_and_shutdown_fencing() -> Result<()> {
+async fn queued_actor_bursts_respect_shutdown_fencing() -> Result<()> {
     let (host, mut started, release) = controlled_host().await;
-    let mut activity = host.activity();
+    let mut status = host.status();
     let caller = host.clone();
     let first = tokio::spawn(async move { invoke(&caller, "first").await });
     assert_eq!(started.recv().await.as_deref(), Some("first"));
@@ -963,30 +1071,9 @@ async fn queued_actor_bursts_preserve_identity_and_shutdown_fencing() -> Result<
     }
     tokio::time::timeout(
         Duration::from_secs(2),
-        activity.wait_for(|activity| activity.active == 129),
+        status.wait_for(|status| status.waiting.len() == 128),
     )
     .await??;
-    let other = host.invoke_actor(
-        ActorInvocation {
-            request_id: "other".into(),
-            actor: ActorKey {
-                project_id: "default".into(),
-                actor_name: "Counter".into(),
-                actor_id: "other".into(),
-            },
-            method: "increment".into(),
-            args: Vec::new(),
-        },
-        1,
-        HostState::Warm,
-        0.0,
-    );
-    assert_eq!(
-        tokio::time::timeout(Duration::from_secs(2), other)
-            .await?
-            .0?,
-        ActorExecutionResult::Reroute
-    );
     assert!(host.drain(Duration::from_millis(30)).await.is_err());
     assert_eq!(
         invoke(&host, "draining").await?,
@@ -998,8 +1085,8 @@ async fn queued_actor_bursts_preserve_identity_and_shutdown_fencing() -> Result<
         assert_eq!(caller.await??, ActorExecutionResult::HostUnavailable);
     }
     host.drain(Duration::from_secs(1)).await?;
-    assert_eq!(activity.borrow().active, 0);
-    assert!(host.queues().inventory().is_empty());
+    assert!(status.borrow().idle_since.is_some());
+    assert!(status.borrow().waiting.is_empty());
     Ok(())
 }
 
@@ -1082,11 +1169,7 @@ async fn activation_acquires_on_host_without_preparing_a_write() -> Result<()> {
     let authority = Arc::new(FakeAuthority {
         ..Default::default()
     });
-    let actor = ActorKey {
-        project_id: "default".into(),
-        actor_name: "Counter".into(),
-        actor_id: "one".into(),
-    };
+    let actor = counter();
     let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
@@ -1100,7 +1183,7 @@ async fn activation_acquires_on_host_without_preparing_a_write() -> Result<()> {
         Arc::new(EmptySocketPublisher),
         replication().await,
     );
-    let activation = host.activate_actor(actor.clone()).await?;
+    let activation = host.activate().await?;
     assert_eq!(activation.owner_epoch, 7);
     assert!(authority.preparations.lock().unwrap().is_empty());
     let invoke = |request_id: &str| ActorInvocation {
@@ -1115,7 +1198,7 @@ async fn activation_acquires_on_host_without_preparing_a_write() -> Result<()> {
             .0?,
         completed(1)
     );
-    host.activate_actor(actor.clone()).await?;
+    host.activate().await?;
     assert_eq!(
         host.invoke_actor(invoke("two"), 7, HostState::Warm, 0.0)
             .await
@@ -1125,7 +1208,7 @@ async fn activation_acquires_on_host_without_preparing_a_write() -> Result<()> {
     assert_eq!(*authority.preparations.lock().unwrap(), vec![0]);
 
     authority.fenced.store(true, Ordering::SeqCst);
-    assert!(host.activate_actor(actor).await.is_err());
+    assert!(host.activate().await.is_err());
     Ok(())
 }
 
@@ -1149,7 +1232,6 @@ async fn activation_services_immediate_writes_during_hydration() -> Result<()> {
 
         async fn hydrate(
             &self,
-            _: ActorKey,
             request_id: String,
             database: Arc<dyn ActorDatabase>,
         ) -> Result<()> {
@@ -1178,11 +1260,7 @@ async fn activation_services_immediate_writes_during_hydration() -> Result<()> {
     let (hydrated, mut captured) = mpsc::unbounded_channel();
     let (started, mut invocations) = mpsc::unbounded_channel();
     let state = Arc::new(FakeStateTransport::default());
-    let actor = ActorKey {
-        project_id: "default".into(),
-        actor_name: "Counter".into(),
-        actor_id: "one".into(),
-    };
+    let actor = counter();
     let host = Arc::new(create_host(
         HostEndpoint {
             id: super::super::HostId::new("host-1"),
@@ -1200,8 +1278,7 @@ async fn activation_services_immediate_writes_during_hydration() -> Result<()> {
     ));
 
     let caller = host.clone();
-    let activating_actor = actor.clone();
-    let activating = tokio::spawn(async move { caller.activate_actor(activating_actor).await });
+    let activating = tokio::spawn(async move { caller.activate().await });
     let acknowledged = tokio::time::timeout(Duration::from_secs(1), captured.recv())
         .await?
         .context("hydration did not write")?;
@@ -1269,11 +1346,7 @@ async fn activation_reuses_recovered_bytes_and_publishes_readiness_without_a_wri
         ..Default::default()
     });
     let transport = Arc::new(FakeStateTransport::default());
-    let actor = ActorKey {
-        project_id: "default".into(),
-        actor_name: "Counter".into(),
-        actor_id: "restored".into(),
-    };
+    let actor = counter();
     let host = create_host(
         HostEndpoint {
             id: super::super::HostId::new("host"),
@@ -1287,7 +1360,7 @@ async fn activation_reuses_recovered_bytes_and_publishes_readiness_without_a_wri
         Arc::new(EmptySocketPublisher),
         replication().await,
     );
-    let activation = host.activate_actor(actor.clone()).await?;
+    let activation = host.activate().await?;
     assert_eq!(activation.state_version, 3);
     assert!(authority.preparations.lock().unwrap().is_empty());
     let result = host
@@ -1331,11 +1404,7 @@ impl ActorStorage for FakeAuthority {
         Ok(())
     }
 
-    async fn acquire_actor(
-        &self,
-        _actor: &ActorKey,
-        _host: &super::super::HostId,
-    ) -> Result<ActorActivation> {
+    async fn acquire_actor(&self) -> Result<ActorActivation> {
         Ok(ActorActivation {
             owner_epoch: 7,
             state_version: self
@@ -1352,22 +1421,12 @@ impl ActorStorage for FakeAuthority {
         anyhow::ensure!(!self.fenced.load(Ordering::SeqCst), "host lease expired");
         Ok(())
     }
-    async fn verify_actor_ownership(
-        &self,
-        _: &ActorKey,
-        _: &super::super::HostId,
-        epoch: u64,
-    ) -> Result<()> {
+    async fn verify_actor_ownership(&self, epoch: u64) -> Result<()> {
         self.ensure_authority()?;
         anyhow::ensure!(epoch == 7, "actor ownership changed");
         Ok(())
     }
-    async fn load_actor_state(
-        &self,
-        _: &ActorKey,
-        _: &super::super::HostId,
-        _: u64,
-    ) -> Result<(u64, bytes::Bytes)> {
+    async fn load_actor_state(&self, _: u64) -> Result<(u64, bytes::Bytes)> {
         self.loads.fetch_add(1, Ordering::SeqCst);
         if let Some(bytes) = self
             .persisted
@@ -1378,14 +1437,10 @@ impl ActorStorage for FakeAuthority {
         }
         Ok(self.initial_state.clone().unwrap_or_default())
     }
-    async fn read_sqlite(
-        &self,
-        actor: &ActorKey,
-        bytes: &[u8],
-    ) -> Result<crate::state_log::SqliteSnapshot> {
+    async fn read_sqlite(&self, bytes: &[u8]) -> Result<crate::state_log::SqliteSnapshot> {
         let snapshot = StateSnapshot::decode(bytes)?;
         let object = crate::storage::snapshot_object_name(
-            actor,
+            &counter(),
             snapshot.state_version,
             &format!("{:032x}", snapshot.owner_epoch),
         )?;
@@ -1399,21 +1454,17 @@ impl ActorStorage for FakeAuthority {
     }
     async fn prepare_state_write(
         &self,
-        _actor: &ActorKey,
-        _host_id: &super::super::HostId,
-        _owner_epoch: u64,
+        owner_epoch: u64,
         expected_version: u64,
     ) -> Result<WritePlan> {
         self.preparations.lock().unwrap().push(expected_version);
         let mut ticket = ticket(expected_version + 1);
         {
+            let snapshots = crate::storage_paths::snapshots(&counter())?;
             let stream = crate::storage::StateStream {
-                prefix: format!("{}epoch/", crate::storage_paths::snapshots(_actor)?),
-                session: format!(
-                    "{}epoch/sessions/one/",
-                    crate::storage_paths::snapshots(_actor)?
-                ),
-                owner_epoch: _owner_epoch,
+                prefix: format!("{snapshots}epoch/"),
+                session: format!("{snapshots}epoch/sessions/one/"),
+                owner_epoch,
                 base_version: 0,
             };
             ticket.object_name = stream.object(ticket.state_version);
@@ -1803,7 +1854,7 @@ async fn publishes_automatic_state_after_commit_before_returning_to_rpc_callers(
     }
     #[async_trait]
     impl crate::actor::ActorSocketPublisher for Publisher {
-        async fn publish(&self, _: &ActorKey, effects: Vec<ActorSocketEffect>) -> Result<()> {
+        async fn publish(&self, effects: Vec<ActorSocketEffect>) -> Result<()> {
             let persisted = self.state.writes.lock().unwrap();
             let version = StateSnapshot::decode(
                 persisted
@@ -1888,7 +1939,7 @@ async fn socket_events_return_effects_only_after_committing_state() -> Result<()
         },
         connections: Vec::new(),
     };
-    let activity = host.activity();
+    let status = host.status();
     authority.fenced.store(true, Ordering::SeqCst);
     assert_eq!(
         host.submit(ActorOperation::Socket(invocation("fenced")), 1)
@@ -1897,11 +1948,11 @@ async fn socket_events_return_effects_only_after_committing_state() -> Result<()
     );
     assert_eq!(executor.invocations.load(Ordering::SeqCst), 0);
     authority.fenced.store(false, Ordering::SeqCst);
-    let before_connect = activity.borrow().last_active;
+    let before_connect = status.borrow().idle_since;
     let result = host
         .submit(ActorOperation::Socket(invocation("committed")), 1)
         .await?;
-    assert!(activity.borrow().last_active > before_connect);
+    assert!(status.borrow().idle_since > before_connect);
 
     assert!(matches!(
         result,
@@ -2301,5 +2352,37 @@ async fn restored_request_only_returns_a_saved_result_when_completion_is_present
         }
         host.drain(Duration::from_secs(1)).await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn activation_fails_when_the_executor_does_not_load_the_assigned_actor() -> Result<()> {
+    struct Unloaded;
+    #[async_trait]
+    impl ActorExecutor for Unloaded {
+        fn supports(&self, _: &str) -> bool {
+            false
+        }
+        async fn invoke(
+            &self,
+            _: ActorMethodInvocation,
+            _: Arc<dyn ActorDatabase>,
+        ) -> Result<ActorMethodOutcome> {
+            anyhow::bail!("unused")
+        }
+    }
+    let host = create_host(
+        HostEndpoint {
+            id: super::super::HostId::new("host-1"),
+            route: "http://host".into(),
+        },
+        Arc::new(Unloaded),
+        Arc::new(FakeAuthority::default()),
+        Arc::new(FakeStateTransport::default()),
+        Arc::new(EmptySocketPublisher),
+        replication().await,
+    );
+    let error = host.activate().await.unwrap_err();
+    assert!(format!("{error:#}").contains("not loaded"));
     Ok(())
 }

@@ -41,7 +41,7 @@ async fn sqlite_dependencies_must_exist_in_the_snapshot_backend_before_publicati
     let directory = tempfile::tempdir()?;
     let snapshots = Arc::new(FileBucket::new(directory.path().join("snapshots"))?);
     f.runtime = f.runtime.with_persistence(
-        crate::bucket::PersistenceConfig::Local,
+        crate::bucket::SnapshotStoreConfig::Local,
         Arc::new(crate::bucket::BucketSnapshots(snapshots.clone())),
     )?;
     let active = f
@@ -109,7 +109,7 @@ async fn ownership_and_state_can_use_independent_backends() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let snapshots = Arc::new(FileBucket::new(directory.path().to_owned())?);
     f.runtime = f.runtime.with_persistence(
-        crate::bucket::PersistenceConfig::Local,
+        crate::bucket::SnapshotStoreConfig::Local,
         Arc::new(crate::bucket::BucketSnapshots(snapshots.clone())),
     )?;
     let active = f
@@ -914,7 +914,7 @@ async fn rapid_resume_retains_the_durable_base_across_epochs() -> Result<()> {
     Ok(())
 }
 
-fn rapid_policy() -> crate::bucket::PersistenceConfig {
+fn rapid_policy() -> crate::bucket::SnapshotStoreConfig {
     serde_json::from_value(
         serde_json::json!({"type":"rapid", "archive_bucket":"archive-test", "buckets":[
             {"bucket":"rapid-test-a", "zone":"us-west4-a"},

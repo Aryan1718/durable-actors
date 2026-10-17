@@ -36,8 +36,7 @@ async fn bundle_registration_preserves_code_and_contract_during_secret_rotation(
     );
     let server = tokio::spawn(async { axum::serve(listener, routes).await });
     let client = reqwest::Client::new();
-    let bundle =
-        crate::artifacts::ArtifactManifest::decode(&crate::sandbox::testing::code_artifact(1))?;
+    let bundle = crate::bundle::ActorBundle::decode(&crate::sandbox::testing::code_artifact(1))?;
     let mut document: serde_json::Value = serde_json::from_str(include_str!(
         "../../../sdk/tests/fixtures/public-contract.json"
     ))?;
@@ -127,7 +126,7 @@ async fn compiled_artifact_selects_the_language_image() -> Result<()> {
     for (entrypoint, image) in [("actors.mjs", "im-runtime"), ("actors.pyz", "im-python")] {
         let mut source = source();
         let mut bundle =
-            crate::artifacts::ArtifactManifest::decode(source.code_snapshot.as_ref().unwrap())?;
+            crate::bundle::ActorBundle::decode(source.code_snapshot.as_ref().unwrap())?;
         bundle.files[0].path = entrypoint.into();
         bundle.files[0].object = format!(
             "durable-actors/v3/artifacts/00000000-0000-4000-8000-000000000001/{entrypoint}"
@@ -155,7 +154,7 @@ async fn bundle_registration_validates_immutable_artifacts_before_retiring_hosts
     let active = admin.current_deployment("default").await?;
     for mutation in ["bucket", "object", "generation", "sha256", "path"] {
         let mut bundle =
-            crate::artifacts::ArtifactManifest::decode(source.code_snapshot.as_ref().unwrap())?;
+            crate::bundle::ActorBundle::decode(source.code_snapshot.as_ref().unwrap())?;
         match mutation {
             "bucket" => bundle.bucket = "another-bucket".into(),
             "object" => bundle.files[0].object = "outside/actors.mjs".into(),
@@ -311,7 +310,7 @@ fn fixture_with_idle_timeout(
                 bucket: "owner-bucket".into(),
                 artifact_bucket: "test-artifacts".into(),
             },
-            crate::bucket::PersistenceConfig::Local,
+            crate::bucket::SnapshotStoreConfig::Local,
         )?)),
     );
     let service = ControlPlaneService::new(

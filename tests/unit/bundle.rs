@@ -1,8 +1,8 @@
 use super::*;
 use futures_util::stream;
 
-fn artifact(path: &str, bytes: &[u8]) -> ArtifactFile {
-    ArtifactFile {
+fn artifact(path: &str, bytes: &[u8]) -> BundleFile {
+    BundleFile {
         path: path.into(),
         object: "compiled/actors.mjs".into(),
         generation: 123,
@@ -67,14 +67,14 @@ fn checksum(bytes: &[u8]) -> String {
 
 #[test]
 fn python_code_manifests_include_the_entrypoint_and_installed_dependencies() -> Result<()> {
-    let manifest = ArtifactManifest {
+    let manifest = ActorBundle {
         bucket: "code-bucket".into(),
         files: vec![
             artifact("actors.pyz", b"code"),
             artifact("python/dependency/module.so", b"native"),
         ],
     };
-    let decoded = ArtifactManifest::decode(&manifest.encode()?)?;
+    let decoded = ActorBundle::decode(&manifest.encode()?)?;
     assert_eq!(decoded.entrypoint()?, "actors.pyz");
     assert_eq!(decoded.files.len(), 2);
     Ok(())

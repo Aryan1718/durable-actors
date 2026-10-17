@@ -35,7 +35,7 @@ test("loads a prepared JavaScript artifact only inside the first execution Worke
         const lines = createInterface({ input: socket })
         lines.once("line", line => {
             assert.deepEqual(JSON.parse(line).actor_names, ["SessionCounter"])
-            socket.write(`${JSON.stringify({ type: "attached", protocol: 27 })}\n`)
+            socket.write(`${JSON.stringify({ type: "attached", protocol: 28, actor: actorIdentity() })}\n`)
             socket.end()
         })
     })
@@ -72,8 +72,9 @@ test("a stalled actor import times out and closes the Worker", { timeout: 5_000 
             close() {
                 closed += 1
             },
-            activeActors: () => [],
-            onActiveActorsChange: () => () => {}
+            assign() {},
+            isResident: () => false,
+            onResidencyChange: () => () => {}
         })
     )
     await assert.rejects(session.start(), /actor module loading timed out/)
@@ -114,10 +115,10 @@ test("the actor session carries only owned execution commands", async t => {
 
         assert.deepEqual(await readMessage(iterator), {
             type: "attach",
-            protocol: 27,
+            protocol: 28,
             actor_names: ["SessionCounter"]
         })
-        customerSocket.write(`${JSON.stringify({ type: "attached", protocol: 27 })}\n`)
+        customerSocket.write(`${JSON.stringify({ type: "attached", protocol: 28, actor: actorIdentity() })}\n`)
         await startup
 
         const database = new HostDatabase()
@@ -131,7 +132,6 @@ test("the actor session carries only owned execution commands", async t => {
                     command: {
                         type: "invoke",
                         request_id: `request-${messageId}`,
-                        actor: actorIdentity(),
                         method,
                         args
                     }
@@ -167,14 +167,10 @@ test("the actor session carries only owned execution commands", async t => {
             `${JSON.stringify({
                 type: "command",
                 message_id: 4,
-                command: {
-                    type: "evict",
-                    actor: actorIdentity(),
-                    graceful: false
-                }
+                command: { type: "evict", graceful: false }
             })}\n`
         )
-        assert.deepEqual(await readMessage(iterator), {
+        assert.deepEqual(await next(), {
             type: "reply",
             message_id: 4,
             reply: { type: "evicted" }
@@ -209,8 +205,9 @@ test("a failed session connection cleans up the speculative Worker", async () =>
             close() {
                 closed += 1
             },
-            activeActors: () => [],
-            onActiveActorsChange: () => () => {}
+            assign() {},
+            isResident: () => false,
+            onResidencyChange: () => () => {}
         })
     )
     await assert.rejects(session.start(), /could not attach to Rust host/)
@@ -247,8 +244,8 @@ async function readHostMessage(
 ): Promise<unknown> {
     for (;;) {
         const message = (await readMessage(iterator)) as { type: string; message_id: number; call: DatabaseCall }
-        if (message.type !== "database_call") return message
-        serve(message)
+        if (message.type === "database_call") serve(message)
+        else if (message.type !== "residency") return message
     }
 }
 
@@ -267,18 +264,19 @@ async function removeSocket(socketPath: string): Promise<void> {
     }
 }
 
-test("reports resident instances when the Rust host advertises support", { timeout: 5_000 }, async () => {
+test("assigns the attached actor and reports whether it is resident", { timeout: 5_000 }, async () => {
     const root = await mkdtemp("/tmp/actor-residency-")
     const actor = { project_id: "default", actor_name: "SessionCounter", actor_id: "one" }
+    let assigned: unknown
     let received: unknown
     const server = createServer(socket => {
         const lines = createInterface({ input: socket })
         lines.on("line", line => {
             const message = JSON.parse(line)
             if (message.type === "attach")
-                socket.write(`${JSON.stringify({ type: "attached", protocol: 27, supports_residency: true })}\n`)
+                socket.write(`${JSON.stringify({ type: "attached", protocol: 28, actor })}\n`)
             else if (message.type === "residency") {
-                received = message.actors
+                received = message
                 socket.end()
             }
         })
@@ -294,14 +292,18 @@ test("reports resident instances when the Rust host advertises support", { timeo
             ready: async () => ["SessionCounter"],
             handle: async () => ({ type: "evicted" }),
             close() {},
-            activeActors: () => [actor],
-            onActiveActorsChange: () => () => {}
+            assign(identity) {
+                assigned = identity
+            },
+            isResident: () => true,
+            onResidencyChange: () => () => {}
         })
     )
     try {
         await session.start()
         await session.waitUntilDisconnected()
-        assert.deepEqual(received, [actor])
+        assert.deepEqual(assigned, actor)
+        assert.deepEqual(received, { type: "residency", resident: true })
     } finally {
         server.close()
         await rm(root, { recursive: true, force: true })
@@ -341,14 +343,13 @@ for (const outcome of ["success", "rejection", "disconnect", "atomic", "method_f
                 void (async () => {
                     const message = JSON.parse(line)
                     if (message.type === "attach") {
-                        send({ type: "attached", protocol: 27 })
+                        send({ type: "attached", protocol: 28, actor: actorIdentity() })
                         send({
                             type: "command",
                             message_id: 17,
                             command: {
                                 type: "invoke",
                                 request_id: "immediate",
-                                actor: actorIdentity(),
                                 method:
                                     outcome === "atomic_failure"
                                         ? "failAtomic"
@@ -384,7 +385,6 @@ for (const outcome of ["success", "rejection", "disconnect", "atomic", "method_f
                                 command: {
                                     type: "invoke",
                                     request_id: "read",
-                                    actor: actorIdentity(),
                                     method: "read",
                                     args: []
                                 }

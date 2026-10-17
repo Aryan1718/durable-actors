@@ -158,7 +158,7 @@ test("socket broadcasts use actor-scoped HTTP with the same ownership ticket", a
 })
 
 test("explicit pre-execution rejections preserve their reason", async () => {
-    for (const reason of ["host_unavailable", "stale_owner", "upstream_not_reached"]) {
+    for (const reason of ["host_unavailable", "upstream_not_reached"]) {
         const reply = { type: "not_executed", reason }
         const transport = new HttpActorHostTransport(async () => Response.json(reply))
         assert.deepEqual(await transport.invoke(target, invocation), reply)

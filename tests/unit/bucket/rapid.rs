@@ -177,7 +177,7 @@ async fn failed_manifest_publication_never_acknowledges_an_undiscoverable_log() 
 #[tokio::test]
 async fn runtime_crash_recovery_advances_ownership_before_enabling_new_writes() -> Result<()> {
     use crate::{
-        bucket::{PersistenceConfig, RapidBucket, RuntimeStorage},
+        bucket::{RapidBucket, RuntimeStorage, SnapshotStoreConfig},
         clock::Clock,
         host::HostId,
         host_leases::HostLeaseRequest,
@@ -191,7 +191,7 @@ async fn runtime_crash_recovery_advances_ownership_before_enabling_new_writes() 
     }
     let f = Fixture::new()?;
     let clock = Arc::new(TestClock(AtomicU64::new(1)));
-    let config = PersistenceConfig::Rapid {
+    let config = SnapshotStoreConfig::Rapid {
         archive_batch: Default::default(),
         archive_bucket: "archive".into(),
         buckets: vec![

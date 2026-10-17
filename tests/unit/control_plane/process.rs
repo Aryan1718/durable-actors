@@ -198,7 +198,7 @@ fn rapid_configuration_uses_two_zones_and_gke() -> Result<()> {
     })?;
     assert!(matches!(
         config.storage.persistence,
-        crate::bucket::PersistenceConfig::Rapid { .. }
+        crate::bucket::SnapshotStoreConfig::Rapid { .. }
     ));
     assert_eq!(
         config.sandbox_provider.gke.zones["north-america-west"],
@@ -325,7 +325,7 @@ fn archive_batch_triggers_are_configurable_and_positive() -> Result<()> {
         ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|value| (*value).into()))
     };
     let defaults = parse(&values)?.storage.persistence;
-    let crate::bucket::PersistenceConfig::Rapid { archive_batch, .. } = defaults.clone() else {
+    let crate::bucket::SnapshotStoreConfig::Rapid { archive_batch, .. } = defaults.clone() else {
         panic!()
     };
     assert_eq!(archive_batch.bytes, 16 * 1024 * 1024);
@@ -333,14 +333,14 @@ fn archive_batch_triggers_are_configurable_and_positive() -> Result<()> {
     values.insert("DURABLE_ACTORS_ARCHIVE_BATCH_BYTES", "2097152");
     values.insert("DURABLE_ACTORS_ARCHIVE_BATCH_INTERVAL_MS", "250");
     let configured = parse(&values)?.storage.persistence;
-    let crate::bucket::PersistenceConfig::Rapid { archive_batch, .. } = configured.clone() else {
+    let crate::bucket::SnapshotStoreConfig::Rapid { archive_batch, .. } = configured.clone() else {
         panic!()
     };
     assert_eq!(archive_batch.bytes, 2 * 1024 * 1024);
     assert_eq!(archive_batch.interval_ms, 250);
     assert!(configured.same_backend(&defaults));
     assert_eq!(
-        serde_json::from_value::<crate::bucket::PersistenceConfig>(serde_json::to_value(
+        serde_json::from_value::<crate::bucket::SnapshotStoreConfig>(serde_json::to_value(
             &configured
         )?)?,
         configured
@@ -392,7 +392,7 @@ fn standard_gcs_starts_with_one_bucket_and_no_rapid_configuration() -> Result<()
     assert_eq!(config.storage.artifact_bucket, config.storage.bucket);
     assert_eq!(
         config.storage.persistence,
-        crate::bucket::PersistenceConfig::Local
+        crate::bucket::SnapshotStoreConfig::Local
     );
     Ok(())
 }

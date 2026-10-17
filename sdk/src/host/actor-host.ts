@@ -4,14 +4,13 @@ import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { z } from "zod"
 
-import type { ActorIdentity } from "../actor/identity.js"
 import type { SocketEffect, SocketLookup, SocketQuery } from "../actor/socketProtocol.js"
 import { ActorConfigurationError, ActorProtocolError, ActorSessionError } from "../errors.js"
 
 import type { DatabaseCall, DatabaseResult } from "./database.js"
 import { parseActorSessionServerMessage } from "./protocol.js"
-import type { ActorExecutorCommand, ActorExecutorReply, ActorSessionClientMessage } from "./protocol.js"
-import type { ActorCommandHandler, ActorHostSettings, ActorWorkerSupervisorFactory } from "./types.js"
+import type { ActorExecutorReply, ActorSessionClientMessage } from "./protocol.js"
+import type { ActorHostSettings, ActorSessionSupervisor, ActorWorkerSupervisorFactory } from "./types.js"
 import { ActorWorkerSupervisor } from "./worker-supervisor.js"
 
 async function runActorHost(): Promise<never> {
@@ -45,17 +44,13 @@ class ActorSession {
     private async initialize(): Promise<void> {
         const actorEntrypointUrl = await resolveActorEntrypoint(this.settings.actorEntrypoint)
         const supervisor = this.createSupervisor({ actorEntrypointUrl })
-        const commandHandler: ActorCommandHandler = (command, allowNextInvocation, database, publish, connections) =>
-            supervisor.handle(command, allowNextInvocation, database, publish, connections)
         try {
             const actorNames = await discoverActorNames(supervisor, this.settings.startupTimeoutMs)
             this.connection = await ActorSessionConnection.open(
                 this.settings.socketPath,
                 actorNames,
-                commandHandler,
+                supervisor,
                 this.settings.startupTimeoutMs,
-                supervisor.activeActors.bind(supervisor),
-                supervisor.onActiveActorsChange.bind(supervisor),
                 this.socket
             )
             void this.connection.closed().then(() => supervisor.close())
@@ -108,19 +103,17 @@ class ActorSessionConnection {
     static async open(
         socketPath: string,
         actorNames: readonly string[],
-        commandHandler: ActorCommandHandler,
+        supervisor: ActorSessionSupervisor,
         timeoutMs: number,
-        activeActors: () => readonly ActorIdentity[],
-        watchActiveActors: (listener: () => void) => () => void,
         connectedSocket?: Socket
     ): Promise<ActorSessionConnection> {
         if (actorNames.length === 0)
             throw new ActorSessionError("the actor entrypoint does not export any actor classes")
         const socket = connectedSocket ?? (await connectSocket(socketPath))
-        const connection = new ActorSessionConnection(socket, commandHandler, activeActors, watchActiveActors)
+        const connection = new ActorSessionConnection(socket, supervisor)
         connection.send({
             type: "attach",
-            protocol: 27,
+            protocol: 28,
             actor_names: actorNames
         })
         await connection.waitUntilAttached(timeoutMs)
@@ -133,9 +126,7 @@ class ActorSessionConnection {
 
     private constructor(
         private readonly socket: Socket,
-        private readonly commandHandler: ActorCommandHandler,
-        private readonly activeActors: () => readonly ActorIdentity[],
-        private readonly watchActiveActors: (listener: () => void) => () => void
+        private readonly supervisor: ActorSessionSupervisor
     ) {
         this.attachedPromise = new Promise<void>((resolve, reject) => {
             this.attachedResolve = resolve
@@ -190,19 +181,8 @@ class ActorSessionConnection {
             const message = parseActorSessionServerMessage(rawMessage)
             switch (message.type) {
                 case "attached":
-                    if (message.supports_residency && !this.activityTimer) {
-                        const report = () => {
-                            try {
-                                this.send({ type: "residency", actors: this.activeActors() })
-                            } catch (error) {
-                                this.fail(sessionError(error))
-                            }
-                        }
-                        this.unsubscribeActivity = this.watchActiveActors(report)
-                        report()
-                        this.activityTimer = setInterval(report, 1_000)
-                        this.activityTimer.unref()
-                    }
+                    this.supervisor.assign(message.actor)
+                    this.reportResidency()
                     this.attachedResolve?.()
                     this.attachedResolve = undefined
                     this.attachedReject = undefined
@@ -210,7 +190,7 @@ class ActorSessionConnection {
                 case "command":
                     await this.reply(
                         message.message_id,
-                        await this.commandHandler(
+                        await this.supervisor.handle(
                             message.command,
                             () => this.send({ type: "ready_for_invocation", message_id: message.message_id }),
                             call => this.callDatabase(message.message_id, call),
@@ -252,6 +232,21 @@ class ActorSessionConnection {
         } catch (error) {
             this.fail(sessionError(error))
         }
+    }
+
+    private reportResidency(): void {
+        if (this.activityTimer) return
+        const report = () => {
+            try {
+                this.send({ type: "residency", resident: this.supervisor.isResident() })
+            } catch (error) {
+                this.fail(sessionError(error))
+            }
+        }
+        this.unsubscribeActivity = this.supervisor.onResidencyChange(report)
+        report()
+        this.activityTimer = setInterval(report, 1_000)
+        this.activityTimer.unref()
     }
 
     private callDatabase(messageId: number, call: DatabaseCall): Promise<DatabaseResult> {

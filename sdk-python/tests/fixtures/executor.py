@@ -33,9 +33,19 @@ class ExecutorHost:
     async def receive(self):
         while True:
             message = await self.read()
-            if message["type"] != "database_call":
+            if message["type"] == "database_call":
+                await self.answer(message)
+            elif message["type"] != "residency":
                 return message
-            await self.answer(message)
+
+    async def residency(self, resident):
+        """Waits for a residency report, discarding everything sent before it."""
+        while True:
+            message = await self.read()
+            if message["type"] == "database_call":
+                await self.answer(message)
+            elif message["type"] == "residency" and message["resident"] is resident:
+                return
 
     async def read(self):
         line = await self.reader.readline()
@@ -74,10 +84,22 @@ async def warm_executor(entrypoint, environment):
         try:
             async with asyncio.timeout(10):
                 host = await connected
-                assert await host.receive() == {"type": "warm", "protocol": 27}
+                assert await host.receive() == {"type": "warm", "protocol": 28}
                 host.send({"type": "load", "entrypoint": entrypoint, "environment": environment})
-                assert (await host.receive())["type"] == "attach"
-                host.send({"type": "attached", "protocol": 27})
+                attach = await host.receive()
+                assert attach["type"] == "attach"
+                actor_name = attach["actor_names"][0]
+                host.send(
+                    {
+                        "type": "attached",
+                        "protocol": 28,
+                        "actor": {
+                            "project_id": "local",
+                            "actor_name": actor_name,
+                            "actor_id": "one",
+                        },
+                    }
+                )
             yield host
         finally:
             if process.returncode is None:

@@ -1029,7 +1029,7 @@ components:
                       type: { const: not_executed }
                       reason:
                           type: string
-                          enum: [stale_owner, host_unavailable, upstream_not_reached]
+                          enum: [host_unavailable, upstream_not_reached]
         ActorSocketEffect:
             type: object
             description: Host-validated socket effect. Broadcasts require message, except_connection_ids and tags; connection-specific effects require connection_id.

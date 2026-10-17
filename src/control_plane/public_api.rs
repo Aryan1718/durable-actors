@@ -201,7 +201,7 @@ async fn get_deployment(
     let bundle = spec
         .code_snapshot
         .as_deref()
-        .map(crate::artifacts::ArtifactManifest::decode)
+        .map(crate::bundle::ActorBundle::decode)
         .transpose()
         .map_err(ApiError::internal)?;
     let local_source = spec
@@ -489,7 +489,7 @@ pub(super) fn authorized_admin(admin: &AdminService, headers: &HeaderMap) -> Res
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RegisterDeploymentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    bundle: Option<crate::artifacts::ArtifactManifest>,
+    bundle: Option<crate::bundle::ActorBundle>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     contract: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

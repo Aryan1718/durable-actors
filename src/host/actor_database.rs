@@ -25,37 +25,15 @@ use session::DatabaseSession;
 
 #[async_trait]
 pub(crate) trait ActorStorage: Send + Sync {
-    async fn acquire_actor(
-        &self,
-        _actor: &crate::actor::ActorKey,
-        _host: &super::HostId,
-    ) -> Result<ActorActivation>;
-
-    async fn verify_actor_ownership(
-        &self,
-        actor: &crate::actor::ActorKey,
-        host: &super::HostId,
-        epoch: u64,
-    ) -> Result<()>;
-
-    async fn load_actor_state(
-        &self,
-        _actor: &crate::actor::ActorKey,
-        _host: &super::HostId,
-        _epoch: u64,
-    ) -> Result<(u64, bytes::Bytes)>;
-    async fn read_sqlite(
-        &self,
-        actor: &crate::actor::ActorKey,
-        bytes: &[u8],
-    ) -> Result<SqliteSnapshot>;
+    async fn acquire_actor(&self) -> Result<ActorActivation>;
+    async fn verify_actor_ownership(&self, epoch: u64) -> Result<()>;
+    async fn load_actor_state(&self, epoch: u64) -> Result<(u64, bytes::Bytes)>;
+    async fn read_sqlite(&self, bytes: &[u8]) -> Result<SqliteSnapshot>;
     async fn get_alarm(&self) -> Result<Option<i64>>;
     async fn update_alarm(&self, timestamp_ms: Option<i64>) -> Result<()>;
     fn ensure_authority(&self) -> Result<()>;
     async fn prepare_state_write(
         &self,
-        actor: &crate::actor::ActorKey,
-        host_id: &super::HostId,
         owner_epoch: u64,
         expected_version: u64,
     ) -> Result<WritePlan>;
@@ -149,12 +127,9 @@ impl HostDatabase {
         self.storage.ensure_authority()
     }
 
-    pub(super) async fn activate(
-        &self,
-        actor: crate::actor::ActorKey,
-    ) -> Result<PreparedActivation> {
+    pub(super) async fn activate(&self) -> Result<PreparedActivation> {
         let (reply, result) = oneshot::channel();
-        self.send(Command::Activate { actor, reply }).await?;
+        self.send(Command::Activate { reply }).await?;
         result
             .await
             .context("database service stopped during activation")?
@@ -317,7 +292,6 @@ enum Command {
         reply: oneshot::Sender<Result<DatabaseResult>>,
     },
     Activate {
-        actor: crate::actor::ActorKey,
         reply: oneshot::Sender<Result<PreparedActivation>>,
     },
     Hydrated {
@@ -378,8 +352,8 @@ impl DatabaseService {
                 let _ = reply.send((result, timings));
             }
             Command::Call { scope, call, reply } => return self.call(scope, call, reply).await,
-            Command::Activate { actor, reply } => {
-                let _ = reply.send(self.session.prepare_activation(&actor).await);
+            Command::Activate { reply } => {
+                let _ = reply.send(self.session.prepare_activation().await);
             }
             Command::Hydrated {
                 activation,

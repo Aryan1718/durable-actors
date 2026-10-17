@@ -20,16 +20,17 @@ class ActorRuntime:
     def __init__(
         self,
         actor: type[ActorBase[Any, Any, Any, Any]],
+        identity: Document,
         effects: Effects,
         database: DatabaseProxy,
     ) -> None:
+        self.identity = identity
         self.effects = effects
         self.database = database
         self.completion = asyncio.Lock()
         self.fatal: Document | None = None
         self.definition = describe_actor(actor)
         self.instance: ActorBase[Any, Any, Any, Any] | None = None
-        self.identity: Document | None = None
         self.lifecycle = asyncio.Lock()
         self.pending: set[asyncio.Task[Document]] = set()
         self.serial = asyncio.Lock()
@@ -38,11 +39,6 @@ class ActorRuntime:
 
     async def handle(self, command: Document) -> Document:
         async with self.lifecycle:
-            if self.identity is not None and command["actor"] != self.identity:
-                return failed("actor_identity_mismatch", "executor is assigned to another actor")
-            if command["actor"]["actor_name"] != self.definition.actor.__name__:
-                return failed("actor_name_not_found", "actor is not loaded")
-            self.identity = command["actor"]
             if command["type"] == "evict":
                 return await self.evict()
             task = asyncio.create_task(self.run(command))
@@ -118,7 +114,7 @@ class ActorRuntime:
         connecting = socket_event and command["event"]["type"] == "connect"
         scope = SocketScope(
             instance,
-            command["actor"]["actor_id"],
+            self.identity["actor_id"],
             self.definition.socket_types,
             self.effects,
             command.get("connections"),

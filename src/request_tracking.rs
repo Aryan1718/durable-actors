@@ -85,7 +85,6 @@ impl RequestTracker {
         self.finish(match result {
             Ok(ActorExecutionResult::Completed { .. }) => RequestOutcome::Completed,
             Ok(ActorExecutionResult::HostUnavailable) => RequestOutcome::Rejected,
-            Ok(ActorExecutionResult::Reroute) => RequestOutcome::Rerouted,
             _ => RequestOutcome::Failed,
         });
     }

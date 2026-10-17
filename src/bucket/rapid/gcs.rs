@@ -1,12 +1,12 @@
 use super::*;
-use crate::bucket::{GcsBucket, PersistenceConfig, gcs::GcsClients};
+use crate::bucket::{GcsBucket, SnapshotStoreConfig, gcs::GcsClients};
 use google_cloud_storage::{
     appendable_object_writer::AppendableObjectWriter, model_ext::ReadRange,
 };
 
 impl RapidSnapshots {
     pub(crate) async fn validate_gcs(
-        config: &PersistenceConfig,
+        config: &SnapshotStoreConfig,
         clients: GcsClients,
     ) -> Result<()> {
         let Some((buckets, archive_bucket)) = config.rapid_settings() else {
@@ -40,13 +40,13 @@ impl RapidSnapshots {
     }
 
     pub(crate) fn gcs(
-        config: &PersistenceConfig,
+        config: &SnapshotStoreConfig,
         clients: GcsClients,
         stop: CancellationToken,
         actor: Option<&crate::actor::ActorKey>,
     ) -> Result<Self> {
         config.validate()?;
-        let PersistenceConfig::Rapid {
+        let SnapshotStoreConfig::Rapid {
             buckets,
             archive_bucket,
             archive_batch,

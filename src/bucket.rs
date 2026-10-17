@@ -5,7 +5,7 @@ mod rapid;
 pub(crate) use rapid::RapidSnapshots;
 pub(crate) mod recovery;
 mod snapshots;
-pub use snapshots::{ArchiveBatchConfig, PersistenceConfig, RapidBucket};
+pub use snapshots::{ArchiveBatchConfig, RapidBucket, SnapshotStoreConfig};
 pub(crate) use snapshots::{BucketSnapshots, SnapshotStore};
 mod runtime;
 

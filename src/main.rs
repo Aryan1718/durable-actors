@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use durable_actors::{
     control_plane::{ControlPlaneProcessConfig, DevOptions, serve_control_plane, serve_local},
-    host::{ActorHostConfig, serve_actor_host},
+    host::serve_actor_host,
 };
 use tokio::sync::oneshot;
 use tracing::{error, info};
@@ -64,7 +64,7 @@ async fn run(cli: Cli) -> Result<()> {
             serve_control_plane(ControlPlaneProcessConfig::from_env()?, shutdown).await
         }
         "spare" => durable_actors::host::serve_spare(shutdown).await,
-        "host" => serve_actor_host(ActorHostConfig::from_env()?, shutdown).await,
+        "host" => serve_actor_host(shutdown).await,
         role => anyhow::bail!("unsupported DURABLE_ACTORS_PROCESS_ROLE {role:?}"),
     }
 }

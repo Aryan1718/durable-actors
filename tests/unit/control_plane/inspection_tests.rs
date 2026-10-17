@@ -294,12 +294,9 @@ async fn inventory_stream_reports_host_queues_and_fences_expired_sessions() -> R
     let first = stream_inventory(&mut stream).await?;
     assert!(first.get("namespaceId").is_none());
     assert_eq!(first["actors"][0]["unknown"], 1);
-    let queues = vec![crate::host_leases::ActorQueueInventory {
-        actor: actor.clone(),
-        waiting: vec![crate::host_leases::WaitingOperation {
-            id: "queued-1".into(),
-            operation: "sendMessage".into(),
-        }],
+    let waiting = vec![crate::host_leases::WaitingOperation {
+        id: "queued-1".into(),
+        operation: "sendMessage".into(),
     }];
     fixture
         .store
@@ -308,7 +305,7 @@ async fn inventory_stream_reports_host_queues_and_fences_expired_sessions() -> R
             &request,
             crate::host_leases::ActivationInventory {
                 resident: Some(true),
-                waiting: Some(queues[0].waiting.clone()),
+                waiting: Some(waiting),
             },
         )
         .await?;

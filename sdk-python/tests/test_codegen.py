@@ -175,11 +175,6 @@ def test_generated_recursive_unions_dates_and_tuples(tmp_path, monkeypatch, runn
                     {
                         "type": "invoke",
                         "request_id": "one",
-                        "actor": {
-                            "project_id": "local",
-                            "actor_name": actor_name,
-                            "actor_id": actor_id,
-                        },
                         "method": method,
                         "args": args,
                     }
@@ -252,11 +247,6 @@ def test_generated_models_preserve_omitted_typed_dict_fields(tmp_path, monkeypat
                 runtime.handle(
                     {
                         "type": "invoke",
-                        "actor": {
-                            "project_id": "local",
-                            "actor_name": actor_name,
-                            "actor_id": actor_id,
-                        },
                         "method": method,
                         "args": args,
                     }

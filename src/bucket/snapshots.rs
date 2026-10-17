@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
-pub enum PersistenceConfig {
+pub enum SnapshotStoreConfig {
     #[default]
     Local,
     Rapid {
@@ -59,7 +59,7 @@ pub struct RapidBucket {
     pub zone: String,
 }
 
-impl PersistenceConfig {
+impl SnapshotStoreConfig {
     pub(crate) fn rapid_settings(&self) -> Option<(&[RapidBucket], &str)> {
         match self {
             Self::Local => None,

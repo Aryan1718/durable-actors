@@ -7,11 +7,11 @@ fn rapid_requires_exactly_two_distinct_zones_and_separate_archive() -> Result<()
         {"bucket":"rapid-test-a", "zone":"us-west4-a"},
         {"bucket":"rapid-test-b", "zone":"us-west4-b"}
     ]});
-    serde_json::from_value::<PersistenceConfig>(good.clone())?.validate()?;
+    serde_json::from_value::<SnapshotStoreConfig>(good.clone())?.validate()?;
     let mut one = good.clone();
     one["buckets"].as_array_mut().unwrap().pop();
     assert!(
-        serde_json::from_value::<PersistenceConfig>(one)?
+        serde_json::from_value::<SnapshotStoreConfig>(one)?
             .validate()
             .is_err()
     );
@@ -21,14 +21,14 @@ fn rapid_requires_exactly_two_distinct_zones_and_separate_archive() -> Result<()
         .unwrap()
         .push(json!({"bucket":"rapid-test-c", "zone":"us-west4-c"}));
     assert!(
-        serde_json::from_value::<PersistenceConfig>(three)?
+        serde_json::from_value::<SnapshotStoreConfig>(three)?
             .validate()
             .is_err()
     );
     let mut same_archive = good.clone();
     same_archive["archive_bucket"] = json!("rapid-test-a");
     assert!(
-        serde_json::from_value::<PersistenceConfig>(same_archive)?
+        serde_json::from_value::<SnapshotStoreConfig>(same_archive)?
             .validate()
             .is_err()
     );
@@ -36,7 +36,7 @@ fn rapid_requires_exactly_two_distinct_zones_and_separate_archive() -> Result<()
         let mut config = good.clone();
         config["buckets"][1][field] = config["buckets"][0][field].clone();
         assert!(
-            serde_json::from_value::<PersistenceConfig>(config)?
+            serde_json::from_value::<SnapshotStoreConfig>(config)?
                 .validate()
                 .is_err()
         );

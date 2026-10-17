@@ -61,10 +61,8 @@ impl DatabaseSession {
                 ActorExecutionResult::HostUnavailable,
             ));
         }
-        let mut cached = self
-            .take_or_load_state(&invocation.actor, owner_epoch, timings)
-            .await?;
-        if let Err(error) = self.finish_pending_commit(invocation, &mut cached).await {
+        let mut cached = self.take_or_load_state(owner_epoch, timings).await?;
+        if let Err(error) = self.finish_pending_commit(&mut cached).await {
             self.cached_state = Some(cached);
             warn!(actor = %invocation.actor.storage_key(), %error, "pending actor state commit remains unresolved");
             return Ok(PreparedInvocation::Completed(
@@ -186,15 +184,12 @@ impl DatabaseSession {
         self.storage.ensure_authority()
     }
 
-    pub(super) async fn prepare_activation(
-        &mut self,
-        actor: &crate::actor::ActorKey,
-    ) -> Result<PreparedActivation> {
+    pub(super) async fn prepare_activation(&mut self) -> Result<PreparedActivation> {
         self.storage.ensure_authority()?;
         if let Some(activation) = &self.activation {
             return Ok(PreparedActivation::Completed(activation.clone()));
         }
-        let mut activation = self.storage.acquire_actor(actor, &self.endpoint.id).await?;
+        let mut activation = self.storage.acquire_actor().await?;
         if self.cached_state.is_none() {
             let cached = if activation.state_version == 0 {
                 ResidentDatabase::open(
@@ -207,13 +202,8 @@ impl DatabaseSession {
                     .state
                     .take()
                     .context("activation has no recovered state")?;
-                self.load_cached(
-                    actor,
-                    activation.owner_epoch,
-                    activation.state_version,
-                    &bytes,
-                )
-                .await?
+                self.load_cached(activation.owner_epoch, activation.state_version, &bytes)
+                    .await?
             };
             self.cached_state = Some(cached);
         }
@@ -283,7 +273,6 @@ impl DatabaseSession {
     }
     async fn take_or_load_state(
         &mut self,
-        actor: &crate::actor::ActorKey,
         owner_epoch: u64,
         timings: &mut DatabaseTimings,
     ) -> Result<ResidentDatabase> {
@@ -294,10 +283,7 @@ impl DatabaseSession {
         {
             return Ok(cached);
         }
-        let (state_version, loaded) = self
-            .storage
-            .load_actor_state(actor, &self.endpoint.id, owner_epoch)
-            .await?;
+        let (state_version, loaded) = self.storage.load_actor_state(owner_epoch).await?;
         if state_version == 0 {
             ensure!(loaded.is_empty(), "uninitialized actor has state");
             return ResidentDatabase::open(
@@ -308,7 +294,7 @@ impl DatabaseSession {
         }
         timings.mark(RequestStage::StateDownloaded);
         let cached = self
-            .load_cached(actor, owner_epoch, state_version, &loaded)
+            .load_cached(owner_epoch, state_version, &loaded)
             .await?;
         timings.mark(RequestStage::StateDecoded);
         Ok(cached)
@@ -316,7 +302,6 @@ impl DatabaseSession {
 
     async fn load_cached(
         &self,
-        actor: &crate::actor::ActorKey,
         owner_epoch: u64,
         state_version: u64,
         loaded: &[u8],
@@ -331,12 +316,12 @@ impl DatabaseSession {
             "actor snapshot belongs to a newer owner epoch"
         );
         let started = std::time::Instant::now();
-        let sqlite = self.storage.read_sqlite(actor, loaded).await?;
+        let sqlite = self.storage.read_sqlite(loaded).await?;
         let history_ms = started.elapsed().as_secs_f64() * 1000.0;
         let apply_started = std::time::Instant::now();
         let capture =
             SqliteCapture::restore(self.replication.clone(), &sqlite.files, sqlite.txid).await?;
-        tracing::info!(event = "actor_sqlite_restored", actor = %actor.storage_key(), state_version,
+        tracing::info!(event = "actor_sqlite_restored", host_id = %self.endpoint.id, state_version,
             history_ms, apply_ms = apply_started.elapsed().as_secs_f64() * 1000.0,
             duration_ms = started.elapsed().as_secs_f64() * 1000.0);
         let mut cached = ResidentDatabase::open(owner_epoch, capture).await?;
@@ -416,12 +401,7 @@ impl DatabaseSession {
             }
             _ => {
                 self.storage
-                    .prepare_state_write(
-                        &invocation.actor,
-                        &self.endpoint.id,
-                        owner_epoch,
-                        cached.state_version,
-                    )
+                    .prepare_state_write(owner_epoch, cached.state_version)
                     .await?
             }
         };
@@ -470,7 +450,7 @@ impl DatabaseSession {
         timings.snapshot_persisted_at_ms = Some(timings.elapsed_ms());
         timings.durability_proof = Some("object_storage");
         timings.snapshot_uploaded_at_ms = timings.snapshot_persisted_at_ms;
-        self.finish_pending_commit(invocation, cached).await?;
+        self.finish_pending_commit(cached).await?;
         timings.state_finalized_at_ms = Some(timings.elapsed_ms());
         Ok(())
     }
@@ -530,23 +510,14 @@ impl DatabaseSession {
         }
     }
 
-    async fn finish_pending_commit(
-        &self,
-        invocation: &ActorInvocation,
-        cached: &mut ResidentDatabase,
-    ) -> Result<()> {
+    async fn finish_pending_commit(&self, cached: &mut ResidentDatabase) -> Result<()> {
         let Some(pending) = &mut cached.pending else {
             return Ok(());
         };
         if !pending.durable {
             let renewed = self
                 .storage
-                .prepare_state_write(
-                    &invocation.actor,
-                    &self.endpoint.id,
-                    cached.owner_epoch,
-                    cached.state_version,
-                )
+                .prepare_state_write(cached.owner_epoch, cached.state_version)
                 .await?;
             ensure!(
                 renewed.stream == pending.ticket.stream

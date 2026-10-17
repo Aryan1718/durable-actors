@@ -6,9 +6,9 @@ mod socket;
 pub use self::{
     database::{ActorDatabase, DatabaseCall, DatabaseResult, SqlValue},
     executor_connection::{
-        ActorExecutor, ActorInterleavedOutcome, ActorMethodEviction, ActorMethodInvocation,
-        ActorMethodOutcome, ActorSocketConnection, ActorSocketEffect, ActorSocketEvent,
-        ActorSocketInvocation, ActorSocketMessage, ActorSocketOutcome, ActorSocketTagMatch,
+        ActorExecutor, ActorInterleavedOutcome, ActorMethodInvocation, ActorMethodOutcome,
+        ActorSocketConnection, ActorSocketEffect, ActorSocketEvent, ActorSocketInvocation,
+        ActorSocketMessage, ActorSocketOutcome, ActorSocketTagMatch,
     },
     protocol::{ActorExecutionResult, ActorInvocation, ActorInvocationFailure, ActorKey},
 };

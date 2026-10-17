@@ -482,7 +482,7 @@ def invocation_outcome(reply: dict[str, Any], request_id: str, attempt: int) -> 
         raise ActorInvocationError(reply["code"], request_id, reply["message"])
     if kind != "unauthenticated" and not (
         kind == "not_executed"
-        and reply.get("reason") in {"stale_owner", "host_unavailable", "upstream_not_reached"}
+        and reply.get("reason") in {"host_unavailable", "upstream_not_reached"}
     ):
         raise ActorProtocolError("invalid invocation outcome")
     if attempt:

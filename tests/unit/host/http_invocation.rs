@@ -8,6 +8,7 @@ use crate::{
 };
 use aws_lc_rs::{rand::SystemRandom, signature::Ed25519KeyPair};
 use base64::{Engine, engine::general_purpose::STANDARD};
+use tokio::task::JoinSet;
 
 #[tokio::test]
 async fn invocation_response_reuses_observability_timings() -> Result<()> {
@@ -101,16 +102,18 @@ fn diagnostic_logs_use_finalized_request_timing() -> Result<()> {
 #[tokio::test]
 async fn queued_response_reuses_observability_queue_wait() -> Result<()> {
     let mut fixture = HttpHost::start(None).await?;
-    let mut activity = fixture.host.activity();
+    let mut status = fixture.host.status();
     let (first, second, released) = tokio::join!(
         fixture.invoke("first", "counter-1"),
         async {
-            activity.wait_for(|value| value.active == 1).await?;
+            status
+                .wait_for(|status| status.idle_since.is_none())
+                .await?;
             fixture.invoke("second", "counter-1").await
         },
         async {
-            let mut activity = fixture.host.activity();
-            activity.wait_for(|value| value.active == 2).await?;
+            let mut status = fixture.host.status();
+            status.wait_for(|status| status.waiting.len() == 1).await?;
             tokio::time::sleep(Duration::from_millis(25)).await;
             fixture.release.add_permits(1);
             Ok::<_, anyhow::Error>(())
@@ -153,7 +156,7 @@ async fn draining_host_rejects_http_invocations_without_executing_them() -> Resu
     );
     fixture.host.drain(Duration::from_secs(1)).await?;
     assert!(fixture.started.try_recv().is_err());
-    assert!(fixture.host.queues().inventory().is_empty());
+    assert!(fixture.host.status().borrow().waiting.is_empty());
     Ok(())
 }
 
@@ -162,9 +165,12 @@ async fn host_assigned_to_another_actor_rejects_before_execution() -> Result<()>
     let mut fixture = HttpHost::start(None).await?;
     fixture.invoke("warm", "counter-1").await?;
     assert_eq!(fixture.started.recv().await.as_deref(), Some("warm"));
+    let error = fixture.invoke("wrong-host", "another").await.unwrap_err();
     assert_eq!(
-        without_metadata(fixture.invoke("wrong-host", "another").await?),
-        json!({"type":"not_executed", "reason":"stale_owner"})
+        error
+            .downcast_ref::<reqwest::Error>()
+            .and_then(reqwest::Error::status),
+        Some(reqwest::StatusCode::FORBIDDEN)
     );
     assert!(fixture.started.try_recv().is_err());
     assert_eq!(
@@ -250,6 +256,7 @@ impl HttpHost {
         let (trace_sender, traces) = crate::request_traces::TraceSender::channel(16);
         let release = Arc::new(tokio::sync::Semaphore::new(0));
         let sockets = Arc::new(HostSockets::new(
+            counter(),
             storage.clone(),
             Arc::new(crate::sockets::SocketRegistry::default()),
         ));

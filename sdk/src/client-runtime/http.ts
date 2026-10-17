@@ -91,7 +91,7 @@ function nonnegativeFiniteNumber(value: unknown): value is number {
 }
 
 function rejectionReason(value: unknown): value is ActorRejectionReason {
-    return value === "stale_owner" || value === "host_unavailable" || value === "upstream_not_reached"
+    return value === "host_unavailable" || value === "upstream_not_reached"
 }
 
 export function connectionRefused(error: unknown, ancestors = new Set<unknown>()): boolean {
@@ -136,7 +136,7 @@ export interface ActorInvocation extends ActorAddress {
     readonly method: string
     readonly args: readonly JsonValue[]
 }
-type ActorRejectionReason = "stale_owner" | "host_unavailable" | "upstream_not_reached"
+type ActorRejectionReason = "host_unavailable" | "upstream_not_reached"
 
 export interface ActorResponseMetadata {
     readonly routingMs: number

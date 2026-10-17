@@ -175,7 +175,7 @@ test("cold and warm calls share one retry budget for explicit pre-execution reje
         for (const recovered of [false, true]) {
             for (const rejection of [
                 { type: "unauthenticated" },
-                ...["stale_owner", "host_unavailable", "upstream_not_reached"].map(reason => ({
+                ...["host_unavailable", "upstream_not_reached"].map(reason => ({
                     type: "not_executed",
                     reason
                 }))
@@ -289,7 +289,7 @@ test("invoke refreshes a stale broadcast target after the actor moves", async ()
         actorHost: {
             async invoke(cached) {
                 assert.deepEqual(cached, target)
-                return { type: "not_executed", reason: "stale_owner" }
+                return { type: "not_executed", reason: "host_unavailable" }
             },
             async publish(cached) {
                 published.push(cached)
@@ -385,7 +385,7 @@ test("a late failure from the old host cannot erase a refreshed target", { timeo
             const body = JSON.parse(String(init?.body))
             if (String(url).startsWith(target.route)) {
                 if (body.method === "hold") return held
-                return Response.json({ type: "not_executed", reason: "stale_owner" })
+                return Response.json({ type: "not_executed", reason: "host_unavailable" })
             }
             const outcome = { type: "completed", result: 7 }
             return Response.json(

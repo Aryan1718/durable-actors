@@ -3,9 +3,8 @@ use std::{future::Future, path::Path, sync::Arc, time::Duration};
 use anyhow::{Context, Result, ensure};
 use tokio::net::TcpListener;
 
-use super::process::{
-    ActorHostConfig, executor_runtime, serve_assigned_host, spawn_executor_process,
-};
+use super::config::{ActorHostConfig, executor_runtime};
+use super::process::{HostStartupTimings, serve_assigned_host, spawn_executor_process};
 use crate::actor::{ActorExecutorListener, WarmExecutor};
 use crate::bucket::WarmGcs;
 use crate::litestream::{Litestream, Replicator};
@@ -15,7 +14,6 @@ pub(super) struct WarmHost {
     pub listener: TcpListener,
     pub executor: WarmExecutor,
     pub javascript: tokio::process::Child,
-    pub entrypoint: String,
     pub storage: WarmGcs,
     pub control_plane: Option<WarmControlPlane>,
     pub replication: Arc<dyn Replicator>,
@@ -78,15 +76,14 @@ pub async fn serve_spare(shutdown: impl Future<Output = ()> + Send + 'static) ->
     };
     tokio::fs::remove_file(&ready).await?;
     let environment = assigned.environment;
+    let timings = HostStartupTimings::start();
     let config = ActorHostConfig::from_lookup(|name| environment.get(name).cloned())?;
-    ensure!(
-        config.actor.is_some(),
-        "spare assignment must name exactly one actor"
-    );
-    let entrypoint = environment
-        .get("DURABLE_ACTORS_ENTRYPOINT")
-        .context("missing customer entrypoint")?
-        .clone();
+    let timings = timings.configuration_loaded();
+    let entrypoint = config
+        .executor
+        .entrypoint
+        .as_deref()
+        .context("missing customer entrypoint")?;
     ensure!(
         entrypoint.starts_with("/customer/")
             && (entrypoint.ends_with(".mjs") || entrypoint.ends_with(".pyz"))
@@ -96,7 +93,7 @@ pub async fn serve_spare(shutdown: impl Future<Output = ()> + Send + 'static) ->
         "customer entrypoint must be a compiled module under /customer"
     );
     ensure!(
-        crate::artifacts::ActorRuntime::from_entrypoint(&entrypoint)? == runtime,
+        config.executor.runtime == runtime,
         "actor artifact does not match the prewarmed executor runtime"
     );
     let warm = WarmHost {
@@ -104,12 +101,11 @@ pub async fn serve_spare(shutdown: impl Future<Output = ()> + Send + 'static) ->
         listener,
         executor,
         javascript,
-        entrypoint,
         storage,
         control_plane,
         replication,
     };
-    serve_assigned_host(config, Some(warm), shutdown).await
+    serve_assigned_host(config, timings, Some(warm), shutdown).await
 }
 
 async fn prewarm_control_plane(url: Option<String>) -> Result<WarmControlPlane> {

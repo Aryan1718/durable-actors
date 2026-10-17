@@ -21,7 +21,7 @@ def test_caches_route_and_retries_only_explicit_non_execution():
     def handle(request):
         calls.append(request.url.host)
         if request.url.host == "host.test":
-            return httpx.Response(200, json={"type": "not_executed", "reason": "stale_owner"})
+            return httpx.Response(200, json={"type": "not_executed", "reason": "host_unavailable"})
         return httpx.Response(
             200, json={"target": target, "outcome": {"type": "completed", "result": 3}}
         )

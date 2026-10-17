@@ -82,7 +82,14 @@ impl ActorHostHttpService {
             &self.session_id,
             actor,
             owner_epoch,
-        )
+        )?;
+        if actor != self.host.actor() {
+            return Err(HttpError(
+                StatusCode::FORBIDDEN,
+                "actor host serves another actor".into(),
+            ));
+        }
+        Ok(())
     }
 
     async fn execute(
@@ -92,7 +99,6 @@ impl ActorHostHttpService {
         host_state: HostState,
         routing_ms: f64,
     ) -> InvocationResponse {
-        let actor = invocation.actor.clone();
         let request_id = invocation.request_id.clone();
         let (result, metadata) = self
             .host
@@ -101,10 +107,7 @@ impl ActorHostHttpService {
         let outcome = match result {
             Ok(ActorExecutionResult::Completed { result, effects }) => {
                 if !effects.is_empty()
-                    && let Err(error) = self
-                        .sockets
-                        .publish_authorized(&actor, self.host.id(), owner_epoch, effects)
-                        .await
+                    && let Err(error) = self.sockets.publish_authorized(owner_epoch, effects).await
                 {
                     warn!(request_id, error = %format!("{error:#}"), "actor completed but socket delivery failed");
                     return InvocationReply::failed(
@@ -118,9 +121,6 @@ impl ActorHostHttpService {
             Ok(ActorExecutionResult::Failed { failure }) => InvocationReply::Failed {
                 code: failure.code,
                 message: failure.message,
-            },
-            Ok(ActorExecutionResult::Reroute) => InvocationReply::NotExecuted {
-                reason: RejectionReason::StaleOwner,
             },
             Ok(ActorExecutionResult::HostUnavailable) => InvocationReply::NotExecuted {
                 reason: RejectionReason::HostUnavailable,
@@ -173,9 +173,7 @@ async fn socket_event(
         Ok(ActorExecutionResult::Completed { effects, .. }) => {
             SocketEventReply::Completed { effects }
         }
-        Ok(ActorExecutionResult::Reroute | ActorExecutionResult::HostUnavailable) => {
-            SocketEventReply::NotExecuted
-        }
+        Ok(ActorExecutionResult::HostUnavailable) => SocketEventReply::NotExecuted,
         Ok(ActorExecutionResult::Failed { failure }) => SocketEventReply::Failed {
             message: failure.message,
         },
@@ -321,7 +319,6 @@ enum InvocationReply {
 #[derive(Serialize)]
 #[serde(rename_all = "snake_case")]
 enum RejectionReason {
-    StaleOwner,
     HostUnavailable,
 }
 

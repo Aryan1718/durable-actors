@@ -80,7 +80,6 @@ pub enum ActorExecutionResult {
     Failed {
         failure: ActorInvocationFailure,
     },
-    Reroute,
     HostUnavailable,
 }
 

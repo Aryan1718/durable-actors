@@ -1,5 +1,5 @@
 #[cfg(test)]
-#[path = "../tests/unit/artifacts.rs"]
+#[path = "../tests/unit/bundle.rs"]
 mod tests;
 use std::path::{Component, Path};
 
@@ -32,21 +32,21 @@ impl ActorRuntime {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ArtifactManifest {
+pub(crate) struct ActorBundle {
     pub bucket: String,
-    pub files: Vec<ArtifactFile>,
+    pub files: Vec<BundleFile>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ArtifactFile {
+pub(crate) struct BundleFile {
     pub path: String,
     pub object: String,
     pub generation: i64,
     pub sha256: String,
 }
 
-impl ArtifactManifest {
+impl ActorBundle {
     pub fn encode(&self) -> Result<String> {
         self.validate()?;
         Ok(format!(
@@ -121,7 +121,7 @@ impl ArtifactManifest {
 
 async fn install_file(
     root: &Path,
-    artifact: &ArtifactFile,
+    artifact: &BundleFile,
     chunks: impl Stream<Item = Result<Bytes>>,
 ) -> Result<()> {
     validate_path(&artifact.path)?;

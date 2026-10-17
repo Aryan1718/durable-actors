@@ -139,7 +139,7 @@ fn assignment_environment(
         .code_snapshot
         .as_deref()
         .context("compiled GCS code artifact required")?;
-    let manifest = crate::artifacts::ArtifactManifest::decode(artifact)?;
+    let manifest = crate::bundle::ActorBundle::decode(artifact)?;
     let actor = request.actor.as_ref().context("actor identity required")?;
     actor.validate()?;
     let mut environment = HashMap::from([

@@ -7,9 +7,9 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
         actor_name: "Counter".into(),
         actor_id: "one".into(),
     };
-    let mut code = crate::artifacts::ArtifactManifest {
+    let mut code = crate::bundle::ActorBundle {
         bucket: "code".into(),
-        files: vec![crate::artifacts::ArtifactFile {
+        files: vec![crate::bundle::BundleFile {
             path: "actors.mjs".into(),
             object: "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs"
                 .into(),
@@ -19,7 +19,7 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
     };
     let value = boundary(
         "authority",
-        &super::super::PersistenceConfig::Local,
+        &super::super::SnapshotStoreConfig::Local,
         Some("code"),
         &actor,
         Some(&code),
@@ -53,7 +53,7 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
     );
     for index in 0..1000 {
         let path = format!("modules/{index}.mjs");
-        code.files.push(crate::artifacts::ArtifactFile {
+        code.files.push(crate::bundle::BundleFile {
             object: format!(
                 "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/{path}"
             ),
@@ -64,7 +64,7 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
     }
     let large = boundary(
         "authority",
-        &super::super::PersistenceConfig::Local,
+        &super::super::SnapshotStoreConfig::Local,
         Some("code"),
         &actor,
         Some(&code),
@@ -75,7 +75,7 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
     assert!(
         boundary(
             "authority",
-            &super::super::PersistenceConfig::Local,
+            &super::super::SnapshotStoreConfig::Local,
             Some("code"),
             &actor,
             Some(&code)
@@ -89,7 +89,7 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
         value,
         boundary(
             "authority",
-            &super::super::PersistenceConfig::Local,
+            &super::super::SnapshotStoreConfig::Local,
             Some("code"),
             &other,
             Some(&code)
@@ -98,7 +98,7 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
     assert!(
         boundary(
             "authority",
-            &super::super::PersistenceConfig::Local,
+            &super::super::SnapshotStoreConfig::Local,
             Some("different-bucket"),
             &actor,
             Some(&code)
@@ -115,7 +115,7 @@ fn log_credentials_cover_only_this_actors_logs_and_archive() -> Result<()> {
         actor_name: "Counter".into(),
         actor_id: "one".into(),
     };
-    let config: super::super::PersistenceConfig = serde_json::from_value(
+    let config: super::super::SnapshotStoreConfig = serde_json::from_value(
         json!({"type":"rapid","archive_bucket":"archive-test","buckets":[
             {"bucket":"rapid-test-a","zone":"us-west4-a"},{"bucket":"rapid-test-b","zone":"us-west4-b"}
         ]}),
