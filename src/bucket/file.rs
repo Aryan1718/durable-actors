@@ -1,4 +1,4 @@
-use super::{Bucket, BucketObject};
+use super::{Bucket, BucketObject, StorageRevision};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use atomic_write_file::AtomicWriteFile;
@@ -44,13 +44,13 @@ impl Bucket for FileBucket {
             let Some(mut file) = open(&object_path(directory, &key)?)? else {
                 return Ok(None);
             };
-            let generation = read_generation(&mut file)?;
+            let revision = StorageRevision::Generation(read_generation(&mut file)?);
             file.seek(SeekFrom::Start(
                 start.checked_add(8).context("range overflow")?,
             ))?;
             let bytes = crate::payload::copy(file.take(length))?;
             ensure!(bytes.len() as u64 == length, "incomplete object range");
-            Ok(Some(BucketObject { generation, bytes }))
+            Ok(Some(BucketObject { revision, bytes }))
         })
         .await
     }
@@ -58,7 +58,7 @@ impl Bucket for FileBucket {
     async fn compare_and_swap(
         &self,
         key: &str,
-        expected: Option<i64>,
+        revision: Option<StorageRevision>,
         bytes: bytes::Bytes,
     ) -> Result<bool> {
         let key = key.to_owned();
@@ -67,6 +67,10 @@ impl Bucket for FileBucket {
             let _lock = lock_object(&path)?;
             let generation = open(&path)?
                 .map(|mut file| read_generation(&mut file))
+                .transpose()?;
+            let expected = revision
+                .as_ref()
+                .map(StorageRevision::require_generation)
                 .transpose()?;
             if generation != expected {
                 return Ok(false);
@@ -111,9 +115,9 @@ fn read(path: &Path) -> Result<Option<BucketObject>> {
     let Some(mut file) = open(path)? else {
         return Ok(None);
     };
-    let generation = read_generation(&mut file)?;
+    let revision = StorageRevision::Generation(read_generation(&mut file)?);
     let bytes = crate::payload::copy(file)?;
-    Ok(Some(BucketObject { generation, bytes }))
+    Ok(Some(BucketObject { revision, bytes }))
 }
 
 fn open(path: &Path) -> Result<Option<File>> {

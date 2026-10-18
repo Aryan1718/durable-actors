@@ -51,7 +51,7 @@ impl Bucket for MemoryBucket {
     async fn compare_and_swap(
         &self,
         key: &str,
-        generation: Option<i64>,
+        revision: Option<crate::bucket::StorageRevision>,
         bytes: bytes::Bytes,
     ) -> Result<bool> {
         if key.contains("/owners/") {
@@ -76,14 +76,21 @@ impl Bucket for MemoryBucket {
             "snapshot write unavailable"
         );
         let mut objects = self.objects.lock().unwrap();
-        let current = objects.get(key).map(|object| object.generation);
-        if current != generation {
+        let current = objects.get(key).map(|object| object.revision.clone());
+        if current != revision {
             return Ok(false);
         }
         objects.insert(
             key.into(),
             BucketObject {
-                generation: current.unwrap_or(0) + 1,
+                revision: crate::bucket::StorageRevision::Generation(
+                    current
+                        .as_ref()
+                        .map(crate::bucket::StorageRevision::require_generation)
+                        .transpose()?
+                        .unwrap_or(0)
+                        + 1,
+                ),
                 bytes,
             },
         );
@@ -316,7 +323,8 @@ async fn socket_publication_uses_the_local_lease_without_reading_ownership() -> 
         let mut record: serde_json::Value = serde_json::from_slice(&owner.bytes)?;
         record["lease"]["session_id"] = "replacement".into();
         owner.bytes = crate::payload::encode(&record)?;
-        owner.generation += 1;
+        owner.revision =
+            crate::bucket::StorageRevision::Generation(owner.revision.require_generation()? + 1);
     }
     sockets.publish(effects.clone()).await?;
     assert_eq!(bucket.owner_reads.load(SeqCst), reads);

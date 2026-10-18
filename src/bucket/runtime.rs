@@ -61,7 +61,8 @@ struct Ownership {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct OwnershipHint {
-    generation: i64,
+    #[serde(rename = "generation")]
+    revision: super::StorageRevision,
     record: Ownership,
 }
 
@@ -185,9 +186,9 @@ impl ObjectPlacementStore for RuntimeStorageReader {
         object: &ActorStorageKey,
     ) -> Result<(Option<ObjectPlacement>, Option<OwnershipHint>)> {
         Ok(match self.load(object).await? {
-            Some((generation, record)) => (
+            Some((revision, record)) => (
                 Some(record.placement()),
-                Some(OwnershipHint { generation, record }),
+                Some(OwnershipHint { revision, record }),
             ),
             None => (None, None),
         })
@@ -370,7 +371,10 @@ impl RuntimeStorageReader {
         Ok(placement)
     }
 
-    async fn load(&self, object: &ActorStorageKey) -> Result<Option<(i64, Ownership)>> {
+    async fn load(
+        &self,
+        object: &ActorStorageKey,
+    ) -> Result<Option<(super::StorageRevision, Ownership)>> {
         self.authority
             .get(&ownership_key(object)?)
             .await?
@@ -380,7 +384,7 @@ impl RuntimeStorageReader {
                     record.persistence.same_backend(&self.persistence),
                     "actor persistence backend changed; an explicit state migration is required"
                 );
-                Ok((value.generation, record))
+                Ok((value.revision, record))
             })
             .transpose()
     }

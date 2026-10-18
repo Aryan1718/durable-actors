@@ -27,7 +27,7 @@ impl RuntimeStorage {
         // Unsealed recovery can fence a live session if the hinted lease was renewed.
         let owner_hint = owner_hint.filter(|hint| {
             hint.record.sealed
-                && hint.generation > 0
+                && hint.revision.is_valid()
                 && hint.record.actor == *actor
                 && hint.record.region == region
                 && hint.record.lease.expires_at_ms <= now
@@ -37,7 +37,7 @@ impl RuntimeStorage {
         for hint in [owner_hint, None] {
             let read_started = Instant::now();
             let current = if let Some(hint) = hint {
-                Some((hint.generation, hint.record.clone()))
+                Some((hint.revision.clone(), hint.record.clone()))
             } else if new_actor && owner_hint.is_none() {
                 None
             } else {
@@ -71,7 +71,7 @@ impl RuntimeStorage {
             };
             let write_started = Instant::now();
             if !self
-                .replace_activation(&mut record, current.map(|(generation, _)| generation))
+                .replace_activation(&mut record, current.map(|(revision, _)| revision))
                 .await?
             {
                 ensure!(hint.is_some(), "actor activation changed concurrently");
@@ -108,7 +108,7 @@ impl RuntimeStorage {
         request: &HostLeaseRequest,
         inventory: ActivationInventory,
     ) -> Result<HostLease> {
-        let (generation, mut record) = self
+        let (revision, mut record) = self
             .load(&actor.storage_key())
             .await?
             .context("actor ownership missing")?;
@@ -130,7 +130,7 @@ impl RuntimeStorage {
         let lease = self.new_lease(request)?;
         record.lease = lease.clone();
         record.inventory = inventory;
-        self.save_activation(&mut record, Some(generation)).await?;
+        self.save_activation(&mut record, Some(revision)).await?;
         if let Some(owned) = self
             .owned
             .lock()
@@ -161,7 +161,7 @@ impl RuntimeStorage {
         checkpoint: Option<SessionCheckpoint>,
     ) -> Result<()> {
         for _ in 0..3 {
-            let Some((generation, mut record)) = self.load(&actor.storage_key()).await? else {
+            let Some((revision, mut record)) = self.load(&actor.storage_key()).await? else {
                 return Ok(());
             };
             if record.lease.id != *host
@@ -175,10 +175,7 @@ impl RuntimeStorage {
                 record.base = checkpoint.snapshot.clone();
                 record.sealed = true;
             }
-            if self
-                .replace_activation(&mut record, Some(generation))
-                .await?
-            {
+            if self.replace_activation(&mut record, Some(revision)).await? {
                 return Ok(());
             }
         }
@@ -252,9 +249,13 @@ impl RuntimeStorage {
         })
     }
 
-    async fn save_activation(&self, record: &mut Ownership, generation: Option<i64>) -> Result<()> {
+    async fn save_activation(
+        &self,
+        record: &mut Ownership,
+        revision: Option<crate::bucket::StorageRevision>,
+    ) -> Result<()> {
         ensure!(
-            self.replace_activation(record, generation).await?,
+            self.replace_activation(record, revision).await?,
             "actor activation changed concurrently"
         );
         Ok(())
@@ -263,13 +264,13 @@ impl RuntimeStorage {
     async fn replace_activation(
         &self,
         record: &mut Ownership,
-        generation: Option<i64>,
+        revision: Option<crate::bucket::StorageRevision>,
     ) -> Result<bool> {
         record.mutation = uuid::Uuid::new_v4().to_string();
         replace(
             self.authority.as_ref(),
             &ownership_key(&record.actor.storage_key())?,
-            generation,
+            revision,
             crate::payload::encode(record)?,
         )
         .await

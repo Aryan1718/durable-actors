@@ -1,6 +1,63 @@
 use super::*;
 
 #[tokio::test]
+async fn etag_revisions_round_trip_and_reject_stale_ownership_updates() -> Result<()> {
+    let bucket = Arc::new(EtagBucket::default());
+    let clock = Arc::new(TestClock(AtomicU64::new(1_000)));
+    let runtime = RuntimeStorage::new(bucket.clone(), clock)?;
+    let actor = ActorKey {
+        project_id: "default".into(),
+        actor_name: "Counter".into(),
+        actor_id: "etag".into(),
+    };
+    let first = request("first");
+    runtime
+        .register_activation(&actor, &first, "us-east", true, None)
+        .await?;
+    let (_, hint) = runtime.get_owner_with_hint(&actor.storage_key()).await?;
+    let hint = hint.unwrap();
+    let stale = hint.revision.clone();
+    let encoded = serde_json::to_value(hint)?;
+    assert!(encoded["generation"].as_str().unwrap().starts_with('"'));
+
+    runtime
+        .renew_activation(&actor, &first, Default::default())
+        .await?;
+    assert!(
+        !bucket
+            .compare_and_swap(
+                &ownership_key(&actor.storage_key())?,
+                Some(stale),
+                bytes::Bytes::from_static(b"stale"),
+            )
+            .await?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn ownership_hints_preserve_numeric_generations_and_opaque_etags() -> Result<()> {
+    let f = Fixture::new()?;
+    f.runtime
+        .register_activation(&f.actor, &request("first"), "us-east", true, None)
+        .await?;
+    let (_, hint) = f
+        .runtime
+        .get_owner_with_hint(&f.actor.storage_key())
+        .await?;
+    let numeric = serde_json::to_value(hint.unwrap())?;
+    assert_eq!(numeric["generation"], serde_json::json!(1));
+    let decoded: OwnershipHint = serde_json::from_value(numeric.clone())?;
+    assert_eq!(serde_json::to_value(decoded)?, numeric);
+
+    let mut opaque = numeric;
+    opaque["generation"] = serde_json::json!("\"opaque-etag-2\"");
+    let decoded: OwnershipHint = serde_json::from_value(opaque.clone())?;
+    assert_eq!(serde_json::to_value(decoded)?, opaque);
+    Ok(())
+}
+
+#[tokio::test]
 async fn state_writes_require_local_ownership_and_a_matching_lease() -> Result<()> {
     let f = Fixture::new()?;
     let active = f
@@ -188,7 +245,7 @@ impl Bucket for CountedBucket {
     async fn compare_and_swap(
         &self,
         key: &str,
-        generation: Option<i64>,
+        revision: Option<crate::bucket::StorageRevision>,
         bytes: bytes::Bytes,
     ) -> Result<bool> {
         self.writes.fetch_add(1, Ordering::SeqCst);
@@ -197,7 +254,7 @@ impl Bucket for CountedBucket {
             entered.add_permits(1);
             resume.acquire().await?.forget();
         }
-        let written = self.inner.compare_and_swap(key, generation, bytes).await?;
+        let written = self.inner.compare_and_swap(key, revision, bytes).await?;
         ensure!(
             !self.lose_reply.swap(false, Ordering::SeqCst),
             "CAS response lost"
@@ -208,6 +265,69 @@ impl Bucket for CountedBucket {
         self.lists.fetch_add(1, Ordering::SeqCst);
         let keys = self.inner.list(prefix).await?;
         Ok(keys)
+    }
+}
+
+#[derive(Default)]
+struct EtagBucket {
+    objects: Mutex<std::collections::BTreeMap<String, crate::bucket::BucketObject>>,
+    next: AtomicU64,
+}
+
+#[async_trait]
+impl Bucket for EtagBucket {
+    async fn get(&self, key: &str) -> Result<Option<crate::bucket::BucketObject>> {
+        Ok(self.objects.lock().unwrap().get(key).cloned())
+    }
+
+    async fn range(
+        &self,
+        key: &str,
+        start: u64,
+        length: u64,
+    ) -> Result<Option<crate::bucket::BucketObject>> {
+        let Some(mut object) = self.get(key).await? else {
+            return Ok(None);
+        };
+        let end = start
+            .checked_add(length)
+            .ok_or_else(|| anyhow::anyhow!("range overflow"))?;
+        anyhow::ensure!(end <= object.bytes.len() as u64, "incomplete range");
+        object.bytes = object.bytes.slice(start as usize..end as usize);
+        Ok(Some(object))
+    }
+
+    async fn compare_and_swap(
+        &self,
+        key: &str,
+        revision: Option<crate::bucket::StorageRevision>,
+        bytes: bytes::Bytes,
+    ) -> Result<bool> {
+        let mut objects = self.objects.lock().unwrap();
+        let current = objects.get(key).map(|object| object.revision.clone());
+        if current != revision {
+            return Ok(false);
+        }
+        let etag = self.next.fetch_add(1, Ordering::SeqCst) + 1;
+        objects.insert(
+            key.into(),
+            crate::bucket::BucketObject {
+                revision: crate::bucket::StorageRevision::ETag(format!("\"etag-{etag}\"")),
+                bytes,
+            },
+        );
+        Ok(true)
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        Ok(self
+            .objects
+            .lock()
+            .unwrap()
+            .keys()
+            .filter(|key| key.starts_with(prefix))
+            .cloned()
+            .collect())
     }
 }
 

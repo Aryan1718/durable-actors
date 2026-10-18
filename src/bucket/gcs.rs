@@ -10,7 +10,7 @@ use google_cloud_auth::credentials::{
 };
 use google_cloud_storage::client::{Storage, StorageControl};
 
-use super::{Bucket, BucketObject};
+use super::{Bucket, BucketObject, StorageRevision};
 
 pub struct GcsBucket {
     bucket: String,
@@ -189,7 +189,7 @@ impl Bucket for GcsBucket {
     async fn compare_and_swap(
         &self,
         key: &str,
-        generation: Option<i64>,
+        revision: Option<StorageRevision>,
         bytes: bytes::Bytes,
     ) -> Result<bool> {
         let _transfer = self.clients.transfer(bytes.len() as u64).await?;
@@ -198,7 +198,13 @@ impl Bucket for GcsBucket {
             .clients
             .storage
             .write_object(&self.bucket, key, source)
-            .set_if_generation_match(generation.unwrap_or(0))
+            .set_if_generation_match(
+                revision
+                    .as_ref()
+                    .map(StorageRevision::require_generation)
+                    .transpose()?
+                    .unwrap_or(0),
+            )
             .send_unbuffered()
             .await
         {
@@ -302,12 +308,12 @@ impl GcsBucket {
         };
         let length = range.map_or(response.object().size as u64, |(_, length)| length);
         let _transfer = self.clients.transfer(length).await?;
-        let generation = response.object().generation;
+        let revision = StorageRevision::Generation(response.object().generation);
         let mut download = crate::payload::Download::new();
         while let Some(chunk) = response.next().await {
             download = download.append(chunk?).await?;
         }
         let bytes = download.finish().await?;
-        Ok(Some(BucketObject { generation, bytes }))
+        Ok(Some(BucketObject { revision, bytes }))
     }
 }

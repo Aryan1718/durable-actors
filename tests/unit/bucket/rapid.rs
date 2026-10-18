@@ -177,7 +177,7 @@ async fn failed_manifest_publication_never_acknowledges_an_undiscoverable_log() 
         async fn compare_and_swap(
             &self,
             _key: &str,
-            _generation: Option<i64>,
+            _revision: Option<crate::bucket::StorageRevision>,
             _bytes: bytes::Bytes,
         ) -> Result<bool> {
             anyhow::bail!("archive unavailable")
@@ -470,14 +470,14 @@ async fn failed_coverage_publication_never_deletes_a_durable_rapid_copy() -> Res
         async fn compare_and_swap(
             &self,
             key: &str,
-            generation: Option<i64>,
+            revision: Option<crate::bucket::StorageRevision>,
             bytes: bytes::Bytes,
         ) -> Result<bool> {
             ensure!(
                 !key.ends_with(".replicated"),
                 "coverage publication unavailable"
             );
-            self.0.compare_and_swap(key, generation, bytes).await
+            self.0.compare_and_swap(key, revision, bytes).await
         }
     }
     let f = Fixture::new()?;
@@ -688,7 +688,7 @@ async fn manifests_cannot_redirect_a_reader_to_another_actors_log() -> Result<()
         f.archive
             .compare_and_swap(
                 &left,
-                Some(stored.generation),
+                Some(stored.revision.clone()),
                 crate::payload::encode(&manifest)?
             )
             .await?

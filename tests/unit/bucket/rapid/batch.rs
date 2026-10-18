@@ -57,7 +57,7 @@ impl Bucket for ArchiveBucket {
     async fn compare_and_swap(
         &self,
         key: &str,
-        generation: Option<i64>,
+        revision: Option<crate::bucket::StorageRevision>,
         bytes: bytes::Bytes,
     ) -> Result<bool> {
         if key.ends_with(".checkpoint") {
@@ -80,7 +80,7 @@ impl Bucket for ArchiveBucket {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
         }
-        self.inner.compare_and_swap(key, generation, bytes).await
+        self.inner.compare_and_swap(key, revision, bytes).await
     }
 }
 
@@ -267,7 +267,7 @@ async fn checkpoints_compact_sqlite_history_for_cold_recovery() -> Result<()> {
         f.archive
             .compare_and_swap(
                 &key,
-                Some(stored.generation),
+                Some(stored.revision.clone()),
                 crate::payload::encode(&checkpoint)?
             )
             .await?
@@ -932,7 +932,7 @@ async fn unavailable_or_invalid_indexes_preserve_archive_recovery() -> Result<()
         let stored = f.archive.get(&key).await?.unwrap();
         assert!(
             f.archive
-                .compare_and_swap(&key, Some(stored.generation), bytes)
+                .compare_and_swap(&key, Some(stored.revision.clone()), bytes)
                 .await?
         );
         assert_eq!(reader.get(&f.stream.object(2)).await?, Some(state(2, 1)?));
