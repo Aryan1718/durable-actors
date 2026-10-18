@@ -1,4 +1,27 @@
 use super::*;
+
+#[tokio::test]
+async fn file_bucket_rejects_etag_conditions_without_changing_contents() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let bucket = FileBucket::new(directory.path().into())?;
+    let key = "owner.json";
+    assert!(
+        bucket
+            .compare_and_swap(key, None, bytes::Bytes::from_static(b"owner"))
+            .await?
+    );
+    let result = bucket
+        .compare_and_swap(
+            key,
+            Some(crate::bucket::StorageRevision::ETag("\"opaque\"".into())),
+            bytes::Bytes::from_static(b"replacement"),
+        )
+        .await;
+    assert!(result.is_err());
+    assert_eq!(bucket.get(key).await?.unwrap().bytes.as_ref(), b"owner");
+    Ok(())
+}
+
 use std::{
     io::{BufRead, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},
@@ -16,17 +39,30 @@ async fn independent_local_clients_share_atomic_generations_across_restart() -> 
             .compare_and_swap(key, None, bytes::Bytes::from_static(b"initial"))
             .await?
     );
-    let generation = first.get(key).await?.unwrap().generation;
+    let generation = first
+        .get(key)
+        .await?
+        .unwrap()
+        .revision
+        .require_generation()?;
     let (one, two) = tokio::join!(
-        first.compare_and_swap(key, Some(generation), bytes::Bytes::from_static(b"one")),
-        second.compare_and_swap(key, Some(generation), bytes::Bytes::from_static(b"two"))
+        first.compare_and_swap(
+            key,
+            Some(crate::bucket::StorageRevision::Generation(generation)),
+            bytes::Bytes::from_static(b"one")
+        ),
+        second.compare_and_swap(
+            key,
+            Some(crate::bucket::StorageRevision::Generation(generation)),
+            bytes::Bytes::from_static(b"two")
+        )
     );
     assert_ne!(one?, two?);
     drop(first);
     drop(second);
     let reopened = FileBucket::new(directory.path().into())?;
     let object = reopened.get(key).await?.unwrap();
-    assert_eq!(object.generation, generation + 1);
+    assert_eq!(object.revision.require_generation()?, generation + 1);
     assert!(object.bytes.as_ref() == b"one" || object.bytes.as_ref() == b"two");
     assert_eq!(reopened.list("runtime/owners/").await?, [key]);
     assert!(reopened.list("other/").await?.is_empty());
@@ -57,7 +93,11 @@ async fn an_object_lock_blocks_only_its_own_writes_and_survives_replacement() ->
     let writer = FileBucket::new(directory.path().into())?;
     let mut pending = tokio::spawn(async move {
         writer
-            .compare_and_swap(key, Some(1), bytes::Bytes::from_static(b"next"))
+            .compare_and_swap(
+                key,
+                Some(crate::bucket::StorageRevision::Generation(1)),
+                bytes::Bytes::from_static(b"next"),
+            )
             .await
     });
     let blocked = tokio::time::timeout(Duration::from_millis(100), &mut pending).await;
@@ -83,7 +123,11 @@ async fn an_object_lock_blocks_only_its_own_writes_and_survives_replacement() ->
     let writer = FileBucket::new(directory.path().into())?;
     let mut pending = tokio::spawn(async move {
         writer
-            .compare_and_swap(key, Some(2), bytes::Bytes::from_static(b"last"))
+            .compare_and_swap(
+                key,
+                Some(crate::bucket::StorageRevision::Generation(2)),
+                bytes::Bytes::from_static(b"last"),
+            )
             .await
     });
     assert!(
@@ -109,7 +153,15 @@ async fn competing_processes_have_one_winner_for_create_and_update() -> Result<(
         second.start_write()?;
         assert_ne!(first.result()?, second.result()?);
     }
-    assert_eq!(bucket.get(key).await?.unwrap().generation, 3);
+    assert_eq!(
+        bucket
+            .get(key)
+            .await?
+            .unwrap()
+            .revision
+            .require_generation()?,
+        3
+    );
     Ok(())
 }
 
@@ -131,7 +183,7 @@ async fn readers_observe_complete_versions_during_replacement() -> Result<()> {
                 writer
                     .compare_and_swap(
                         key,
-                        Some(generation),
+                        Some(crate::bucket::StorageRevision::Generation(generation)),
                         vec![(generation + 1) as u8; size].into()
                     )
                     .await?
@@ -146,14 +198,22 @@ async fn readers_observe_complete_versions_during_replacement() -> Result<()> {
             object
                 .bytes
                 .iter()
-                .all(|byte| *byte == object.generation as u8)
+                .all(|byte| *byte == object.revision.require_generation().unwrap() as u8)
         );
         if writes.is_finished() {
             break;
         }
     }
     writes.await??;
-    assert_eq!(reader.get(key).await?.unwrap().generation, 33);
+    assert_eq!(
+        reader
+            .get(key)
+            .await?
+            .unwrap()
+            .revision
+            .require_generation()?,
+        33
+    );
     Ok(())
 }
 
@@ -252,7 +312,9 @@ fn subprocess_client() -> Result<()> {
         let expected = if expected == "absent" {
             None
         } else {
-            Some(expected.parse()?)
+            Some(crate::bucket::StorageRevision::Generation(
+                expected.parse()?,
+            ))
         };
         let bucket = FileBucket::new(directory)?;
         let result = tokio::runtime::Runtime::new()?.block_on(bucket.compare_and_swap(

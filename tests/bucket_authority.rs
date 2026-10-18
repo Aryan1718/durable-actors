@@ -59,7 +59,7 @@ impl Bucket for MemoryBucket {
     async fn compare_and_swap(
         &self,
         key: &str,
-        generation: Option<i64>,
+        revision: Option<durable_actors::bucket::StorageRevision>,
         bytes: bytes::Bytes,
     ) -> Result<bool> {
         anyhow::ensure!(
@@ -71,8 +71,8 @@ impl Bucket for MemoryBucket {
             "ownership writes unavailable"
         );
         let mut objects = self.objects.lock().unwrap();
-        let current = objects.get(key).map(|object| object.generation);
-        if current != generation {
+        let current = objects.get(key).map(|object| object.revision.clone());
+        if current != revision {
             return Ok(false);
         }
         if key.contains("/owners/") {
@@ -81,7 +81,14 @@ impl Bucket for MemoryBucket {
         objects.insert(
             key.into(),
             BucketObject {
-                generation: current.unwrap_or(0) + 1,
+                revision: durable_actors::bucket::StorageRevision::Generation(
+                    current
+                        .as_ref()
+                        .map(durable_actors::bucket::StorageRevision::require_generation)
+                        .transpose()?
+                        .unwrap_or(0)
+                        + 1,
+                ),
                 bytes,
             },
         );
@@ -156,10 +163,10 @@ async fn simultaneous_claims_from_the_same_observed_generation_have_one_winner()
         async fn compare_and_swap(
             &self,
             key: &str,
-            generation: Option<i64>,
+            revision: Option<durable_actors::bucket::StorageRevision>,
             bytes: bytes::Bytes,
         ) -> Result<bool> {
-            self.inner.compare_and_swap(key, generation, bytes).await
+            self.inner.compare_and_swap(key, revision, bytes).await
         }
         async fn list(&self, prefix: &str) -> Result<Vec<String>> {
             self.inner.list(prefix).await
