@@ -92,6 +92,11 @@ impl LogZone for GcsZone {
         &self.bucket
     }
 
+    fn validate_identity(&self, replica: &Replica) -> Result<()> {
+        ensure!(replica.gcs_generation()? > 0, "invalid GCS generation");
+        Ok(())
+    }
+
     async fn open(&self, object: &str) -> Result<(Replica, Box<dyn LogWriter>)> {
         let writer = self
             .clients
@@ -103,18 +108,21 @@ impl LogZone for GcsZone {
         let replica = Replica {
             bucket: self.bucket.clone(),
             object: object.into(),
-            generation: writer.generation(),
+            identity: ReplicaIdentity::Gcs {
+                generation: writer.generation(),
+            },
         };
         Ok((replica, Box::new(GcsWriter(writer))))
     }
 
     async fn read(&self, replica: &Replica, fence: bool) -> Result<Bytes> {
         let _transfer = self.clients.transfers.acquire().await?;
+        let generation = replica.gcs_generation()?;
         let mut writer = if fence {
             Some(
                 self.clients
                     .storage
-                    .reopen_appendable_object(&self.bucket, &replica.object, replica.generation)
+                    .reopen_appendable_object(&self.bucket, &replica.object, generation)
                     .send()
                     .await?,
             )
@@ -133,7 +141,7 @@ impl LogZone for GcsZone {
             .clients
             .storage
             .open_object(&self.bucket, &replica.object)
-            .set_generation(replica.generation)
+            .set_generation(generation)
             .send()
             .await?;
         let size = descriptor.object().size;
@@ -166,7 +174,7 @@ impl LogZone for GcsZone {
             .clients
             .storage
             .open_object(&self.bucket, &replica.object)
-            .set_generation(replica.generation)
+            .set_generation(replica.gcs_generation()?)
             .send()
             .await?;
         let mut reader = descriptor
@@ -191,7 +199,7 @@ impl LogZone for GcsZone {
             .delete_object()
             .set_bucket(&self.bucket)
             .set_object(&replica.object)
-            .set_if_generation_match(replica.generation)
+            .set_if_generation_match(replica.gcs_generation()?)
             .send()
             .await
         {
