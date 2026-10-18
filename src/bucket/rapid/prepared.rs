@@ -28,9 +28,17 @@ async fn open(zones: &[Arc<dyn LogZone>], object: &str) -> Result<Option<Opened>
     let results =
         futures_util::future::join_all(zones.iter().map(|zone| bounded(zone.open(object)))).await;
     let mut opened = Vec::new();
-    for result in results {
+    for (zone, result) in zones.iter().zip(results) {
         match result {
-            Ok(copy) => opened.push(copy),
+            Ok((replica, writer)) => {
+                if let Err(error) = validate_replica(zone.as_ref(), &replica, object) {
+                    tracing::warn!(%error, "Rapid log replica invalid; activation will use Standard");
+                    drop(writer);
+                    let _ = bounded(zone.delete(&replica)).await;
+                } else {
+                    opened.push((replica, writer));
+                }
+            }
             Err(error) => {
                 tracing::warn!(%error, "Rapid log unavailable; activation will use Standard")
             }

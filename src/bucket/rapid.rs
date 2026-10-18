@@ -32,7 +32,22 @@ pub(crate) const RAPID_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 struct Replica {
     bucket: String,
     object: String,
-    generation: i64,
+    #[serde(flatten)]
+    identity: ReplicaIdentity,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ReplicaIdentity {
+    Gcs { generation: i64 },
+}
+
+impl Replica {
+    fn gcs_generation(&self) -> Result<i64> {
+        match self.identity {
+            ReplicaIdentity::Gcs { generation } => Ok(generation),
+        }
+    }
 }
 
 #[async_trait]
@@ -43,10 +58,20 @@ trait LogWriter: Send {
 #[async_trait]
 trait LogZone: Send + Sync {
     fn bucket(&self) -> &str;
+    fn validate_identity(&self, replica: &Replica) -> Result<()>;
     async fn open(&self, object: &str) -> Result<(Replica, Box<dyn LogWriter>)>;
     async fn read(&self, replica: &Replica, fence: bool) -> Result<Bytes>;
     async fn read_range(&self, replica: &Replica, start: u64, length: u64) -> Result<Bytes>;
     async fn delete(&self, replica: &Replica) -> Result<()>;
+}
+
+fn validate_replica(zone: &dyn LogZone, replica: &Replica, object: &str) -> Result<()> {
+    ensure!(
+        replica.bucket == zone.bucket() && replica.object == object,
+        "invalid log replica descriptor"
+    );
+    zone.validate_identity(replica)
+        .context("invalid log replica descriptor")
 }
 
 pub(crate) struct RapidSnapshots {
@@ -303,12 +328,7 @@ impl Manifest {
         );
         ensure!(self.replicas.len() == zones.len(), "missing log replicas");
         for (replica, zone) in self.replicas.iter().zip(zones) {
-            ensure!(
-                replica.bucket == zone.bucket()
-                    && replica.object == self.object()?
-                    && replica.generation > 0,
-                "invalid log replica descriptor"
-            );
+            validate_replica(zone.as_ref(), replica, &self.object()?)?;
         }
         Ok(())
     }
