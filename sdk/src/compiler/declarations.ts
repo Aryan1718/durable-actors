@@ -73,7 +73,7 @@ class DeclarationCompiler {
             const projected = projectActor(emitted, actor, contract, program.getTypeChecker())
             const file = path.join(directory, `actor-${index}.d.ts`)
             const code = resolveImports(
-                projected.code,
+                eraseUnchecked(projected.code),
                 source.fileName,
                 program.getCompilerOptions(),
                 this.system,
@@ -245,6 +245,41 @@ function availableName(source: ts.SourceFile, proposed: string): string {
 function propertyName(name: ts.PropertyName): string {
     if (ts.isComputedPropertyName(name) && ts.isStringLiteral(name.expression)) return name.expression.text
     return ts.isIdentifier(name) || ts.isStringLiteral(name) || ts.isNumericLiteral(name) ? name.text : name.getText()
+}
+
+function eraseUnchecked(text: string): string {
+    const source = ts.createSourceFile("actor.d.ts", text, ts.ScriptTarget.Latest, true)
+    const used = new Set<string>()
+    const collect = (node: ts.Node): void => {
+        if (ts.isImportDeclaration(node) || isUnchecked(node)) return
+        if (ts.isIdentifier(node)) used.add(node.text)
+        ts.forEachChild(node, collect)
+    }
+    collect(source)
+    const result = ts.transform(source, [
+        context => root =>
+            ts.visitNode(root, function visit(node: ts.Node): ts.VisitResult<ts.Node | undefined> {
+                if (isUnchecked(node)) return ts.factory.createKeywordTypeNode(ts.SyntaxKind.UnknownKeyword)
+                if (ts.isImportSpecifier(node) && !used.has(node.name.text)) return undefined
+                const visited = ts.visitEachChild(node, visit, context)
+                return ts.isImportDeclaration(visited) && isEmptyImport(visited) ? undefined : visited
+            }) as ts.SourceFile
+    ])
+    const code = ts.createPrinter().printFile(result.transformed[0])
+    result.dispose()
+    return code
+}
+
+// TODO: Make this handle import renames. import { type Unchecked as Opaque } from "durable-actors" will fail
+function isUnchecked(node: ts.Node): boolean {
+    const name = ts.isTypeReferenceNode(node) ? node.typeName : ts.isImportTypeNode(node) ? node.qualifier : undefined
+    return name !== undefined && ts.isIdentifier(name) && name.text === "Unchecked"
+}
+
+function isEmptyImport(declaration: ts.ImportDeclaration): boolean {
+    const clause = declaration.importClause
+    const bindings = clause?.namedBindings
+    return !!clause && !clause.name && !!bindings && ts.isNamedImports(bindings) && !bindings.elements.length
 }
 
 function resolveImports(

@@ -47,7 +47,7 @@ class ActorCompiler {
     }
 
     compileDeployment(entrypoint: string, options: CompilerOptions = {}) {
-        const { checker, actors, schemas, program } = this.describe(entrypoint, options)
+        const { checker, actors, schemas, program, sdk } = this.describe(entrypoint, options)
         const api = {
             actors: [...schemas]
                 .sort((left, right) =>
@@ -67,7 +67,8 @@ class ActorCompiler {
                     },
                     rpc: rpcContract(
                         checker,
-                        actors.find(actor => actor.name!.text === schema.actorName)!
+                        actors.find(actor => actor.name!.text === schema.actorName)!,
+                        sdk.Unchecked
                     )
                 }))
         }
@@ -88,12 +89,14 @@ class ActorCompiler {
             program,
             checker,
             actors,
+            sdk,
             schemas: schemas.map(schema => ({
                 ...schema,
                 contract: socketContract(
                     checker,
                     actors.find(actor => actor.name!.text === schema.actorName)!,
-                    schema
+                    schema,
+                    sdk.Unchecked
                 )
             }))
         }
@@ -372,6 +375,7 @@ function resolveSdkSymbols(checker: ts.TypeChecker, source: ts.SourceFile): SdkS
     const compute = exports.find(symbol => symbol.name === "Compute")
     const resource = exports.find(symbol => symbol.name === "Resource")
     const actorResource = exports.find(symbol => symbol.name === "ActorResource")
+    const unchecked = exports.find(symbol => symbol.name === "Unchecked")
     return {
         Actor: resolve("Actor"),
         Persisted: resolve("Persisted"),
@@ -379,6 +383,7 @@ function resolveSdkSymbols(checker: ts.TypeChecker, source: ts.SourceFile): SdkS
         Emittable: resolve("Emittable"),
         ...(atomic === undefined ? {} : { Atomic: canonicalSymbol(checker, atomic) }),
         ...(compute === undefined ? {} : { Compute: canonicalSymbol(checker, compute) }),
+        ...(unchecked === undefined ? {} : { Unchecked: canonicalSymbol(checker, unchecked) }),
         ...(interleave === undefined ? {} : { Interleave: canonicalSymbol(checker, interleave) }),
         ...(resource === undefined ? {} : { Resource: canonicalSymbol(checker, resource) }),
         ...(actorResource === undefined ? {} : { ActorResource: canonicalSymbol(checker, actorResource) })

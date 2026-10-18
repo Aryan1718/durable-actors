@@ -16,3 +16,4 @@ export type {
     ActorSocketState
 } from "./actor/socket.js"
 export type { ActorSchemas, ActorStateMessage, ActorStateUpdate } from "./actor/socketValidation.js"
+export { type Unchecked, unchecked } from "./actor/unchecked.js"

@@ -18,6 +18,7 @@ interface SdkSymbols {
     readonly Interleave?: ts.Symbol
     readonly Compute?: ts.Symbol
     readonly Resource?: ts.Symbol
+    readonly Unchecked?: ts.Symbol
 }
 
 enum AnnotationKind {

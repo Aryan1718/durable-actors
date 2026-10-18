@@ -1,14 +1,14 @@
 import { DurablePiAgent } from "@durable-actors/pi-durable"
 import { createModels } from "@earendil-works/pi-ai"
 import { openaiProvider } from "@earendil-works/pi-ai/providers/openai"
-import { createRegistry } from "@earendil-works/pi-durable"
-import { Actor, Resource } from "durable-actors"
+import { ConversationView, createRegistry } from "@earendil-works/pi-durable"
+import { Actor, Resource, Unchecked } from "durable-actors"
 
 const models = createModels()
 models.setProvider(openaiProvider())
 const registry = createRegistry()
 
-export class PiAgent extends Actor {
+export class PiAgent extends Actor<null, null, Unchecked<ConversationView>> {
     @Resource private readonly agent = new DurablePiAgent({
         models,
         registry,

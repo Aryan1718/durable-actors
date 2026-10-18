@@ -226,6 +226,28 @@ test("recursive JSON dictionaries retain undefined without widening other uses",
     `)
 })
 
+test("unchecked values skip JSON checks and accept any JSON on RPC and sockets", async t => {
+    const project = await createProject(t)
+    await project.generate(`
+        import { type Unchecked, unchecked } from "durable-actors"
+        declare const brand: unique symbol
+        type Opaque = { readonly [brand]: string }
+        export class Room extends Actor<{}, never, { value: Unchecked<Opaque> }> {
+            async latest(): Promise<Unchecked<readonly Opaque[]>> { return unchecked([]) }
+        }
+    `)
+    const { rpc, socket } = project.contract().actors[0]
+    const result = rpc.methods[0].result
+    assert.equal(result.kind, "value")
+    const latest = new Ajv().compile({ ...rpc.schema, ...(result.kind === "value" ? result.type : {}) })
+    assert.equal(latest([{ any: "shape" }]), true)
+    assert.equal(latest("text"), true)
+    const outgoing = new Ajv().compile({ ...socket.schema, $ref: "#/definitions/Outgoing" })
+    assert.equal(outgoing({ value: [1, 2] }), true)
+    assert.equal(outgoing({ value: null }), true)
+    assert.equal(outgoing({}), false)
+})
+
 test("declarations preserve readonly types across RPC, sockets and public state", async t => {
     const project = await createProject(t)
     await project.generate(`

@@ -7,7 +7,12 @@ import type { SocketContract } from "../wire/contract.js"
 
 import { assertJsonType, jsonSchema } from "./json-schema.js"
 
-function socketContract(checker: ts.TypeChecker, actor: ts.ClassDeclaration, schema: ActorSchema): SocketContract {
+function socketContract(
+    checker: ts.TypeChecker,
+    actor: ts.ClassDeclaration,
+    schema: ActorSchema,
+    unchecked: ts.Symbol | undefined
+): SocketContract {
     const instance = checker.getTypeAtLocation(actor)
     const base = instance.getBaseTypes()![0] as ts.TypeReference
     const [metadata, incoming, outgoing] = checker.getTypeArguments(base)
@@ -25,8 +30,8 @@ function socketContract(checker: ts.TypeChecker, actor: ts.ClassDeclaration, sch
         else state.required!.push(field.name)
     }
     for (const [name, type] of Object.entries(types))
-        assertJsonType(checker, type, `${schema.actorName}.${name}`, optional.has(name))
-    const generated = jsonSchema(checker, types)
+        assertJsonType(checker, unchecked, type, `${schema.actorName}.${name}`, optional.has(name))
+    const generated = jsonSchema(checker, unchecked, types)
     const definitions = { ...generated.definitions, State: state }
     return {
         version: 1,

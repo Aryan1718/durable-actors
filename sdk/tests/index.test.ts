@@ -33,7 +33,8 @@ test("the package root exposes the complete minimal actor API", () => {
         "Ephemeral",
         "Interleave",
         "Persisted",
-        "Resource"
+        "Resource",
+        "unchecked"
     ])
 })
 

@@ -4,8 +4,12 @@ import { JsonSchemaGenerator, getDefaultArgs } from "typescript-json-schema"
 
 import { ActorDefinitionError } from "../errors.js"
 
-function jsonSchema(checker: ts.TypeChecker, types: Record<string, ts.Type>): JSONSchema7 {
-    const { allTypes, namesByType } = collectSchemaTypes(checker, types)
+function jsonSchema(
+    checker: ts.TypeChecker,
+    unchecked: ts.Symbol | undefined,
+    types: Record<string, ts.Type>
+): JSONSchema7 {
+    const { allTypes, namesByType } = collectSchemaTypes(checker, unchecked, types)
     const generator = new JsonSchemaGenerator([], allTypes, {}, {}, checker, {
         ...getDefaultArgs(),
         required: true,
@@ -27,11 +31,11 @@ function jsonSchema(checker: ts.TypeChecker, types: Record<string, ts.Type>): JS
     }
     const seen = new Set<JSONSchema7>()
     for (const [name, type] of Object.entries(allTypes))
-        preserveTypes(checker, type, definitions[name], definitions, namesByType, seen)
+        preserveTypes(checker, unchecked, type, definitions[name], definitions, namesByType, seen)
     return { $schema: "http://json-schema.org/draft-07/schema#", definitions }
 }
 
-function collectSchemaTypes(checker: ts.TypeChecker, roots: Record<string, ts.Type>) {
+function collectSchemaTypes(checker: ts.TypeChecker, unchecked: ts.Symbol | undefined, roots: Record<string, ts.Type>) {
     const allTypes = { ...roots }
     const namesByType = new Map(Object.entries(roots).map(([name, type]) => [type, name]))
     const seen = new Set<ts.Type>()
@@ -44,7 +48,7 @@ function collectSchemaTypes(checker: ts.TypeChecker, roots: Record<string, ts.Ty
         visit(type)
     }
     const visit = (type: ts.Type) => {
-        if (seen.has(type)) return
+        if (seen.has(type) || isUnchecked(type, unchecked)) return
         seen.add(type)
         if (type.isUnionOrIntersection()) {
             type.types.forEach(register)
@@ -68,6 +72,7 @@ function collectSchemaTypes(checker: ts.TypeChecker, roots: Record<string, ts.Ty
 
 function preserveTypes(
     checker: ts.TypeChecker,
+    unchecked: ts.Symbol | undefined,
     type: ts.Type,
     schema: JSONSchema7Definition | undefined,
     definitions: Record<string, JSONSchema7Definition>,
@@ -76,6 +81,10 @@ function preserveTypes(
 ): void {
     if (!schema || typeof schema === "boolean" || seen.has(schema)) return
     seen.add(schema)
+    if (isUnchecked(type, unchecked)) {
+        for (const key of Object.keys(schema)) delete schema[key as keyof JSONSchema7]
+        return
+    }
     const reference = (child: ts.Type) => ({
         $ref: `#/definitions/${namesByType.get(child)!.replaceAll("~", "~0").replaceAll("/", "~1")}`
     })
@@ -97,7 +106,7 @@ function preserveTypes(
         const key = decodeURIComponent(schema.$ref.slice("#/definitions/".length))
             .replaceAll("~1", "/")
             .replaceAll("~0", "~")
-        preserveTypes(checker, type, definitions[key], definitions, namesByType, seen)
+        preserveTypes(checker, unchecked, type, definitions[key], definitions, namesByType, seen)
         return
     }
     const title = sourceTypeName(type)
@@ -108,7 +117,7 @@ function preserveTypes(
         return
     }
     preserveChildren(checker, type, schema, (child, definition) =>
-        preserveTypes(checker, child, definition, definitions, namesByType, seen)
+        preserveTypes(checker, unchecked, child, definition, definitions, namesByType, seen)
     )
     const indexType = checker.getIndexTypeOfType(type, ts.IndexKind.String)
     if (indexType && type.flags & ts.TypeFlags.Object && !isArray(checker, type))
@@ -157,6 +166,7 @@ function sourceTypeName(type: ts.Type): string | undefined {
 
 function assertJsonType(
     checker: ts.TypeChecker,
+    unchecked: ts.Symbol | undefined,
     type: ts.Type,
     label: string,
     optional = false,
@@ -169,10 +179,10 @@ function assertJsonType(
         )
     }
     if (type.isUnionOrIntersection()) {
-        for (const member of type.types) assertJsonType(checker, member, label, optional, seen)
+        for (const member of type.types) assertJsonType(checker, unchecked, member, label, optional, seen)
         return
     }
-    if (seen.has(type)) return
+    if (seen.has(type) || isUnchecked(type, unchecked)) return
     seen.add(type)
     if (
         type.flags &
@@ -186,7 +196,7 @@ function assertJsonType(
         return
     if (checker.isArrayType(type) || checker.isTupleType(type) || type.getSymbol()?.name === "ReadonlyArray") {
         for (const element of checker.getTypeArguments(type as ts.TypeReference))
-            assertJsonType(checker, element, label, false, seen)
+            assertJsonType(checker, unchecked, element, label, false, seen)
         return
     }
     if (
@@ -204,13 +214,19 @@ function assertJsonType(
             throw new ActorDefinitionError(`${label} must be JSON-compatible; symbol properties are not supported`)
         assertJsonType(
             checker,
+            unchecked,
             checker.getTypeOfSymbolAtLocation(property, declaration),
             `${label}.${property.name}`,
             !!(property.flags & ts.SymbolFlags.Optional),
             seen
         )
     }
-    for (const index of checker.getIndexInfosOfType(type)) assertJsonType(checker, index.type, label, true, seen)
+    for (const index of checker.getIndexInfosOfType(type))
+        assertJsonType(checker, unchecked, index.type, label, true, seen)
+}
+
+function isUnchecked(type: ts.Type, unchecked: ts.Symbol | undefined): boolean {
+    return unchecked !== undefined && type.getSymbol() === unchecked
 }
 
 export { assertJsonType, jsonSchema, sourceTypeName }
