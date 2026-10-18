@@ -19,5 +19,6 @@ jobs:
             - name: Require a Durable Actors ticket and release category
               env:
                   PR_HEAD_REF: ${{ github.head_ref }}
+                  PR_BODY: ${{ github.event.pull_request.body }}
                   PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
               run: node scripts/check-pr-ticket.mjs

@@ -157,7 +157,7 @@ Repeat for `python` and `control-plane`. CI runs each target on amd64 and arm64.
 
 ## Open a pull request
 
-Include exactly one Durable Actors ticket ID in the source branch, for example `your-name/DUR-123-fix-reconnect`. The `Ticket branch` check rejects missing, malformed, ambiguous, or other-team IDs. Release PRs follow the same rule. This checks the identifier format without accessing Linear; ask a maintainer for the corresponding DUR ticket if you do not have Linear access. Include `Fixes DUR-123` in the PR description so the integration can link and complete the ticket.
+Include exactly one Durable Actors ticket ID in the source branch, for example `your-name/DUR-123-fix-reconnect`, or as `Fixes DUR-123` in the PR description. The `Ticket branch` check rejects missing, malformed, ambiguous, conflicting, or other-team IDs. Release PRs follow the same rule. This checks the identifier format without accessing Linear. If you do not have Linear access, open the PR anyway; a maintainer will add the corresponding `Fixes DUR-123` line to the description. Always include it in the description so the integration can link and complete the ticket.
 
 Also include `Closes #123` for the corresponding GitHub issue. A maintainer applies exactly one release label: `release:feature`, `release:fix`, or `release:skip` for changes with no user-visible effect, including version-only release PRs. The same required check enforces this choice. Write the PR title as a concise description of the user-visible change: it becomes a bullet under **Features** or **Fixes** in the release notes. Put detailed migration guidance in the linked PR. External contributors can open a PR before a maintainer applies the label.
 
