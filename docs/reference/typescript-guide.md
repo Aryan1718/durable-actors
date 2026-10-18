@@ -195,6 +195,54 @@ socket.addEventListener("message", event => {
 })
 ```
 
+## Using @Resource
+
+It's common to tie a Durable Actor with other pieces of infra such as a Sandbox or a Coding Harness. The problem, is that those have a different lifecycle (ex: sandboxes can be up for days). In order to simplify the core logic of your actor, you can create Resources and tie them to the lifecycle of the Durable Actor.
+
+First, create you resource:
+
+```typescript
+class ModalSandbox implements ActorResource {
+    private _sandbox: Sandbox | undefined;
+
+    get sandbox(): Sandbox {
+        if (this._sandbox === undefined) {
+            throw new Error("Sandbox not created")
+        }
+        return this._sandbox
+    }
+
+    constructor(private readonly db: ActorDatabase) {
+        this.modal = new ModalClient({
+            tokenId: process.env.MODAL_TOKEN_ID,
+            tokenSecret: process.env.MODAL_TOKEN_SECRET,
+        });
+
+        this.resourceKV = new ResourceKV(this.db, "modal_sandbox")
+    }
+
+    async onResume(): Promise<void> {
+        // check if sandbox is up, start a new one if not
+    }
+
+    async onGracefulShutdown(): Promise<void> {
+        // nice to have cleanup, not called when actor crashes.
+    }
+}
+```
+
+Then link it to your actor:
+
+```typescript
+export class PiAgent extends Actor<null, string, Outgoing> {
+    @Resource private sandbox = new ModalSandbox(this.db)
+
+    async snapshot() {
+        this.sandbox.snapshot() // this is guaranteed to be available, no need to check and handle the edge case every time.
+    }
+}
+```
+
 ## Scheduling an alarm
 
 Each actor has one alarm. Setting it again replaces the previous timestamp. When the timestamp is due, the runtime wakes the actor and runs `onAlarm`.
@@ -304,3 +352,48 @@ export class BankAccount extends Actor {
     @Persisted @Emittable balance = 0
 }
 ```
+
+
+## Using Unchecked<> 
+
+A lof of the types found in Pi-durable, Vercel ai-sdk etc..are serializable but their type information is very complex.
+
+You can opt out of type generation for these types to make your generated client mark them as `unknown`. 
+
+This is actually how pi-durable suggests getting their `op` messages across the the wire.
+
+```typescript
+import { Op } from "@earendil-works/chord/delta";
+import { ConversationView } from "@earendil-works/pi-durable"
+
+type Outgoing =
+| { type: "view"; view: Unchecked<ConversationView> }
+| { type: "ops"; ops: Unchecked<readonly Op[]> }
+
+export class PiAgent extends Actor<null, string, Outgoing> {}
+
+```
+
+And then on your client:
+
+```typescript
+import { applyImmutable, type Op } from "@earendil-works/chord/delta";
+import type { ConversationView } from "@earendil-works/pi-durable";
+
+socket.onmessage = ({ data }) => {
+    if (current === this.generation) this.receive(JSON.parse(data));
+};
+
+receive(event: Outgoing) {
+    if ("status" in event) {
+      this.update({ preview: event });
+    } else if (event.type === "view") {
+      this.update({ connection: "connected", view: event.view as ConversationView });
+    } else if (this.snapshot.view) {
+        this.update({ view: applyImmutable(this.snapshot.view, event.ops as readonly Op[]) });
+    }
+}
+
+```
+
+This **only** impacts the client generation process. You still get full type-safety within the actor!

@@ -125,8 +125,7 @@ export class Staging {
         console.log(`Building this checkout's runtime and ${this.example} actor bundle…`)
         await this.command("bun", ["run", "--bun", "--cwd", "sdk", "build"], { stream: true })
         const project = JSON.parse(await readFile(path.join(this.examplePath, "package.json"), "utf8"))
-        if (project.dependencies?.["@durable-actors/pi-durable"])
-            await this.command("bun", ["run", "--bun", "--cwd", "packages/pi-durable", "build"], { stream: true })
+        if (project.dependencies?.["@durable-actors/pi-durable"]) await this.command("bun", ["run", "--bun", "--cwd", "packages/pi-durable", "build"], { stream: true })
         await this.command("cargo", ["build", "--locked", "--bin", "durable-actors"], { stream: true })
         this.env.DURABLE_ACTORS_BINARY = path.join(this.root, "target/debug/durable-actors")
         const contract = JSON.parse(await this.command(process.execPath, [path.join(this.root, "sdk/dist/compiler/deployment-build.js"), this.examplePath, "src/actors.ts", this.work]))
@@ -191,7 +190,7 @@ export class Staging {
                 if (value !== this.env.DURABLE_ACTORS_PUBLIC_URL) throw new Error("ngrok URL differs from .env.staging; update NGROK_DOMAIN and the three URL settings together")
             }
         })
-        const serving = tunnel.run({ startRuntime: true }).then(code => {
+        const serving = tunnel.run({ startRuntime: true, configuredEndpoints: true }).then(code => {
             throw new Error(`Staging processes stopped (exit ${code})`)
         })
         try {
@@ -212,7 +211,29 @@ export class Staging {
         await mkdir(this.work, { recursive: true })
         const cwd = await mkdtemp(path.join(this.work, "server-"))
         const env = { ...this.env, NGROK_CONFIG: path.join(cwd, "ngrok.yml") }
-        await writeFile(env.NGROK_CONFIG, 'version: "3"\nagent:\n  web_addr: false\n', { mode: 0o600 })
+        const upstream = `http://${this.env.DURABLE_ACTORS_CONTROL_PLANE_BIND}`
+        const socketUrl = `https://${new URL(this.env.DURABLE_ACTORS_PUBLIC_URL).hostname.replaceAll(".", "-")}-socket.internal`
+        const config = {
+            version: "3",
+            agent: { web_addr: false },
+            endpoints: [
+                {
+                    name: "control-plane",
+                    url: this.env.DURABLE_ACTORS_PUBLIC_URL,
+                    upstream: { url: upstream, protocol: "http2" },
+                    traffic_policy: {
+                        on_http_request: [
+                            {
+                                expressions: ["req.url.path == '/v1/socket'"],
+                                actions: [{ type: "forward-internal", config: { url: socketUrl } }]
+                            }
+                        ]
+                    }
+                },
+                { name: "socket", url: socketUrl, upstream: { url: upstream, protocol: "http1" } }
+            ]
+        }
+        await writeFile(env.NGROK_CONFIG, JSON.stringify(config, null, 2), { mode: 0o600 })
         return { cwd, env }
     }
 

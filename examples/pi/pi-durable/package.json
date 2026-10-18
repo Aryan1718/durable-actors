@@ -9,9 +9,11 @@
     },
     "dependencies": {
         "@durable-actors/pi-durable": "workspace:*",
-        "@earendil-works/pi-ai": "1.1.0",
-        "@earendil-works/pi-durable": "1.1.0",
-        "durable-actors": "workspace:*"
+        "@earendil-works/chord": "1.2.0",
+        "@earendil-works/pi-ai": "1.2.0",
+        "@earendil-works/pi-durable": "1.2.0",
+        "durable-actors": "workspace:*",
+        "modal": "^0.11.0"
     },
     "devDependencies": {
         "@types/node": "^22.0.0",

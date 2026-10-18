@@ -13,8 +13,8 @@ export class NgrokTunnel {
         this.environmentFile = environmentFile
     }
 
-    async run({ startRuntime = false } = {}) {
-        const child = this.launch("ngrok", this.arguments(), { env: this.environment, stdio: ["ignore", "pipe", "inherit"] })
+    async run({ startRuntime = false, configuredEndpoints = false } = {}) {
+        const child = this.launch("ngrok", this.arguments(configuredEndpoints), { env: this.environment, stdio: ["ignore", "pipe", "inherit"] })
         const closed = once(child, "close")
         const lines = createInterface({ input: child.stdout })
         let runtime
@@ -75,7 +75,8 @@ export class NgrokTunnel {
         }
     }
 
-    arguments() {
+    arguments(configuredEndpoints = false) {
+        if (configuredEndpoints) return ["start", "--all", "--config", this.environment.NGROK_CONFIG, "--log=stdout", "--log-format=json", "--log-level=info"]
         const bind = this.environment.DURABLE_ACTORS_CONTROL_PLANE_BIND || "127.0.0.1:7100"
         const upstream = new URL(`http://${bind}`)
         if (upstream.pathname !== "/" || upstream.search || upstream.hash || upstream.username || upstream.password || !/^[1-9]\d*$/.test(upstream.port || "80")) {
@@ -100,6 +101,7 @@ export class NgrokTunnel {
         }
         if (event.msg !== "started tunnel" || !event.url?.startsWith("https://")) return
         const origin = httpsOrigin(event.url)
+        if (new URL(origin).hostname.endsWith(".internal")) return
         if (origin === this.origin) return
         this.environmentFile.set("DURABLE_ACTORS_CONTROL_PLANE_URL", origin)
         this.environment.DURABLE_ACTORS_CONTROL_PLANE_URL = origin

@@ -5,6 +5,6 @@ export interface ActorResourceContext {
 }
 
 export interface ActorResource {
-    onResume({ db }: ActorResourceContext): Promise<void>
-    onGracefulShutdown({ db }: ActorResourceContext): Promise<void>
+    onResume(): Promise<void>
+    onGracefulShutdown(): Promise<void>
 }

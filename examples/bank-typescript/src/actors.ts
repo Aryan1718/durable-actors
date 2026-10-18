@@ -1,15 +1,20 @@
-import { Actor, type ActorSocket, Compute, Emittable, Ephemeral, Interleave, Persisted } from "durable-actors"
+import { Actor, type ActorSocket, Atomic, Compute, Emittable, Ephemeral, Interleave, Persisted } from "durable-actors"
 
 @Compute({ cpu: 0.5, memoryMiB: 256, idleTimeoutMs: 60_000 })
 export class BankAccount extends Actor<Metadata, Incoming, Outgoing> {
+    
     @Persisted @Emittable balance = 0
     @Ephemeral private depositsSinceWake = 0
+
     async getBalance(): Promise<number> {
         return this.balance
     }
+
     async getDepositsSinceWake(): Promise<number> {
         return this.depositsSinceWake
     }
+
+    @Atomic
     async deposit(amount: number): Promise<number> {
         this.db.exec("CREATE TABLE IF NOT EXISTS ledger (amount INTEGER)")
         this.balance += amount
@@ -18,14 +23,17 @@ export class BankAccount extends Actor<Metadata, Incoming, Outgoing> {
         this.broadcast({ type: "balance", balance: this.balance }, { tags: ["customer"] })
         return this.balance
     }
+
     async onConnect(socket: Socket): Promise<void> {
         socket.setTags("customer")
         this.setWebSocketAutoResponse({ request: "ping", response: "pong" })
         socket.send({ type: "balance", balance: this.balance })
     }
+
     async onMessage(socket: Socket): Promise<void> {
         socket.send({ type: "balance", balance: this.balance })
     }
+
     async onDisconnect(socket: Socket): Promise<void> {
         this.broadcast({ type: "balance", balance: this.balance }, { except: socket })
     }

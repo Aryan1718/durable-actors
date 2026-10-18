@@ -65,7 +65,7 @@ class ActorRuntime {
         await runWithActorDatabase(this.instance, "immediate", async () => {
             for (const field of fields) {
                 const resource = Reflect.get(this.instance!, field.name) as ActorResource
-                await resource.onGracefulShutdown({ db: this.database })
+                await resource.onGracefulShutdown()
             }
         })
     }
@@ -268,7 +268,7 @@ class ActorRuntime {
         await runWithActorDatabase(instance, "immediate", async () => {
             for (const field of resources) {
                 const resource = Reflect.get(instance, field.name) as ActorResource
-                await resource.onResume({ db: this.database })
+                await resource.onResume()
             }
         })
         return instance
