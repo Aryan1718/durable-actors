@@ -7,6 +7,7 @@ import validatePackageName from "validate-npm-package-name"
 
 import { registerDevCommand } from "./cli/dev.js"
 import { registerGenerateCommand } from "./cli/generate.js"
+import { registerInspectCommand } from "./cli/inspect.js"
 import { registerObserveCommand } from "./cli/observe.js"
 import { registerStartCommand } from "./cli/start.js"
 import { actorEnvironment } from "./environment.js"
@@ -31,6 +32,7 @@ try {
         .action(initializeProject)
     registerDevCommand(program)
     registerGenerateCommand(program)
+    registerInspectCommand(program)
     registerObserveCommand(program)
     registerStartCommand(program)
     if (process.argv.length === 2) program.help()

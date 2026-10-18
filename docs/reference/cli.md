@@ -2,7 +2,7 @@
 
 `durable-actors` runs durable actors locally or in the cloud. TypeScript projects use the Bun CLI (`bunx durable-actors`); Python projects install `durable-actors[cli]` and use `uv run durable-actors`. Python tooling requires no JavaScript runtime.
 
-Both CLIs expose `init`, `dev`, `generate`, `observe`, and `start`. The flags below describe the Bun CLI; Python `init` always creates a Python project and Python `generate` always emits Python clients.
+Both CLIs expose `init`, `dev`, `generate`, `inspect`, `observe`, and `start`. The flags below describe the Bun CLI; Python `init` always creates a Python project and Python `generate` always emits Python clients.
 
 ```sh
 durable-actors [options] [command]
@@ -18,6 +18,7 @@ durable-actors [options] [command]
 | `init`     | Create a sample actor project                                   |
 | `dev`      | Run local actors and reload code changes                        |
 | `generate` | Generate actor clients from the running server or a source file |
+| `inspect`  | Print actor inventory and the latest persisted state            |
 | `observe`  | Open the local observability UI                                 |
 | `start`    | Start the production control plane server                       |
 
@@ -106,6 +107,31 @@ Connection settings come from the environment or `.env`:
 durable-actors generate
 durable-actors generate src/actors.ts --out-dir generated
 durable-actors generate src/actors.py --language python
+```
+
+## durable-actors inspect
+
+Print actor inventory and the latest persisted state. It uses the same connection settings as `generate`. Without a selector, inspect lists every actor instance and its status. With `ActorName/actorId`, it prints that instance's status and latest persisted state as JSON.
+
+```sh
+durable-actors inspect [ActorName/actorId] [--json] [--control-plane-url <url>]
+```
+
+| Argument            | Required | Description                                              |
+| ------------------- | -------- | -------------------------------------------------------- |
+| `ActorName/actorId` | No       | Actor class and instance identity, separated by a slash |
+
+| Flag                        | Description                                                         |
+| --------------------------- | ------------------------------------------------------------------- |
+| `--json`                    | Print machine-readable JSON                                         |
+| `--control-plane-url <url>` | Control-plane origin. Overrides `DURABLE_ACTORS_CONTROL_PLANE_URL`. |
+
+When the control plane has not finished gathering socket metadata, inspect prints a warning on stderr. `--json` still writes a JSON document to stdout.
+
+```sh
+durable-actors inspect
+durable-actors inspect Counter/one
+durable-actors inspect Counter/one --json
 ```
 
 ## durable-actors observe

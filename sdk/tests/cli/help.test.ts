@@ -25,3 +25,14 @@ test("dev help explains the project directory, entrypoint, and setup", async () 
     assert.match(stdout, /DURABLE_ACTORS_ENTRYPOINT/u)
     assert.match(stdout, /durable-actors init my-project/u)
 })
+
+test("inspect help describes the instance selector, JSON output, and connection settings", async () => {
+    const { stdout } = await run(process.execPath, [cli, "inspect", "--help"], {
+        env: { ...process.env, DURABLE_ACTORS_PROJECT_ID: "", DURABLE_ACTORS_API_KEY: "" }
+    })
+    assert.match(stdout, /ActorName\/actorId/u)
+    assert.match(stdout, /--json/u)
+    assert.match(stdout, /--control-plane-url/u)
+    assert.match(stdout, /DURABLE_ACTORS_PROJECT_ID/u)
+    assert.match(stdout, /http:\/\/127\.0\.0\.1:7100/u)
+})

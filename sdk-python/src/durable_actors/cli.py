@@ -19,6 +19,7 @@ from dotenv import load_dotenv
 
 from .client import Client
 from .codegen import generate_client
+from .inspect import run_inspect
 
 
 @click.group()
@@ -77,6 +78,18 @@ def observe(control_plane_url: str | None, open_browser: bool) -> None:
     from .observer import observe as serve_observer
 
     serve_observer(control_plane_url, open_browser=open_browser)
+
+
+@cli.command("inspect")
+@click.argument("selector", required=False, metavar="ActorName/actorId")
+@click.option("--json", "json_output", is_flag=True, help="Print machine-readable JSON.")
+@click.option("--control-plane-url", help="Override the configured control plane URL.")
+def inspect(selector: str | None, json_output: bool, control_plane_url: str | None) -> None:
+    """Print actor inventory and the latest persisted state."""
+    text, warning = run_inspect(control_plane_url, selector, json_output)
+    if warning:
+        click.echo(warning, err=True)
+    click.echo(text)
 
 
 def main() -> None:
