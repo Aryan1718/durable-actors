@@ -253,7 +253,60 @@ impl ActorJwtIssuer {
         grant: Option<super::session::InvocationGrant>,
         route: &str,
     ) -> Result<IssuedActorToken> {
-        actor.validate()?;
+        self.issue_invocation_target_inner(
+            actor,
+            actor,
+            host_id,
+            session_id,
+            host_config_key,
+            region,
+            owner_epoch,
+            grant,
+            route,
+        )
+    }
+
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn issue_invocation_target_with_principal(
+        &self,
+        principal_actor: &ActorKey,
+        capability_actor: &ActorKey,
+        host_id: &HostId,
+        session_id: &str,
+        host_config_key: &str,
+        region: &str,
+        owner_epoch: u64,
+        route: &str,
+    ) -> Result<IssuedActorToken> {
+        self.issue_invocation_target_inner(
+            principal_actor,
+            capability_actor,
+            host_id,
+            session_id,
+            host_config_key,
+            region,
+            owner_epoch,
+            None,
+            route,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn issue_invocation_target_inner(
+        &self,
+        principal_actor: &ActorKey,
+        capability_actor: &ActorKey,
+        host_id: &HostId,
+        session_id: &str,
+        host_config_key: &str,
+        region: &str,
+        owner_epoch: u64,
+        grant: Option<super::session::InvocationGrant>,
+        route: &str,
+    ) -> Result<IssuedActorToken> {
+        principal_actor.validate()?;
+        capability_actor.validate()?;
         validate_region(region)?;
         ensure!(owner_epoch > 0, "actor owner epoch must be positive");
         let now_ms = unix_millis()?;
@@ -281,10 +334,10 @@ impl ActorJwtIssuer {
             iat: now,
             nbf: now,
             exp: expires_at,
-            actor: actor.clone(),
+            actor: principal_actor.clone(),
             invocation: Some(ActorInvocationCapability {
                 route: super::gateway::backend_origin(route)?.to_string(),
-                actor: actor.clone(),
+                actor: capability_actor.clone(),
                 host_id: host_id.clone(),
                 owner_epoch,
                 grant,

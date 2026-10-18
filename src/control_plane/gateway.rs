@@ -99,7 +99,10 @@ impl Gateway {
         let capability = principal
             .invocation
             .context("invocation capability missing")?;
-        ensure!(capability.actor == *actor, "invocation target mismatch");
+        ensure!(
+            principal.actor == *actor && capability.actor == *actor,
+            "invocation target mismatch"
+        );
         Ok(capability)
     }
 }

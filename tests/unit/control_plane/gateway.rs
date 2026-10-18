@@ -55,6 +55,81 @@ async fn signed_route_is_bound_to_the_actor_and_epoch() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn signed_route_rejects_divergent_principal_actor() -> Result<()> {
+    use base64::Engine;
+    let key = aws_lc_rs::signature::Ed25519KeyPair::generate_pkcs8(
+        &aws_lc_rs::rand::SystemRandom::new(),
+    )?;
+    let issuer = ActorJwtIssuer::from_base64_pkcs8(
+        &base64::engine::general_purpose::STANDARD.encode(key.as_ref()),
+        "test",
+        "issuer",
+        "authority",
+        "invoke",
+        std::time::Duration::from_secs(60),
+    )?;
+    let gateway = test_gateway(
+        &issuer,
+        "http://127.0.0.1:7100".into(),
+        std::sync::Arc::new(super::super::socket_directory::MemorySocketDirectory::default()),
+    )
+    .await?;
+    let principal_actor = crate::actor::ActorKey {
+        project_id: "test".into(),
+        actor_name: "Counter".into(),
+        actor_id: "one".into(),
+    };
+    let capability_actor = crate::actor::ActorKey {
+        project_id: "test".into(),
+        actor_name: "Counter".into(),
+        actor_id: "other".into(),
+    };
+    let token = issuer.issue_invocation_target_with_principal(
+        &principal_actor,
+        &capability_actor,
+        &crate::host::HostId::new("host.v3.test.one"),
+        "00000000-0000-4000-8000-000000000001",
+        "test",
+        "north-america-west",
+        7,
+        "http://10.1.2.3:7101",
+    )?;
+    let authorization = format!("Bearer {}", token.token);
+    assert!(
+        gateway
+            .invocation_route(&capability_actor, 7, &authorization)
+            .is_err()
+    );
+    assert!(
+        gateway
+            .invocation_route(&principal_actor, 7, &authorization)
+            .is_err()
+    );
+    let control = issuer.issue_invocation_target(
+        &capability_actor,
+        &crate::host::HostId::new("host.v3.test.one"),
+        "00000000-0000-4000-8000-000000000001",
+        "test",
+        "north-america-west",
+        7,
+        None,
+        "http://10.1.2.3:7101",
+    )?;
+    assert_eq!(
+        gateway.invocation_route(&capability_actor, 7, &format!("Bearer {}", control.token))?,
+        "http://10.1.2.3:7101/"
+    );
+
+    assert!(
+        gateway
+            .authorize_publish(&capability_actor, &authorization)
+            .is_err()
+    );
+
+    Ok(())
+}
+
 async fn test_gateway(
     issuer: &ActorJwtIssuer,
     origin: String,

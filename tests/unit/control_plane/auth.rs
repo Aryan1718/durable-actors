@@ -109,6 +109,40 @@ fn delegated_scope_requires_a_restricted_capability() -> Result<()> {
 }
 
 #[test]
+fn rejects_invocation_capability_for_another_actor() -> Result<()> {
+    let (_, key_pair) = verifier_and_key_pair()?;
+    let verifier = ActorJwtVerifier::for_scope(
+        public_key_set(&key_pair)?,
+        "durable-actors-control-plane",
+        "durable-actors-invoke",
+        ActorTokenPurpose::Invocation,
+        Duration::from_secs(60),
+    )?;
+    let now = unix_seconds()?;
+    let actor = json!({"project_id": "default", "actor_name": "Counter", "actor_id": "one"});
+    let other = json!({"project_id": "default", "actor_name": "Counter", "actor_id": "other"});
+    let mut claims = valid_claims(now);
+    claims["aud"] = json!("durable-actors-invoke");
+    claims["scope"] = json!("actor:invoke");
+    claims["actor"] = actor.clone();
+    claims["invocation"] = json!({
+        "actor": other, "hostId": claims["processId"], "ownerEpoch": 1, "route": "http://host",
+    });
+    let sign = |claims| {
+        token(
+            &key_pair,
+            json!({"alg": "EdDSA", "kid": "test-key", "typ": "JWT"}),
+            claims,
+        )
+    };
+    let error = verifier.verify(&sign(claims.clone())?).unwrap_err();
+    assert!(format!("{error:#}").contains("another actor"), "{error:#}");
+    claims["invocation"]["actor"] = actor;
+    assert!(verifier.verify(&sign(claims)?).is_ok());
+    Ok(())
+}
+
+#[test]
 fn rejects_an_expired_token_during_clock_skew_leeway() -> Result<()> {
     let (verifier, key_pair) = verifier_and_key_pair()?;
     let now = unix_seconds()?;

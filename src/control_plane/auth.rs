@@ -277,6 +277,10 @@ impl ActorJwtVerifier {
                 capability.host_id == principal.host_id,
                 "actor invocation capability targets another host"
             );
+            ensure!(
+                capability.actor == principal.actor,
+                "actor invocation capability targets another actor"
+            );
             capability.actor.validate()?;
             ensure!(
                 capability.owner_epoch > 0,
