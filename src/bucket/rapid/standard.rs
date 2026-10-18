@@ -1,19 +1,18 @@
 use super::*;
-use crate::bucket::{GcsBucket, gcs::GcsClients};
 
-pub(super) struct GcsSnapshots(GcsBucket);
+pub(super) struct StandardSnapshots(Arc<dyn Bucket>);
 
-impl GcsSnapshots {
-    pub fn new(bucket: &str, clients: GcsClients) -> Result<Self> {
-        Ok(Self(GcsBucket::with_clients(bucket, clients)?))
+impl StandardSnapshots {
+    pub fn new(bucket: Arc<dyn Bucket>) -> Self {
+        Self(bucket)
     }
 }
 
 #[async_trait]
-impl SnapshotStore for GcsSnapshots {
+impl SnapshotStore for StandardSnapshots {
     async fn put(&self, object: &str, bytes: Bytes) -> Result<()> {
         ensure!(
-            replace(&self.0, &object_name(object)?, None, bytes).await?,
+            replace(self.0.as_ref(), &object_name(object)?, None, bytes).await?,
             "conflicting immutable checkpoint"
         );
         Ok(())
@@ -52,3 +51,7 @@ impl SnapshotStore for GcsSnapshots {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../../tests/unit/bucket/rapid/standard.rs"]
+mod tests;

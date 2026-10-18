@@ -55,10 +55,7 @@ impl RapidSnapshots {
             anyhow::bail!("append-log persistence configuration required");
         };
         let archive = Arc::new(GcsBucket::with_clients(archive_bucket, clients.clone())?);
-        let snapshots = Arc::new(super::standard::GcsSnapshots::new(
-            archive_bucket,
-            clients.clone(),
-        )?);
+        let snapshots = Arc::new(super::standard::StandardSnapshots::new(archive.clone()));
         let zones = buckets
             .iter()
             .map(|placement| {
