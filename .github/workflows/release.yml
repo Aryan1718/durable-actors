@@ -279,6 +279,9 @@ jobs:
     native:
         needs: preflight
         uses: ./.github/workflows/native-build.yml
+        with:
+            # Blacksmith macOS runners are ARM64; only releases build on GitHub's slow Intel runner.
+            runners: '["blacksmith-4vcpu-ubuntu-2204", "blacksmith-4vcpu-ubuntu-2204-arm", "blacksmith-6vcpu-macos-15", "macos-15-intel"]'
 
     native-publish:
         name: Verify and publish native runtime (${{ matrix.runner }})
