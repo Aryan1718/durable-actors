@@ -2,6 +2,7 @@ use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
+use backon::{ExponentialBuilder, Retryable};
 use gcp_auth::TokenProvider;
 use google_cloud_auth::credentials::{AccessTokenCredentials, Builder};
 use serde::{Deserialize, Serialize};
@@ -187,14 +188,7 @@ impl StorageTokenSource for GcsTokenSource {
             ("options", &boundary.to_string()),
         ]);
         let started = SystemClock.now_ms()?;
-        let response = self
-            .http
-            .post("https://sts.googleapis.com/v1/token")
-            .header("content-type", "application/x-www-form-urlencoded")
-            .body(form.query().unwrap().to_owned())
-            .send()
-            .await?
-            .error_for_status()?;
+        let response = self.exchange_token(form.query().unwrap()).await?;
         #[derive(Deserialize)]
         struct Token {
             access_token: String,
@@ -212,6 +206,42 @@ impl StorageTokenSource for GcsTokenSource {
             access_token: token.access_token,
             expires_at_ms: started + (token.expires_in - 30) * 1000,
         })
+    }
+}
+
+impl GcsTokenSource {
+    async fn exchange_token(&self, form: &str) -> reqwest::Result<reqwest::Response> {
+        let mut attempt = 1;
+        (|| async {
+            self.http
+                .post("https://sts.googleapis.com/v1/token")
+                .header("content-type", "application/x-www-form-urlencoded")
+                .body(form.to_owned())
+                .timeout(Duration::from_secs(5))
+                .send()
+                .await?
+                .error_for_status()
+        })
+        .retry(
+            ExponentialBuilder::default()
+                .with_min_delay(Duration::from_millis(250))
+                .with_max_times(3)
+                .with_jitter(),
+        )
+        .when(|error: &reqwest::Error| {
+            error.is_connect()
+                || error.is_timeout()
+                || matches!(
+                    error.status().map(|status| status.as_u16()),
+                    Some(429 | 500 | 502 | 503 | 504)
+                )
+        })
+        .notify(|error, delay| {
+            attempt += 1;
+            tracing::warn!(attempt, status = ?error.status(), delay_ms = delay.as_millis(),
+                "retrying scoped GCS credential exchange");
+        })
+        .await
     }
 }
 
