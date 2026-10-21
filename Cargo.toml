@@ -33,7 +33,7 @@ tokio-util = { version = "0.7", features = ["rt"] }
 tower-http = { version = "0.6", features = ["trace"] }
 tonic = { version = "0.14", features = ["tls-aws-lc", "tls-webpki-roots"] }
 tonic-prost = "0.14"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "http2", "hickory-dns"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 serde = { version = "1.0.229", features = ["derive"] }
