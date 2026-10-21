@@ -21,6 +21,8 @@ actors:
   memoryMiB: 256
 alarms:
   pollIntervalMs: 100
+postgres:
+  maxConnections: 8
 resources:
   requests: {cpu: 250m, memory: 512Mi}
   limits: {memory: 1Gi}

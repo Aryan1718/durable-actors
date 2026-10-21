@@ -41,6 +41,7 @@ pub struct ControlPlaneProcessConfig {
 
 pub struct ControlPlaneStorageConfig {
     pub postgres_url: String,
+    pub postgres_max_connections: usize,
     pub token_issuer: String,
     pub trace_retention: Duration,
     pub bucket: String,
@@ -136,7 +137,10 @@ async fn control_plane_routes(
         super::ActorTokenPurpose::ControlPlane,
         config.jwt_max_lifetime,
     )?;
-    let database = PostgresDatabase::lazy(&config.storage.postgres_url)?;
+    let database = PostgresDatabase::lazy_with_max_connections(
+        &config.storage.postgres_url,
+        config.storage.postgres_max_connections,
+    )?;
     let trace_persistence = Arc::new(PostgresTracePersistence::new(
         database.clone(),
         config.storage.trace_retention,
@@ -334,6 +338,7 @@ impl ControlPlaneProcessConfig {
             artifact_bucket,
             token_issuer: required(&mut get, "DURABLE_ACTORS_GOOGLE_SERVICE_ACCOUNT")?,
             postgres_url: required(&mut get, "DURABLE_ACTORS_POSTGRES_URL")?,
+            postgres_max_connections: postgres_max_connections(&mut get)?,
             trace_retention: trace_retention(&mut get)?,
             bucket,
         };
@@ -425,6 +430,19 @@ fn rapid_persistence(
     };
     persistence.validate()?;
     Ok(persistence)
+}
+
+fn postgres_max_connections(get: &mut impl FnMut(&str) -> Option<String>) -> Result<usize> {
+    let connections: usize = get("DURABLE_ACTORS_POSTGRES_MAX_CONNECTIONS")
+        .map(|value| value.parse())
+        .transpose()
+        .context("DURABLE_ACTORS_POSTGRES_MAX_CONNECTIONS must be an integer")?
+        .unwrap_or(crate::postgres::DEFAULT_MAX_CONNECTIONS);
+    ensure!(
+        (1..=1000).contains(&connections),
+        "DURABLE_ACTORS_POSTGRES_MAX_CONNECTIONS must be between 1 and 1000"
+    );
+    Ok(connections)
 }
 
 fn trace_retention(get: &mut impl FnMut(&str) -> Option<String>) -> Result<Duration> {

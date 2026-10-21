@@ -297,6 +297,31 @@ fn process_environment() -> HashMap<&'static str, &'static str> {
 }
 
 #[test]
+fn postgres_pool_size_is_configurable_and_bounded() -> Result<()> {
+    let mut values = process_environment();
+    let parse = |values: &HashMap<&str, &str>| {
+        ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|value| (*value).into()))
+    };
+    assert_eq!(parse(&values)?.storage.postgres_max_connections, 8);
+    for (value, expected) in [("1", 1), ("64", 64), ("1000", 1000)] {
+        values.insert("DURABLE_ACTORS_POSTGRES_MAX_CONNECTIONS", value);
+        assert_eq!(parse(&values)?.storage.postgres_max_connections, expected);
+    }
+    for invalid in ["0", "-1", "1.5", "1001", "", "oops", "18446744073709551616"] {
+        values.insert("DURABLE_ACTORS_POSTGRES_MAX_CONNECTIONS", invalid);
+        let error = parse(&values)
+            .err()
+            .expect("invalid pool size was accepted");
+        assert!(
+            error
+                .to_string()
+                .contains("DURABLE_ACTORS_POSTGRES_MAX_CONNECTIONS")
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn analytics_retention_is_configurable_and_bounded() -> Result<()> {
     let mut values = process_environment();
     let parse = |values: &HashMap<&str, &str>| {

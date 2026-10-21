@@ -17,6 +17,8 @@ mod embedded {
 #[path = "../tests/support/postgres.rs"]
 pub(crate) mod testing;
 
+pub(crate) const DEFAULT_MAX_CONNECTIONS: usize = 8;
+
 #[derive(Clone)]
 pub(crate) struct PostgresDatabase {
     pool: Pool,
@@ -39,9 +41,14 @@ impl PostgresDatabase {
         Ok(database)
     }
 
+    #[cfg(test)]
     pub(crate) fn lazy(url: &str) -> Result<Self> {
+        Self::lazy_with_max_connections(url, DEFAULT_MAX_CONNECTIONS)
+    }
+
+    pub(crate) fn lazy_with_max_connections(url: &str, max_connections: usize) -> Result<Self> {
         Ok(Self {
-            pool: connection_pool(url)?,
+            pool: connection_pool(url, max_connections)?,
             initialized: Arc::new(tokio::sync::OnceCell::new()),
         })
     }
@@ -114,7 +121,7 @@ async fn migrate(pool: &Pool) -> Result<()> {
     Ok(())
 }
 
-fn connection_pool(url: &str) -> Result<Pool> {
+fn connection_pool(url: &str, max_connections: usize) -> Result<Pool> {
     let config = Config::from_str(url).context("parse PostgreSQL connection URL")?;
     let manager = match config.get_ssl_mode() {
         SslMode::Disable => Manager::new(config, NoTls),
@@ -126,7 +133,7 @@ fn connection_pool(url: &str) -> Result<Pool> {
         }
     };
     Ok(Pool::builder(manager)
-        .max_size(8)
+        .max_size(max_connections)
         .runtime(Runtime::Tokio1)
         .wait_timeout(Some(Duration::from_secs(5)))
         .create_timeout(Some(Duration::from_secs(5)))

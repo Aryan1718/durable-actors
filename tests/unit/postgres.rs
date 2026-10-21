@@ -110,6 +110,18 @@ async fn concurrent_connections_migrate_fresh_and_existing_schemas_once() -> Res
 fn runtime_startup_does_not_connect_to_postgres() -> Result<()> {
     let database = PostgresDatabase::lazy("postgresql://localhost:1/unavailable?sslmode=disable")?;
     assert_eq!(database.pool.status().size, 0);
+    assert_eq!(database.pool.status().max_size, 8);
+    Ok(())
+}
+
+#[test]
+fn configured_pool_size_does_not_connect_to_postgres() -> Result<()> {
+    let database = PostgresDatabase::lazy_with_max_connections(
+        "postgresql://localhost:1/unavailable?sslmode=disable",
+        64,
+    )?;
+    assert_eq!(database.pool.status().size, 0);
+    assert_eq!(database.pool.status().max_size, 64);
     Ok(())
 }
 

@@ -164,6 +164,20 @@
         "pollIntervalMs"
       ]
     },
+    "postgres": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxConnections": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000
+        }
+      },
+      "required": [
+        "maxConnections"
+      ]
+    },
     "resources": {
       "type": "object"
     },
@@ -225,6 +239,7 @@
     "replicaCount",
     "actors",
     "alarms",
+    "postgres",
     "resources",
     "images",
     "sandboxNamespace",
