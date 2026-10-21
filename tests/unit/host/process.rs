@@ -71,3 +71,14 @@ async fn failed_activation_stops_a_busy_host() -> Result<()> {
     javascript.kill().await?;
     Ok(())
 }
+
+#[test]
+fn executor_outlasts_a_rapid_fallback() {
+    let command = executor_command(true, "/tmp/executor.sock", ActorRuntime::Typescript);
+    let startup = command
+        .as_std()
+        .get_envs()
+        .find(|(name, _)| *name == "DURABLE_ACTORS_HOST_STARTUP_MS")
+        .and_then(|(_, value)| value);
+    assert_eq!(startup, Some(std::ffi::OsStr::new("30000")));
+}

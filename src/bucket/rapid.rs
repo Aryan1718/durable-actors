@@ -26,6 +26,7 @@ use tokio_util::task::AbortOnDropHandle;
 use writer::Session;
 
 const ROTATION_INTERVAL: Duration = Duration::from_secs(60);
+pub(crate) const RAPID_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Replica {
@@ -311,7 +312,7 @@ impl Manifest {
 }
 
 async fn bounded<T>(operation: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-    tokio::time::timeout(Duration::from_secs(10), operation)
+    tokio::time::timeout(RAPID_OPERATION_TIMEOUT, operation)
         .await
         .context("log operation timed out")?
 }

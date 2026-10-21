@@ -12,6 +12,7 @@ use tracing::{error, info};
 
 use crate::{
     actor::{ActorExecutorConnection, ActorExecutorListener},
+    bucket::RAPID_OPERATION_TIMEOUT,
     bundle::ActorRuntime,
     clock::SystemClock,
     control_plane::{ActorJwtVerifier, ActorTokenPurpose, ControlPlaneClient},
@@ -26,6 +27,10 @@ use super::{
 
 const HOST_TASK_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const HOST_ACTOR_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long the executor waits for its host to attach. Falling back from Rapid can
+/// spend two operation timeouts before Standard starts: the failed open, then
+/// deleting the replicas that did open.
+const EXECUTOR_STARTUP_TIMEOUT: Duration = RAPID_OPERATION_TIMEOUT.saturating_mul(3);
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -535,6 +540,12 @@ pub(super) fn spawn_executor_process(
     socket: &str,
     runtime: ActorRuntime,
 ) -> Result<tokio::process::Child> {
+    executor_command(generic, socket, runtime)
+        .spawn()
+        .context("start actor executor")
+}
+
+fn executor_command(generic: bool, socket: &str, runtime: ActorRuntime) -> Command {
     let mut command = if runtime == ActorRuntime::Python {
         let mut command = Command::new(
             std::env::var("DURABLE_ACTORS_PYTHON").unwrap_or_else(|_| "python3".into()),
@@ -558,6 +569,10 @@ pub(super) fn spawn_executor_process(
             if generic { "1" } else { "0" },
         )
         .env("DURABLE_ACTORS_EXECUTOR_SOCKET", socket)
+        .env(
+            "DURABLE_ACTORS_HOST_STARTUP_MS",
+            EXECUTOR_STARTUP_TIMEOUT.as_millis().to_string(),
+        )
         .env_remove("DURABLE_ACTORS_SPARE_TOKEN")
         .env_remove("DURABLE_ACTORS_RUNTIME_CONFIG")
         .env_remove("DURABLE_ACTORS_HOST_TOKEN")
@@ -565,9 +580,8 @@ pub(super) fn spawn_executor_process(
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .kill_on_drop(true)
-        .spawn()
-        .context("start actor executor")
+        .kill_on_drop(true);
+    command
 }
 
 #[cfg(test)]
