@@ -124,16 +124,17 @@ pub(super) async fn serve_assigned_host(
     }
     timings.executor_notified_at_ms = Some(timings.elapsed_ms());
     log_startup(host_id, &timings, "ready", None);
-    let stop = CancellationToken::new();
-    let server_stop = stop.clone();
+    let executor_stop = CancellationToken::new();
+    let server_stop = CancellationToken::new();
+    let serving = server_stop.clone();
     let routes = service;
     let mut server = Box::pin(async move {
         axum::serve(listener, routes)
-            .with_graceful_shutdown(async move { server_stop.cancelled().await })
+            .with_graceful_shutdown(async move { serving.cancelled().await })
             .await
             .context("serve actor host endpoints")
     });
-    let mut executor_task = Box::pin(executor_connection.run(stop.clone()));
+    let mut executor_task = Box::pin(executor_connection.run(executor_stop.clone()));
     let shutdown = async {
         tokio::select! { () = shutdown => {}, () = storage.stop.cancelled() => {} }
     };
@@ -152,11 +153,18 @@ pub(super) async fn serve_assigned_host(
     .await;
     let shutdown_started = Instant::now();
     let shutdown_deadline = tokio::time::Instant::now() + Duration::from_secs(30);
-    stop_host_tasks(&host, &stop, server, executor_task).await;
-    drop(javascript);
-    let unregister_result = storage
-        .finish(shutdown_deadline - Duration::from_secs(2))
-        .await;
+    // Keep answering until the actor is released: calls routed here meanwhile get a refusal they
+    // can retry, rather than a reset whose outcome is unknown.
+    let unregister_result = serve_during(server.as_mut(), async {
+        stop_executor(&host, &executor_stop, executor_task).await;
+        drop(javascript);
+        storage
+            .finish(shutdown_deadline - Duration::from_secs(2))
+            .await
+    })
+    .await;
+    server_stop.cancel();
+    let _ = tokio::time::timeout(HOST_TASK_SHUTDOWN_TIMEOUT, server).await;
     let renewal_result = renewal.shutdown().await;
     info!(
         event = "host_shutdown",
@@ -519,20 +527,23 @@ async fn idle_elapsed(idle_since: Option<tokio::time::Instant>, timeout: Duratio
     }
 }
 
-async fn stop_host_tasks(
-    host: &ActorHost,
-    stop: &CancellationToken,
-    server: impl Future,
-    executor: impl Future,
-) {
+async fn serve_during<T>(
+    server: std::pin::Pin<&mut impl Future>,
+    work: impl Future<Output = T>,
+) -> T {
+    tokio::pin!(work);
+    tokio::select! {
+        result = &mut work => result,
+        _ = server => work.await,
+    }
+}
+
+async fn stop_executor(host: &ActorHost, stop: &CancellationToken, executor: impl Future) {
     if let Err(error) = host.drain(HOST_ACTOR_DRAIN_TIMEOUT).await {
         error!(error = %format!("{error:#}"), "actor invocations did not drain cleanly");
     }
     stop.cancel();
-    let _ = tokio::time::timeout(HOST_TASK_SHUTDOWN_TIMEOUT, async {
-        let _ = tokio::join!(server, executor);
-    })
-    .await;
+    let _ = tokio::time::timeout(HOST_TASK_SHUTDOWN_TIMEOUT, executor).await;
 }
 
 pub(super) fn spawn_executor_process(
