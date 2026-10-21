@@ -258,10 +258,6 @@ async fn echo_websocket(upgrade: WebSocketUpgrade) -> Response {
 fn process_environment() -> HashMap<&'static str, &'static str> {
     HashMap::from([
         ("DURABLE_ACTORS_PERSISTENCE", "rapid"),
-        (
-            "DURABLE_ACTORS_GOOGLE_SERVICE_ACCOUNT",
-            "test@project.iam.gserviceaccount.com",
-        ),
         ("DURABLE_ACTORS_JWT_SIGNING_KEY", "c2lnbmluZw=="),
         ("DURABLE_ACTORS_SECRET", "api-key"),
         ("DURABLE_ACTORS_BUCKET", "actor-state-test"),

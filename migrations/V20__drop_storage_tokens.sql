@@ -1,0 +1,1 @@
+DROP TABLE durable_actors_storage_tokens;

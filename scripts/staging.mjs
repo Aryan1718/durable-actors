@@ -322,7 +322,6 @@ export function stagingEnvironment(document, system = process.env) {
         "DURABLE_ACTORS_ARTIFACT_BUCKET",
         "DURABLE_ACTORS_ARCHIVE_BUCKET",
         "DURABLE_ACTORS_RAPID_BUCKETS",
-        "DURABLE_ACTORS_GOOGLE_SERVICE_ACCOUNT",
         "DURABLE_ACTORS_GKE_NAMESPACE",
         "DURABLE_ACTORS_GKE_ZONE",
         "NGROK_DOMAIN",
