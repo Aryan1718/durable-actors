@@ -96,7 +96,7 @@ async fn run_activation(
         "DURABLE_ACTORS_ACTOR_IS_NEW": (before < 0).to_string(),
         "DURABLE_ACTORS_RUNTIME_CONFIG": serde_json::json!({
             "bucket": {"type": "file", "directory": data}, "region": "north-america-east", "persistence": {"type":"local"},
-            "token": null
+            "tokens": null
         }).to_string()
     }))?;
     let config = ActorHostConfig::from_lookup(|key| environment.get(key).cloned())?;
@@ -107,7 +107,7 @@ async fn run_activation(
         listener,
         executor,
         javascript,
-        storage: WarmGcs::new().await?,
+        storage: WarmStorage::new().await?,
         replication: Arc::new(Litestream::default()),
     };
     let stop = CancellationToken::new();

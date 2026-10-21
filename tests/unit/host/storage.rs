@@ -1,5 +1,9 @@
 use super::*;
-use crate::{bucket::BucketObject, state_log::StateSnapshot, state_transport::SnapshotWriter};
+use crate::{
+    bucket::{Bucket, BucketObject},
+    state_log::StateSnapshot,
+    state_transport::SnapshotWriter,
+};
 use std::collections::HashMap;
 
 #[derive(Default)]

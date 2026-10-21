@@ -25,7 +25,7 @@ pub(crate) struct HostStorageConfig {
     pub bucket: BucketLocation,
     pub persistence: super::SnapshotStoreConfig,
     pub region: String,
-    pub token: Option<StorageToken>,
+    pub tokens: Option<StorageTokens>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -45,6 +45,15 @@ pub(crate) enum BucketLocation {
 pub(crate) struct StorageToken {
     pub access_token: String,
     pub expires_at_ms: u64,
+}
+
+/// One boundary spanning all of an actor's storage exceeds reqsign's 2,048-character limit once
+/// identifiers and bucket names are long, so hosts hold two, each used by its own storage client.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StorageTokens {
+    pub ownership: StorageToken,
+    pub state: StorageToken,
 }
 
 impl std::fmt::Debug for StorageToken {
@@ -101,7 +110,7 @@ impl RuntimeAccess {
             bucket: self.location.clone(),
             persistence: self.persistence.clone(),
             region: region.into(),
-            token: self.issue(actor, code_snapshot).await?,
+            tokens: self.issue(actor, code_snapshot).await?,
         })?)
     }
 
@@ -109,7 +118,7 @@ impl RuntimeAccess {
         &self,
         actor: &crate::actor::ActorKey,
         code_snapshot: Option<&str>,
-    ) -> Result<Option<StorageToken>> {
+    ) -> Result<Option<StorageTokens>> {
         let BucketLocation::Gcs {
             bucket,
             artifact_bucket,
@@ -120,7 +129,7 @@ impl RuntimeAccess {
         let code = code_snapshot
             .map(crate::bundle::ActorBundle::decode)
             .transpose()?;
-        let rules = rules(
+        let scopes = scopes(
             bucket,
             &self.persistence,
             Some(artifact_bucket),
@@ -131,7 +140,9 @@ impl RuntimeAccess {
             .token_source
             .as_ref()
             .context("storage token issuer missing")?;
-        Ok(Some(source.issue(&rules).await?))
+        let (ownership, state) =
+            tokio::try_join!(source.issue(&scopes.ownership), source.issue(&scopes.state))?;
+        Ok(Some(StorageTokens { ownership, state }))
     }
 }
 
@@ -253,24 +264,53 @@ struct Rule {
     permissions: Permissions,
 }
 
-fn rules(
+/// The rules behind each of [`StorageTokens`].
+#[derive(Debug, Clone, PartialEq)]
+struct Scopes {
+    ownership: Vec<Rule>,
+    state: Vec<Rule>,
+}
+
+fn scopes(
     bucket: &str,
     persistence: &super::SnapshotStoreConfig,
     artifact_bucket: Option<&str>,
     actor: &crate::actor::ActorKey,
     code: Option<&crate::bundle::ActorBundle>,
-) -> Result<Vec<Rule>> {
-    let snapshots = Permissions::OBJECT_VIEWER | Permissions::OBJECT_CREATOR;
+) -> Result<Scopes> {
     // Owner paths end in `<base64url id>.json`, and base64url has no `.`, so this prefix matches
     // only this actor's owner object.
-    let mut rules = vec![rule(
+    let mut ownership = vec![rule(
         bucket,
         crate::storage_paths::owner(&actor.storage_key())?,
         Permissions::OBJECT_USER,
     )];
+    if let Some(code) = code {
+        ensure!(
+            Some(code.bucket.as_str()) == artifact_bucket,
+            "code artifact belongs to another bucket"
+        );
+        ownership.push(rule(
+            &code.bucket,
+            artifact_prefix(code)?,
+            Permissions::OBJECT_VIEWER,
+        ));
+    }
+    Ok(Scopes {
+        ownership,
+        state: state_rules(bucket, persistence, actor)?,
+    })
+}
+
+fn state_rules(
+    bucket: &str,
+    persistence: &super::SnapshotStoreConfig,
+    actor: &crate::actor::ActorKey,
+) -> Result<Vec<Rule>> {
+    let snapshots = Permissions::OBJECT_VIEWER | Permissions::OBJECT_CREATOR;
     let prefix = crate::storage_paths::snapshots(actor)?;
-    match persistence {
-        super::SnapshotStoreConfig::Local => rules.push(rule(bucket, prefix, snapshots)),
+    Ok(match persistence {
+        super::SnapshotStoreConfig::Local => vec![rule(bucket, prefix, snapshots)],
         super::SnapshotStoreConfig::Rapid {
             archive_bucket,
             buckets,
@@ -278,27 +318,13 @@ fn rules(
         } => {
             let prefix = super::rapid::object_name(&prefix)?;
             let logs = prefix.replacen("snapshots-", "logs-", 1);
-            rules.push(rule(archive_bucket, prefix, snapshots));
-            rules.extend(
-                buckets.iter().map(|placement| {
+            std::iter::once(rule(archive_bucket, prefix, snapshots))
+                .chain(buckets.iter().map(|placement| {
                     rule(&placement.bucket, logs.clone(), Permissions::OBJECT_USER)
-                }),
-            );
+                }))
+                .collect()
         }
-    }
-
-    if let Some(code) = code {
-        ensure!(
-            Some(code.bucket.as_str()) == artifact_bucket,
-            "code artifact belongs to another bucket"
-        );
-        rules.push(rule(
-            &code.bucket,
-            artifact_prefix(code)?,
-            Permissions::OBJECT_VIEWER,
-        ));
-    }
-    Ok(rules)
+    })
 }
 
 fn rule(bucket: &str, prefix: String, permissions: Permissions) -> Rule {

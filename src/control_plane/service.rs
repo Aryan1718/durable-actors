@@ -509,7 +509,7 @@ impl ControlPlaneService {
                     principal.host_config_key.as_deref() == Some(spec.host_config_key().as_str()),
                     "host deployment changed"
                 );
-                let token = self
+                let tokens = self
                     .runtime_access
                     .as_ref()
                     .context("direct storage is not configured")?
@@ -529,7 +529,7 @@ impl ControlPlaneService {
                     )?
                     .token;
                 Ok(ControlPlaneCommandReply::StorageAccess {
-                    token,
+                    tokens,
                     replacement_token,
                 })
             }

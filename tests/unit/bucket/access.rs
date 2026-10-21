@@ -27,26 +27,28 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
             sha256: "unused".into(),
         }],
     };
-    let scoped = rules("authority", &local, Some("code"), &actor, Some(&code))?;
+    let scoped = scopes("authority", &local, Some("code"), &actor, Some(&code))?;
     assert_eq!(
         scoped,
-        [
-            rule(
-                "authority",
-                crate::storage_paths::owner(&actor.storage_key())?,
-                Permissions::OBJECT_USER
-            ),
-            rule(
+        Scopes {
+            ownership: vec![
+                rule(
+                    "authority",
+                    crate::storage_paths::owner(&actor.storage_key())?,
+                    Permissions::OBJECT_USER
+                ),
+                rule(
+                    "code",
+                    "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/".into(),
+                    Permissions::OBJECT_VIEWER
+                ),
+            ],
+            state: vec![rule(
                 "authority",
                 crate::storage_paths::snapshots(&actor)?,
                 Permissions::OBJECT_VIEWER | Permissions::OBJECT_CREATOR
-            ),
-            rule(
-                "code",
-                "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/".into(),
-                Permissions::OBJECT_VIEWER
-            ),
-        ]
+            )],
+        }
     );
     for index in 0..1000 {
         let path = format!("modules/{index}.mjs");
@@ -60,22 +62,22 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
         });
     }
     assert_eq!(
-        rules("authority", &local, Some("code"), &actor, Some(&code))?,
+        scopes("authority", &local, Some("code"), &actor, Some(&code))?,
         scoped,
         "the boundary does not grow with the bundle"
     );
     code.files[1].object =
         "durable-actors/v3/artifacts/87654321-1234-4234-8234-123456789012/modules/0.mjs".into();
-    assert!(rules("authority", &local, Some("code"), &actor, Some(&code)).is_err());
+    assert!(scopes("authority", &local, Some("code"), &actor, Some(&code)).is_err());
     code.files.truncate(1);
     let mut other = actor.clone();
     other.project_id = "other".into();
     assert_ne!(
         scoped,
-        rules("authority", &local, Some("code"), &other, Some(&code))?
+        scopes("authority", &local, Some("code"), &other, Some(&code))?
     );
     assert!(
-        rules(
+        scopes(
             "authority",
             &local,
             Some("different-bucket"),
@@ -98,7 +100,7 @@ fn log_credentials_cover_only_this_actors_logs_and_archive() -> Result<()> {
     let archive = super::super::rapid::object_name(&crate::storage_paths::snapshots(&actor)?)?;
     let logs = archive.replacen("snapshots-", "logs-", 1);
     assert_eq!(
-        rules("authority", &config, None, &actor, None)?[1..],
+        scopes("authority", &config, None, &actor, None)?.state,
         [
             rule(
                 "archive-test",
@@ -146,7 +148,8 @@ async fn every_request_mints_its_own_token() -> Result<()> {
     };
     let first = access.issue(&actor(), None).await?.context("token")?;
     let second = access.issue(&actor(), None).await?.context("token")?;
-    assert_ne!(first.access_token, second.access_token);
+    assert_ne!(first.ownership.access_token, first.state.access_token);
+    assert_ne!(first.ownership.access_token, second.ownership.access_token);
     Ok(())
 }
 
@@ -183,13 +186,14 @@ async fn concurrent_launches_share_one_intermediary_exchange() -> Result<()> {
         reqsign_google::TokenCredentialProvider::new("source")
             .with_expires_at(reqsign_core::time::Timestamp::now() + Duration::from_secs(3600)),
     ));
-    let rules = rules(
+    let rules = scopes(
         "authority",
         &super::super::SnapshotStoreConfig::Local,
         None,
         &actor(),
         None,
-    )?;
+    )?
+    .ownership;
     let issued = futures_util::future::try_join_all((0..50).map(|_| {
         let tokens = tokens.clone();
         let rules = rules.clone();
@@ -207,5 +211,49 @@ async fn concurrent_launches_share_one_intermediary_exchange() -> Result<()> {
         "each token gets its own nonce"
     );
     assert!(issued[0].expires_at_ms > SystemClock.now_ms()? + 59 * 60 * 1000);
+    Ok(())
+}
+
+#[tokio::test]
+async fn each_token_fits_the_boundary_limit_at_the_longest_identifiers() -> Result<()> {
+    let tokens = ClientSideTokens::new(
+        reqsign_core::Context::new().with_http_send(Sts(Default::default())),
+        reqsign_google::TokenCredentialProvider::new("source")
+            .with_expires_at(reqsign_core::time::Timestamp::now() + Duration::from_secs(3600)),
+    );
+    let actor = crate::actor::ActorKey {
+        project_id: "p".repeat(64),
+        actor_name: "n".repeat(48),
+        actor_id: "i".repeat(128),
+    };
+    let bucket = |name: &str| format!("{name}{}", "x".repeat(63 - name.len()));
+    let code = crate::bundle::ActorBundle {
+        bucket: bucket("code"),
+        files: vec![crate::bundle::BundleFile {
+            path: "actors.mjs".into(),
+            object: "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs"
+                .into(),
+            generation: 1,
+            sha256: "unused".into(),
+        }],
+    };
+    let rapid = serde_json::from_value(serde_json::json!({"type":"rapid",
+        "archive_bucket": bucket("archive"), "buckets":[
+        {"bucket": bucket("rapid-a"), "zone":"us-west4-a"},
+        {"bucket": bucket("rapid-b"), "zone":"us-west4-b"}]}))?;
+    for persistence in [super::super::SnapshotStoreConfig::Local, rapid] {
+        let scopes = scopes(
+            &bucket("authority"),
+            &persistence,
+            Some(&code.bucket),
+            &actor,
+            Some(&code),
+        )?;
+        tokens.issue(&scopes.ownership).await?;
+        tokens.issue(&scopes.state).await?;
+        let combined = [scopes.ownership, scopes.state].concat();
+        let error = tokens.issue(&combined).await.unwrap_err();
+        assert!(format!("{error:#}").contains("exceeds the size limit"));
+    }
     Ok(())
 }

@@ -6,7 +6,7 @@ use tokio::net::TcpListener;
 use super::config::{ActorHostConfig, executor_runtime};
 use super::process::{HostStartupTimings, serve_assigned_host, spawn_executor_process};
 use crate::actor::{ActorExecutorListener, WarmExecutor};
-use crate::bucket::WarmGcs;
+use crate::bucket::WarmStorage;
 use crate::litestream::{Litestream, Replicator};
 
 pub(super) struct WarmHost {
@@ -14,7 +14,7 @@ pub(super) struct WarmHost {
     pub listener: TcpListener,
     pub executor: WarmExecutor,
     pub javascript: tokio::process::Child,
-    pub storage: WarmGcs,
+    pub storage: WarmStorage,
     pub control_plane: Option<WarmControlPlane>,
     pub replication: Arc<dyn Replicator>,
 }
@@ -55,7 +55,7 @@ pub async fn serve_spare(shutdown: impl Future<Output = ()> + Send + 'static) ->
             tokio::try_join!(
                 async { tokio::time::timeout(Duration::from_secs(30), ipc.accept_warm()).await? },
                 async {
-                    let storage = WarmGcs::new().await?;
+                    let storage = WarmStorage::new().await?;
                     storage.preconnect().await;
                     anyhow::Ok(storage)
                 },

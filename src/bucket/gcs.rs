@@ -22,6 +22,12 @@ pub(crate) struct WarmGcs {
     credentials: PendingCredentials,
 }
 
+/// A spare's clients for the two halves of [`super::access::StorageTokens`].
+pub(crate) struct WarmStorage {
+    pub ownership: WarmGcs,
+    pub state: WarmGcs,
+}
+
 #[derive(Clone)]
 pub(crate) struct GcsClients {
     pub storage: Storage,
@@ -73,6 +79,21 @@ impl GcsBucket {
             bucket: bucket_name(bucket)?,
             clients: GcsClients::new(credentials, Some(HOST_GRPC_SUBCHANNELS)).await?,
         })
+    }
+}
+
+impl WarmStorage {
+    pub async fn new() -> Result<Self> {
+        let (ownership, state) = tokio::try_join!(WarmGcs::new(), WarmGcs::new())?;
+        Ok(Self { ownership, state })
+    }
+
+    pub async fn preconnect(&self) {
+        tokio::join!(self.ownership.preconnect(), self.state.preconnect());
+    }
+
+    pub async fn keep_warm(&self) {
+        tokio::join!(self.ownership.keep_warm(), self.state.keep_warm());
     }
 }
 

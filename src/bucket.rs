@@ -14,7 +14,7 @@ use async_trait::async_trait;
 
 pub use file::FileBucket;
 pub use gcs::GcsBucket;
-pub(crate) use gcs::WarmGcs;
+pub(crate) use gcs::WarmStorage;
 pub(crate) use runtime::ActorStateReader;
 pub use runtime::{LoadedActor, OwnershipHint, RuntimeStorage, RuntimeStorageReader};
 

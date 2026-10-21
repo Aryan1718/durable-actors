@@ -5,7 +5,9 @@ use std::{
 
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use google_cloud_auth::credentials::{CacheableResource, CredentialsProvider, EntityTag};
+use google_cloud_auth::credentials::{
+    CacheableResource, Credentials, CredentialsProvider, EntityTag,
+};
 use tokio_util::sync::CancellationToken;
 
 use super::{
@@ -15,8 +17,8 @@ use super::{
 use crate::{
     actor::ActorKey,
     bucket::{
-        Bucket, GcsBucket, RuntimeStorage, WarmGcs,
-        access::{HostStorageConfig, StorageToken},
+        BucketSnapshots, GcsBucket, RapidSnapshots, RuntimeStorage, SnapshotStore, WarmStorage,
+        access::{HostStorageConfig, StorageToken, StorageTokens},
     },
     clock::{Clock, SystemClock},
     control_plane::{ControlPlaneClient, LeaseFence},
@@ -48,36 +50,33 @@ impl HostStorage {
         session: String,
         client: Arc<ControlPlaneClient>,
         stop: CancellationToken,
-        warm: Option<WarmGcs>,
+        warm: Option<WarmStorage>,
         actor: ActorKey,
     ) -> Result<Self> {
-        let credentials = HostCredentials::new(config.token, client.clone(), stop.clone());
-        let (authority, clients): (Arc<dyn Bucket>, _) = match config.bucket {
+        let credentials = HostCredentials::new(config.tokens, client.clone(), stop.clone());
+        let (runtime, objects) = match config.bucket {
             crate::bucket::access::BucketLocation::Gcs { bucket, .. } => {
-                let bucket = match warm {
-                    Some(warm) => warm.bind(&bucket, credentials.into())?,
-                    None => GcsBucket::with_credentials(&bucket, credentials.into()).await?,
-                };
-                let clients = bucket.clients();
-                (Arc::new(bucket), Some(clients))
+                Self::open_gcs(
+                    &bucket,
+                    config.persistence,
+                    credentials,
+                    warm,
+                    &stop,
+                    &actor,
+                )
+                .await?
             }
             crate::bucket::access::BucketLocation::File { directory } => {
-                (Arc::new(crate::bucket::FileBucket::new(directory)?), None)
+                ensure!(
+                    config.persistence.rapid_settings().is_none(),
+                    "Rapid persistence requires GCS"
+                );
+                let authority = Arc::new(crate::bucket::FileBucket::new(directory)?);
+                (RuntimeStorage::new(authority, Arc::new(SystemClock))?, None)
             }
         };
-        let mut runtime = RuntimeStorage::new(authority, Arc::new(SystemClock))?;
-        if config.persistence.rapid_settings().is_some() {
-            let clients = clients.clone().context("Rapid persistence requires GCS")?;
-            let snapshots = Arc::new(crate::bucket::RapidSnapshots::gcs(
-                &config.persistence,
-                clients,
-                stop.clone(),
-                Some(&actor),
-            )?);
-            runtime = runtime.with_persistence(config.persistence, snapshots)?;
-        }
         Ok(Self {
-            objects: clients.map(|clients| clients.storage),
+            objects,
             observer: client,
             stop,
             runtime: Arc::new(runtime),
@@ -92,6 +91,44 @@ impl HostStorage {
             lease: Mutex::new(None),
             renewal: tokio::sync::Mutex::new(()),
         })
+    }
+
+    async fn open_gcs(
+        bucket: &str,
+        persistence: crate::bucket::SnapshotStoreConfig,
+        credentials: HostCredentials,
+        warm: Option<WarmStorage>,
+        stop: &CancellationToken,
+        actor: &ActorKey,
+    ) -> Result<(
+        RuntimeStorage,
+        Option<google_cloud_storage::client::Storage>,
+    )> {
+        let ownership = credentials.scoped(|tokens| &tokens.ownership);
+        let state = credentials.scoped(|tokens| &tokens.state);
+        let (authority, state) = match warm {
+            Some(warm) => (
+                warm.ownership.bind(bucket, ownership)?,
+                warm.state.bind(bucket, state)?,
+            ),
+            None => tokio::try_join!(
+                GcsBucket::with_credentials(bucket, ownership),
+                GcsBucket::with_credentials(bucket, state),
+            )?,
+        };
+        let snapshots: Arc<dyn SnapshotStore> = match persistence.rapid_settings() {
+            Some(_) => Arc::new(RapidSnapshots::gcs(
+                &persistence,
+                state.clients(),
+                stop.clone(),
+                Some(actor),
+            )?),
+            None => Arc::new(BucketSnapshots(Arc::new(state))),
+        };
+        let objects = authority.clients().storage;
+        let runtime = RuntimeStorage::new(Arc::new(authority), Arc::new(SystemClock))?
+            .with_persistence(persistence, snapshots)?;
+        Ok((runtime, Some(objects)))
     }
 
     pub(crate) async fn install_code(&self, artifact: &crate::bundle::ActorBundle) -> Result<()> {
@@ -358,7 +395,10 @@ impl HostLeaseRegistry for HostStorage {
 }
 
 #[derive(Clone)]
-struct HostCredentials(Arc<std::sync::RwLock<Option<StorageToken>>>);
+struct HostCredentials {
+    tokens: Arc<std::sync::RwLock<Option<StorageTokens>>>,
+    scope: fn(&StorageTokens) -> &StorageToken,
+}
 impl std::fmt::Debug for HostCredentials {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("HostCredentials")
@@ -366,22 +406,30 @@ impl std::fmt::Debug for HostCredentials {
 }
 impl HostCredentials {
     fn new(
-        token: Option<StorageToken>,
+        tokens: Option<StorageTokens>,
         client: Arc<ControlPlaneClient>,
         stop: CancellationToken,
     ) -> Self {
-        let credentials = Self(Arc::new(std::sync::RwLock::new(token)));
-        let refreshed = credentials.clone();
+        let credentials = Self {
+            tokens: Arc::new(std::sync::RwLock::new(tokens)),
+            scope: |tokens| &tokens.ownership,
+        };
+        let refreshed = credentials.tokens.clone();
         tokio::spawn(async move {
             loop {
                 let now = SystemClock.now_ms().unwrap_or(u64::MAX);
                 let host_expiry = client.token_expires_at_ms().unwrap_or(now);
                 let expires = refreshed
-                    .0
                     .read()
                     .unwrap()
                     .as_ref()
-                    .map_or(host_expiry, |token| token.expires_at_ms.min(host_expiry));
+                    .map_or(host_expiry, |tokens| {
+                        tokens
+                            .ownership
+                            .expires_at_ms
+                            .min(tokens.state.expires_at_ms)
+                            .min(host_expiry)
+                    });
                 let delay = Duration::from_millis(
                     expires
                         .saturating_sub(now.saturating_add(30_000))
@@ -389,8 +437,8 @@ impl HostCredentials {
                 );
                 tokio::select! { _ = stop.cancelled() => return, _ = tokio::time::sleep(delay) => {} }
                 match client.refresh_storage_access().await {
-                    Ok(token) => {
-                        *refreshed.0.write().unwrap() = token;
+                    Ok(tokens) => {
+                        *refreshed.write().unwrap() = tokens;
                     }
                     Err(error) => {
                         tracing::warn!(%error, "could not refresh host storage credentials")
@@ -399,6 +447,14 @@ impl HostCredentials {
             }
         });
         credentials
+    }
+
+    fn scoped(&self, scope: fn(&StorageTokens) -> &StorageToken) -> Credentials {
+        Self {
+            tokens: self.tokens.clone(),
+            scope,
+        }
+        .into()
     }
 }
 impl CredentialsProvider for HostCredentials {
@@ -409,8 +465,8 @@ impl CredentialsProvider for HostCredentials {
         CacheableResource<axum::http::HeaderMap>,
         google_cloud_auth::errors::CredentialsError,
     > {
-        let stored = self.0.read().unwrap();
-        let token = stored.as_ref().ok_or_else(|| {
+        let stored = self.tokens.read().unwrap();
+        let token = stored.as_ref().map(self.scope).ok_or_else(|| {
             google_cloud_auth::errors::CredentialsError::from_msg(false, "GCS credentials missing")
         })?;
         let mut headers = axum::http::HeaderMap::new();

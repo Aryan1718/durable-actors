@@ -15,7 +15,7 @@ impl ActorControlPlaneService for LocalCredentials {
     ) -> Result<tonic::Response<ControlPlaneReply>, tonic::Status> {
         Ok(tonic::Response::new(
             super::super::protocol::encode_reply(ControlPlaneCommandReply::StorageAccess {
-                token: None,
+                tokens: None,
                 replacement_token: "renewed-local-token".into(),
             })
             .unwrap(),
