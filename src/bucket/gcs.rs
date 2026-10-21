@@ -57,17 +57,21 @@ impl GcsBucket {
     }
 
     pub async fn new(bucket: &str) -> Result<Self> {
-        Self::with_credentials(
-            bucket,
-            google_cloud_auth::credentials::Builder::default().build()?,
-        )
-        .await
+        Ok(Self {
+            bucket: bucket_name(bucket)?,
+            clients: GcsClients::new(
+                google_cloud_auth::credentials::Builder::default().build()?,
+                None,
+            )
+            .await?,
+        })
     }
 
+    /// An actor host's bucket; see [`HOST_GRPC_SUBCHANNELS`].
     pub async fn with_credentials(bucket: &str, credentials: Credentials) -> Result<Self> {
         Ok(Self {
             bucket: bucket_name(bucket)?,
-            clients: GcsClients::new(credentials).await?,
+            clients: GcsClients::new(credentials, Some(HOST_GRPC_SUBCHANNELS)).await?,
         })
     }
 }
@@ -76,7 +80,8 @@ impl WarmGcs {
     pub async fn new() -> Result<Self> {
         let credentials = PendingCredentials::default();
         Ok(Self {
-            clients: GcsClients::new(credentials.clone().into()).await?,
+            clients: GcsClients::new(credentials.clone().into(), Some(HOST_GRPC_SUBCHANNELS))
+                .await?,
             credentials,
         })
     }
@@ -114,6 +119,12 @@ impl WarmGcs {
     }
 }
 
+/// gRPC connections an actor host's storage client opens. The client defaults to one
+/// per visible CPU, which in a pod can be far more than the actor uses, all opened at
+/// activation through the egress proxy.
+/// One actor's storage traffic fits in one HTTP/2 connection (~100 concurrent RPCs).
+pub(crate) const HOST_GRPC_SUBCHANNELS: usize = 1;
+
 impl GcsClients {
     async fn transfer(&self, length: u64) -> Result<Option<tokio::sync::SemaphorePermit<'_>>> {
         if length <= crate::payload::BUFFER_BYTES as u64 {
@@ -122,13 +133,14 @@ impl GcsClients {
         Ok(Some(self.transfers.acquire().await?))
     }
 
-    async fn new(credentials: Credentials) -> Result<Self> {
+    async fn new(credentials: Credentials, subchannels: Option<usize>) -> Result<Self> {
+        let mut storage = Storage::builder().with_credentials(credentials.clone());
+        if let Some(count) = subchannels {
+            storage = storage.with_grpc_subchannel_count(count);
+        }
         Ok(Self {
             transfers: Arc::new(tokio::sync::Semaphore::new(2)),
-            storage: Storage::builder()
-                .with_credentials(credentials.clone())
-                .build()
-                .await?,
+            storage: storage.build().await?,
             control: StorageControl::builder()
                 .with_credentials(credentials)
                 .build()
