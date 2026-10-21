@@ -318,7 +318,6 @@ export function stagingEnvironment(document, system = process.env) {
         "DURABLE_ACTORS_CONTROL_PLANE_BIND",
         "DURABLE_ACTORS_CONTROL_PLANE_URL",
         "DURABLE_ACTORS_PUBLIC_URL",
-        "DURABLE_ACTORS_GATEWAY_ROUTE",
         "DURABLE_ACTORS_BUCKET",
         "DURABLE_ACTORS_ARTIFACT_BUCKET",
         "DURABLE_ACTORS_ARCHIVE_BUCKET",
@@ -361,7 +360,7 @@ export function stagingEnvironment(document, system = process.env) {
     const postgres = new URL(configured.DURABLE_ACTORS_POSTGRES_URL)
     if (!["127.0.0.1", "localhost", "[::1]"].includes(postgres.hostname)) throw new Error("Staging script requires a local Postgres database")
     const publicUrl = `https://${configured.NGROK_DOMAIN}`
-    for (const key of ["DURABLE_ACTORS_CONTROL_PLANE_URL", "DURABLE_ACTORS_PUBLIC_URL", "DURABLE_ACTORS_GATEWAY_ROUTE"])
+    for (const key of ["DURABLE_ACTORS_CONTROL_PLANE_URL", "DURABLE_ACTORS_PUBLIC_URL"])
         if (configured[key] !== publicUrl) throw new Error(`${key} must match NGROK_DOMAIN in .env.staging`)
     const env = Object.fromEntries(["PATH", "HOME", "USER", "TMPDIR", "LANG", "LC_ALL", "TERM", "SHELL"].filter(key => system[key] !== undefined).map(key => [key, system[key]]))
     Object.assign(env, configured)

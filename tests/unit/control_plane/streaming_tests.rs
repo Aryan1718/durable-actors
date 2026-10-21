@@ -562,32 +562,24 @@ impl Stack {
         );
         let gateway_listener = TcpListener::bind("127.0.0.1:0").await?;
         let gateway = format!("http://{}", gateway_listener.local_addr()?);
-        let directory_service =
-            Arc::new(super::super::socket_directory::MemorySocketDirectory::default());
+        let hub = super::super::socket_bus::MemorySocketHub::default();
         let sockets = super::super::socket_gateway::SocketGateway::start(
-            gateway.clone(),
-            directory_service.clone(),
-            32768,
+            hub.join(32768),
             true,
             tokio_util::sync::CancellationToken::new(),
-        )
-        .await?;
+        )?;
         service.gateway = Some(super::super::gateway::Gateway::new(
             &issuer,
             gateway.clone(),
             sockets.clone(),
         )?);
-        sockets.owner(&actor).await?;
         let second_listener = TcpListener::bind("127.0.0.1:0").await?;
         let second_origin = format!("http://{}", second_listener.local_addr()?);
         let second_sockets = super::super::socket_gateway::SocketGateway::start(
-            second_origin.clone(),
-            directory_service,
-            32768,
+            hub.join(32768),
             true,
             tokio_util::sync::CancellationToken::new(),
-        )
-        .await?;
+        )?;
         let mut second_service = service.clone();
         second_service.gateway = Some(super::super::gateway::Gateway::new(
             &issuer,

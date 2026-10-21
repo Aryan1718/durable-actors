@@ -418,12 +418,6 @@ impl ActorControlPlaneService for ControlPlaneService {
         request: Request<ControlPlaneRequest>,
     ) -> std::result::Result<Response<ControlPlaneReply>, Status> {
         let principal = self.auth.authenticate(&request).await?;
-        let authorization = request
-            .metadata()
-            .get("authorization")
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("")
-            .to_owned();
         let command = decode_command(request.into_inner())
             .map_err(|error| Status::invalid_argument(format!("invalid command: {error:#}")))?;
         let reply = match command {
@@ -437,7 +431,7 @@ impl ActorControlPlaneService for ControlPlaneService {
                     .ok_or_else(|| Status::unavailable("socket gateway is unavailable"))?;
                 let reply = gateway
                     .connections
-                    .operation(&actor, operation, &authorization)
+                    .operation(&actor, operation)
                     .await
                     .map_err(failed_precondition)?;
                 ControlPlaneCommandReply::SocketOperation { reply }

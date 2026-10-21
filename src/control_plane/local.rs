@@ -358,13 +358,10 @@ async fn local_routes(
             .with_runtime_access(storage.access.clone()),
     );
     let socket_gateway = super::socket_gateway::SocketGateway::start(
-        origin.to_owned(),
-        Arc::new(super::socket_directory::MemorySocketDirectory::default()),
-        max_socket_connections,
+        super::socket_bus::MemorySocketHub::default().join(max_socket_connections),
         true,
         stop.child_token(),
-    )
-    .await?;
+    )?;
     let gateway = super::gateway::Gateway::new(&issuer, origin.to_owned(), socket_gateway)?;
     let mut service = ControlPlaneService::new(
         storage.runtime.clone(),
@@ -389,7 +386,6 @@ async fn local_routes(
     let inventory = Arc::new(super::socket_inventory::GatewayInventoryReader::new(
         storage.runtime.clone(),
         service.gateway.as_ref().unwrap().connections.clone(),
-        options.api_key.clone(),
     ));
     let inspector = super::inspection::ActorInspector::new(
         inventory,

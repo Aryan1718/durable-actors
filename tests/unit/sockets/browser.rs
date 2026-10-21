@@ -196,3 +196,80 @@ fn now_ms() -> i64 {
         .unwrap()
         .as_millis() as i64
 }
+
+#[tokio::test]
+async fn sockets_accept_32_mib_and_close_oversize_with_1009() -> Result<()> {
+    let (events, _received) = tokio::sync::mpsc::unbounded_channel();
+    let state = SocketServerState {
+        registry: SocketRegistry::default(),
+        dispatcher: Arc::new(Dispatcher(events)),
+        stop: CancellationToken::new(),
+    };
+    let now = now_ms();
+    let ticket = SocketTicket {
+        iss: "issuer".into(),
+        aud: "socket".into(),
+        scope: "actor:socket".into(),
+        iat: now / 1000,
+        nbf: now / 1000,
+        exp: (now + 60_000) / 1000,
+        actor: crate::actor::ActorKey {
+            project_id: "test".into(),
+            actor_name: "Room".into(),
+            actor_id: "one".into(),
+        },
+        region: "us-west".into(),
+        home_region: None,
+        metadata: serde_json::json!({}),
+        connect_by_ms: now + 60_000,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let address = listener.local_addr()?;
+    let router = Router::new().route(
+        "/",
+        get(move |upgrade: WebSocketUpgrade| {
+            let state = state.clone();
+            let ticket = ticket.clone();
+            async move {
+                upgrade
+                    .max_message_size(crate::sockets::MAX_MESSAGE_BYTES)
+                    .max_frame_size(crate::sockets::MAX_MESSAGE_BYTES)
+                    .on_upgrade(|socket| run(socket, state, ticket))
+            }
+        }),
+    );
+    let _server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
+        axum::serve(listener, router).await
+    }));
+    let unlimited = tokio_tungstenite::tungstenite::protocol::WebSocketConfig::default()
+        .max_frame_size(None)
+        .max_message_size(None);
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for (size, code) in [(32 * 1024 * 1024, 4001), (32 * 1024 * 1024 + 1, 1009)] {
+            let (mut socket, _) = tokio_tungstenite::connect_async_with_config(
+                format!("ws://{address}/"),
+                Some(unlimited),
+                false,
+            )
+            .await?;
+            assert_eq!(
+                socket.next().await.transpose()?,
+                Some(ClientMessage::Text("ready".into()))
+            );
+            let _ = socket
+                .send(ClientMessage::Text("x".repeat(size).into()))
+                .await;
+            // The test actor closes the socket with 4001 once a message reaches it.
+            assert!(
+                matches!(
+                    socket.next().await.transpose()?,
+                    Some(ClientMessage::Close(Some(frame))) if u16::from(frame.code) == code
+                ),
+                "{size} bytes"
+            );
+        }
+        anyhow::Ok(())
+    })
+    .await??;
+    Ok(())
+}

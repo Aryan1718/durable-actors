@@ -63,7 +63,7 @@ test("routes HTTPS and WebSockets to the same service through the selected ingre
 })
 
 test("allows extra controllers and a small warm pool", () => {
-    const output = manifests({ replicaCount: 2, actors: { warm: 2 } })
+    const output = manifests({ replicaCount: 2, actors: { warm: 2 }, redis: { urlSecretKey: "redis-url" } })
     assert.match(output, /replicas: 2\b/)
     assert.match(output, /DURABLE_ACTORS_SPARE_IDLE, value: "2"/)
     assert.match(output, /kind: PodDisruptionBudget/)
@@ -89,4 +89,19 @@ test("deploys the control plane separately and configures language-specific acto
     assert.match(output, new RegExp(`image: "[^"\\n]+@sha256:${"a".repeat(64)}"`))
     assert.match(output, new RegExp(`DURABLE_ACTORS_TYPESCRIPT_IMAGE, value: "[^"\\n]+@sha256:${"b".repeat(64)}"`))
     assert.match(output, new RegExp(`DURABLE_ACTORS_PYTHON_IMAGE, value: "[^"\\n]+@sha256:${"c".repeat(64)}"`))
+})
+
+test("replicas reach each other's sockets through Redis, which several replicas require", () => {
+    const single = render()
+    assert.equal(single.status, 0, single.stderr)
+    assert.doesNotMatch(single.stdout, /DURABLE_ACTORS_REDIS_|DURABLE_ACTORS_GATEWAY_ROUTE/)
+    const missing = render({ replicaCount: 2 })
+    assert.notEqual(missing.status, 0)
+    assert.match(missing.stderr, /redis.urlSecretKey/)
+
+    const shared = render({ replicaCount: 2, redis: { urlSecretKey: "redis-url", caSecretKey: "redis-ca" } })
+    assert.equal(shared.status, 0, shared.stderr)
+    assert.match(shared.stdout, /name: DURABLE_ACTORS_REDIS_URL\n\s+valueFrom:\n\s+secretKeyRef: \{name: "actors-credentials", key: "redis-url"\}/)
+    assert.match(shared.stdout, /name: DURABLE_ACTORS_REDIS_CA_CERT\n\s+valueFrom:\n\s+secretKeyRef: \{name: "actors-credentials", key: "redis-ca"\}/)
+    assert.notEqual(render({ redis: { url: "redis://inline" } }).status, 0)
 })

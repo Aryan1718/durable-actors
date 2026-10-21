@@ -394,10 +394,9 @@ impl Fixture {
                 placements,
             }),
         );
-        let directory =
-            Arc::new(super::super::super::socket_directory::MemorySocketDirectory::default());
-        let (origin, server) = serve_replica(&service, &admin, &issuer, directory.clone()).await?;
-        let (replica, replica_server) = serve_replica(&service, &admin, &issuer, directory).await?;
+        let hub = super::super::super::socket_bus::MemorySocketHub::default();
+        let (origin, server) = serve_replica(&service, &admin, &issuer, &hub).await?;
+        let (replica, replica_server) = serve_replica(&service, &admin, &issuer, &hub).await?;
         Ok(Self {
             origin,
             replica,
@@ -454,18 +453,15 @@ async fn serve_replica(
     service: &ControlPlaneService,
     admin: &AdminService,
     issuer: &ActorJwtIssuer,
-    directory: Arc<super::super::super::socket_directory::MemorySocketDirectory>,
+    hub: &super::super::super::socket_bus::MemorySocketHub,
 ) -> Result<(String, tokio::task::JoinHandle<std::io::Result<()>>)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
     let sockets = super::super::super::socket_gateway::SocketGateway::start(
-        origin.clone(),
-        directory,
-        32768,
+        hub.join(32768),
         true,
         tokio_util::sync::CancellationToken::new(),
-    )
-    .await?;
+    )?;
     let mut service = service.clone();
     service.gateway = Some(super::super::super::gateway::Gateway::new(
         issuer,

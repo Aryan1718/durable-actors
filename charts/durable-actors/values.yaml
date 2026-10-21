@@ -23,6 +23,9 @@ alarms:
   pollIntervalMs: 100
 postgres:
   maxConnections: 8
+redis:
+  urlSecretKey: ""
+  caSecretKey: ""
 resources:
   requests: {cpu: 250m, memory: 512Mi}
   limits: {memory: 1Gi}

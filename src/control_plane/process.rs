@@ -6,6 +6,7 @@ use tracing::{info, warn};
 use crate::{
     bucket::{GcsBucket, RuntimeStorageReader},
     postgres::PostgresDatabase,
+    redis_client::{Redis, RedisConfig},
     request_traces::{TraceStore, persistence::postgres::PostgresTracePersistence},
     sandbox::{
         HostSandboxRuntimeConfig,
@@ -19,10 +20,11 @@ const DEFAULT_JWT_ISSUER: &str = "durable-actors-control-plane";
 const DEFAULT_AUTHORITY_AUDIENCE: &str = "durable-actors-authority";
 const DEFAULT_INVOCATION_AUDIENCE: &str = "durable-actors-invoke";
 const DEFAULT_JWT_TTL_SECONDS: u64 = 86_400;
+/// Bump the version when the bus's messages change.
+const SOCKET_BUS_NAMESPACE: &str = "durable-actors:v1:sockets";
 
 pub struct ControlPlaneProcessConfig {
     pub bind: SocketAddr,
-    pub gateway_route: String,
     pub gateway_accept_connections: bool,
     pub max_socket_connections: usize,
     pub jwt_signing_key: String,
@@ -37,6 +39,7 @@ pub struct ControlPlaneProcessConfig {
     pub socket_event_sink: Option<SocketEventSinkConfig>,
     pub region: Option<String>,
     pub alarm_poll_interval: Duration,
+    pub redis: Option<RedisConfig>,
 }
 
 pub struct ControlPlaneStorageConfig {
@@ -137,6 +140,7 @@ async fn control_plane_routes(
         super::ActorTokenPurpose::ControlPlane,
         config.jwt_max_lifetime,
     )?;
+    let redis = config.redis.as_ref().map(Redis::connect).transpose()?;
     let database = PostgresDatabase::lazy_with_max_connections(
         &config.storage.postgres_url,
         config.storage.postgres_max_connections,
@@ -183,16 +187,21 @@ async fn control_plane_routes(
         ),
     );
     let placements = storage.clone();
+    let socket_bus = match redis {
+        Some(redis) => super::socket_bus::RedisSocketBus::start(
+            redis,
+            SOCKET_BUS_NAMESPACE,
+            config.max_socket_connections,
+            config.gateway_accept_connections,
+            stop.child_token(),
+        ),
+        None => super::socket_bus::MemorySocketHub::default().join(config.max_socket_connections),
+    };
     let socket_gateway = super::socket_gateway::SocketGateway::start(
-        config.gateway_route.clone(),
-        Arc::new(super::socket_directory::PostgresSocketDirectory::new(
-            database.clone(),
-        )),
-        config.max_socket_connections,
+        socket_bus,
         config.gateway_accept_connections,
         stop.child_token(),
-    )
-    .await?;
+    )?;
     let gateway = super::gateway::Gateway::new(
         &issuer,
         config.sandbox_provider.gke.public_origin.clone(),
@@ -232,7 +241,6 @@ async fn control_plane_routes(
     let inventory = Arc::new(super::socket_inventory::GatewayInventoryReader::new(
         storage.clone(),
         service.gateway.as_ref().unwrap().connections.clone(),
-        config.api_key.clone(),
     ));
     let admin = super::admin::AdminService::new(config.api_key, registry, issuer)?;
     let inspector =
@@ -353,13 +361,8 @@ impl ControlPlaneProcessConfig {
         );
         let socket_event_sink = socket_event_sink_config(&mut get)?;
         let alarm_poll_interval = alarm_poll_interval(&mut get)?;
-        let gateway_route = validated_http_url(
-            &required(&mut get, "DURABLE_ACTORS_GATEWAY_ROUTE")?,
-            "DURABLE_ACTORS_GATEWAY_ROUTE",
-        )?;
         Ok(Self {
             bind,
-            gateway_route,
             max_socket_connections: crate::sockets::max_connections(&mut get)?,
             gateway_accept_connections: get("DURABLE_ACTORS_GATEWAY_ACCEPT_CONNECTIONS")
                 .map(|value| value.parse())
@@ -378,6 +381,7 @@ impl ControlPlaneProcessConfig {
             socket_event_sink,
             region,
             alarm_poll_interval,
+            redis: redis_config(&mut get)?,
         })
     }
 }
@@ -456,6 +460,28 @@ fn trace_retention(get: &mut impl FnMut(&str) -> Option<String>) -> Result<Durat
         "DURABLE_ACTORS_ANALYTICS_RETENTION_DAYS must be between 1 and 3650"
     );
     Ok(Duration::from_secs(days * 86400))
+}
+
+// The URL carries its password, so errors never quote it.
+fn redis_config(get: &mut impl FnMut(&str) -> Option<String>) -> Result<Option<RedisConfig>> {
+    let set = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+    let ca_cert = set(get("DURABLE_ACTORS_REDIS_CA_CERT"));
+    let Some(url) = set(get("DURABLE_ACTORS_REDIS_URL")) else {
+        ensure!(
+            ca_cert.is_none(),
+            "DURABLE_ACTORS_REDIS_CA_CERT requires DURABLE_ACTORS_REDIS_URL"
+        );
+        return Ok(None);
+    };
+    ensure!(
+        url.starts_with("redis://") || url.starts_with("rediss://"),
+        "DURABLE_ACTORS_REDIS_URL must start with redis:// or rediss://"
+    );
+    ensure!(
+        ca_cert.is_none() || url.starts_with("rediss://"),
+        "DURABLE_ACTORS_REDIS_CA_CERT requires a rediss:// URL"
+    );
+    Ok(Some(RedisConfig { url, ca_cert }))
 }
 
 fn alarm_poll_interval(get: &mut impl FnMut(&str) -> Option<String>) -> Result<Duration> {

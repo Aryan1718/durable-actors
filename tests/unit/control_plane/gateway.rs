@@ -1,5 +1,7 @@
 use super::*;
 use crate::request_tracking::HostState;
+use futures_util::{SinkExt, StreamExt};
+use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
 
 #[tokio::test]
 async fn signed_route_is_bound_to_the_actor_and_epoch() -> Result<()> {
@@ -18,9 +20,8 @@ async fn signed_route_is_bound_to_the_actor_and_epoch() -> Result<()> {
     let gateway = test_gateway(
         &issuer,
         "http://127.0.0.1:7100".into(),
-        std::sync::Arc::new(super::super::socket_directory::MemorySocketDirectory::default()),
-    )
-    .await?;
+        &super::super::socket_bus::MemorySocketHub::default(),
+    )?;
     let actor = crate::actor::ActorKey {
         project_id: "test".into(),
         actor_name: "Counter".into(),
@@ -72,9 +73,8 @@ async fn signed_route_rejects_divergent_principal_actor() -> Result<()> {
     let gateway = test_gateway(
         &issuer,
         "http://127.0.0.1:7100".into(),
-        std::sync::Arc::new(super::super::socket_directory::MemorySocketDirectory::default()),
-    )
-    .await?;
+        &super::super::socket_bus::MemorySocketHub::default(),
+    )?;
     let principal_actor = crate::actor::ActorKey {
         project_id: "test".into(),
         actor_name: "Counter".into(),
@@ -130,25 +130,21 @@ async fn signed_route_rejects_divergent_principal_actor() -> Result<()> {
     Ok(())
 }
 
-async fn test_gateway(
+fn test_gateway(
     issuer: &ActorJwtIssuer,
     origin: String,
-    directory: std::sync::Arc<dyn super::super::socket_directory::SocketDirectory>,
+    hub: &super::super::socket_bus::MemorySocketHub,
 ) -> Result<Gateway> {
     let sockets = super::super::socket_gateway::SocketGateway::start(
-        origin.clone(),
-        directory,
-        32768,
+        hub.join(32768),
         true,
         tokio_util::sync::CancellationToken::new(),
-    )
-    .await?;
+    )?;
     Gateway::new(issuer, origin, sockets)
 }
 
 #[tokio::test]
 async fn gateways_keep_connections_and_metadata_when_the_actor_host_changes() -> Result<()> {
-    use super::super::socket_directory::SocketDirectory;
     use super::super::{
         ActorTokenPurpose,
         admin::{AdminRegistry, AdminService, HostLaunchSpec, LocalAdminRegistry},
@@ -278,7 +274,7 @@ async fn gateways_keep_connections_and_metadata_when_the_actor_host_changes() ->
         issuer.clone(),
         provisioner.clone(),
     );
-    let directory = Arc::new(super::super::socket_directory::MemorySocketDirectory::default());
+    let hub = super::super::socket_bus::MemorySocketHub::default();
     let actor = ActorKey {
         project_id: "default".into(),
         actor_name: "Counter".into(),
@@ -289,10 +285,7 @@ async fn gateways_keep_connections_and_metadata_when_the_actor_host_changes() ->
     for _ in 0..2 {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
         let origin = format!("http://{}", listener.local_addr()?);
-        let gateway = test_gateway(&issuer, origin, directory.clone()).await?;
-        if gateways.is_empty() {
-            gateway.connections.owner(&actor).await?;
-        }
+        let gateway = test_gateway(&issuer, origin, &hub)?;
         let mut service = service.clone();
         service.gateway = Some(gateway.clone());
         let admin = AdminService::new(Some("api-key".into()), registry.clone(), issuer.clone())?;
@@ -322,13 +315,10 @@ async fn gateways_keep_connections_and_metadata_when_the_actor_host_changes() ->
                 tokio_tungstenite::connect_async(grant["websocketUrl"].as_str().unwrap()).await?;
             sockets.push(socket);
         }
-        provisioner.started.acquire().await?.forget();
-        assert_eq!(
-            provisioner.started.available_permits(),
-            0,
-            "one coordinated actor activation"
-        );
-        provisioner.ready.add_permits(1);
+        for _ in 0..2 {
+            provisioner.started.acquire().await?.forget();
+        }
+        provisioner.ready.add_permits(2);
         for socket in &mut sockets {
             assert_eq!(
                 socket.next().await.transpose()?,
@@ -342,19 +332,11 @@ async fn gateways_keep_connections_and_metadata_when_the_actor_host_changes() ->
                 .iter()
                 .filter(|&&state| state == HostState::Cold)
                 .count(),
-            1
+            2
         );
-        assert_eq!(
-            host_states
-                .lock()
-                .unwrap()
-                .iter()
-                .filter(|&&state| state == HostState::Warm)
-                .count(),
-            1
-        );
-        assert_eq!(gateways[0].connections.registry.count(&actor).await, 2);
-        assert_eq!(gateways[1].connections.registry.count(&actor).await, 0);
+        assert_eq!(gateways[0].connections.registry.count(&actor).await, 1);
+        assert_eq!(gateways[1].connections.registry.count(&actor).await, 1);
+        assert_eq!(gateways[1].connections.bus.count(&actor).await?, 2);
         struct EmptyInventory;
         #[async_trait::async_trait]
         impl crate::placement::ActorInventoryReader for EmptyInventory {
@@ -371,7 +353,6 @@ async fn gateways_keep_connections_and_metadata_when_the_actor_host_changes() ->
         let reader = super::super::socket_inventory::GatewayInventoryReader::new(
             Arc::new(EmptyInventory),
             gateways[1].connections.clone(),
-            Some("api-key".into()),
         );
         let overview =
             crate::placement::ActorInventoryReader::actor_inventory(&reader, "default").await?;
@@ -387,42 +368,15 @@ async fn gateways_keep_connections_and_metadata_when_the_actor_host_changes() ->
         assert!(
             gateways[1]
                 .connections
-                .inventory("default", "Bearer wrong")
-                .await
-                .is_err()
-        );
-        assert!(
-            gateways[1]
-                .connections
-                .inventory("unrelated", "Bearer api-key")
+                .inventory("unrelated")
                 .await?
                 .rooms
                 .is_empty()
         );
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-        let unavailable = super::super::socket_directory::GatewayOwner {
-            id: "unavailable".into(),
-            route: format!("http://{}", listener.local_addr()?),
-        };
-        drop(listener);
-        directory.register(&unavailable, true).await?;
-        directory
-            .claim(
-                &ActorKey {
-                    actor_id: "unavailable".into(),
-                    ..actor.clone()
-                },
-                &unavailable,
-            )
-            .await?;
-        let partial =
-            crate::placement::ActorInventoryReader::actor_inventory(&reader, "default").await?;
-        assert!(!partial.connections_complete);
-        assert_eq!(partial.actors[0].instances[0].connections.len(), 2);
         retiring.store(true, Ordering::SeqCst);
         *provisioner.route.lock().unwrap() = host_routes[1].clone();
         provisioner.unavailable.store(2, Ordering::SeqCst);
-        provisioner.ready.add_permits(5);
+        provisioner.ready.add_permits(20);
         for socket in &mut sockets {
             socket.send(UpstreamMessage::Text("message".into())).await?;
             assert_eq!(
@@ -430,11 +384,9 @@ async fn gateways_keep_connections_and_metadata_when_the_actor_host_changes() ->
                 Some(UpstreamMessage::Text("2".into()))
             );
         }
-        assert_eq!(
-            provisioner.started.available_permits(),
-            5,
-            "known non-execution may retry through the handoff"
-        );
+        // Known non-execution retries through the handoff: five resolutions for the
+        // first gateway's socket, as before, plus one for the second gateway's.
+        assert_eq!(provisioner.started.available_permits(), 6);
         assert_eq!(provisioner.unavailable.load(Ordering::SeqCst), 0);
         sockets[0]
             .send(UpstreamMessage::Text("uncertain".into()))
@@ -534,70 +486,4 @@ impl super::super::service::HostProvisioner for PausedProvisioner {
     ) -> Result<crate::sandbox::HostTermination> {
         unreachable!()
     }
-}
-
-#[tokio::test]
-async fn gateway_accepts_32_mib_and_closes_oversize_with_1009() -> Result<()> {
-    let backend = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let backend_address = backend.local_addr()?;
-    let echo = tokio::spawn(async move {
-        let (stream, _) = backend.accept().await?;
-        let config = WebSocketConfig::default()
-            .max_frame_size(None)
-            .max_message_size(None);
-        let mut socket = tokio_tungstenite::accept_async_with_config(stream, Some(config)).await?;
-        while let Some(Ok(message)) = socket.next().await {
-            if message.is_text() {
-                socket.send(message).await?;
-            }
-        }
-        anyhow::Ok(())
-    });
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let address = listener.local_addr()?;
-    let router = Router::new().route(
-        "/",
-        get(move |upgrade: WebSocketUpgrade| async move {
-            let (upstream, _) = connect_async_with_config(
-                format!("ws://{backend_address}"),
-                Some(
-                    WebSocketConfig::default()
-                        .max_frame_size(None)
-                        .max_message_size(None),
-                ),
-                false,
-            )
-            .await
-            .unwrap();
-            upgrade
-                .max_frame_size(crate::sockets::MAX_MESSAGE_BYTES)
-                .max_message_size(crate::sockets::MAX_MESSAGE_BYTES)
-                .on_upgrade(|socket| bridge(socket, upstream))
-        }),
-    );
-    let server = tokio::spawn(async move { axum::serve(listener, router).await });
-    let result = async {
-        let config = WebSocketConfig::default()
-            .max_frame_size(None)
-            .max_message_size(None);
-        let (mut socket, _) =
-            connect_async_with_config(format!("ws://{address}"), Some(config), false).await?;
-        let message = UpstreamMessage::Text("x".repeat(32 * 1024 * 1024).into());
-        socket.send(message.clone()).await?;
-        assert_eq!(socket.next().await.transpose()?, Some(message));
-        let _ = socket
-            .send(UpstreamMessage::Text(
-                "x".repeat(32 * 1024 * 1024 + 1).into(),
-            ))
-            .await;
-        assert!(
-            matches!(socket.next().await.transpose()?, Some(UpstreamMessage::Close(Some(frame))) if frame.code == 1009.into())
-        );
-        anyhow::Ok(())
-    };
-    let result = tokio::time::timeout(std::time::Duration::from_secs(15), result).await;
-    server.abort();
-    echo.abort();
-    result??;
-    Ok(())
 }

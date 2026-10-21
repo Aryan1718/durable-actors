@@ -31,7 +31,7 @@ pub(super) fn router(invocations: ControlPlaneService, admin: AdminService) -> R
     let gateway = invocations
         .gateway
         .clone()
-        .map(|gateway| gateway.router(invocations.clone(), admin.clone()))
+        .map(|gateway| gateway.router(invocations.clone()))
         .unwrap_or_default();
     let hosts = reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -79,12 +79,9 @@ async fn health(State(state): State<PublicApiState>) -> (StatusCode, &'static st
         .invocations
         .gateway
         .as_ref()
-        .is_some_and(|gateway| gateway.connections.ensure_authority().is_err())
+        .is_some_and(|gateway| gateway.connections.stop.is_cancelled())
     {
-        return (
-            StatusCode::SERVICE_UNAVAILABLE,
-            "socket gateway lease expired",
-        );
+        return (StatusCode::SERVICE_UNAVAILABLE, "socket gateway stopping");
     }
     (StatusCode::OK, "ok")
 }

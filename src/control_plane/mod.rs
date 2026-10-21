@@ -45,6 +45,6 @@ pub(crate) use self::{
     service::ControlPlaneService,
 };
 
-mod socket_directory;
+mod socket_bus;
 pub(crate) mod socket_gateway;
 mod socket_inventory;

@@ -208,7 +208,6 @@ pub(super) async fn publish(
             SocketOperation::Publish {
                 effects: request.effects,
             },
-            authorization,
         )
         .await
         .map_err(|error| {

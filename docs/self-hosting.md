@@ -6,6 +6,7 @@ Deploy Durable Actors on GKE Sandbox with PostgreSQL and one Standard GCS bucket
 
 - GKE Standard with Workload Identity Federation and enforced NetworkPolicy. Use an ordinary node pool for the controller and a COS Sandbox node pool with the `gvisor` RuntimeClass for actors. The actor pool must have nodes in your chosen `placement.zone`.
 - PostgreSQL reachable from the controller, with a database user allowed to run migrations. Use a TLS connection for a remote database. A private Cloud SQL instance is suitable when your cluster has a supported connection to it.
+- Redis, such as Memorystore, for more than one controller replica. Use TLS and, in production, a replicated tier: sockets close while Redis is unreachable.
 - An HTTPS hostname and certificate. The chart can create an Ingress for an existing controller, or you can route an existing HTTPS gateway to its Service. The endpoint must support WebSockets.
 - Helm, `kubectl`, Google Cloud CLI, and permissions to create the following resources.
 
@@ -47,7 +48,7 @@ kubectl -n actors create secret generic actors-credentials \
   --from-file=jwt-signing-key --from-file=api-key
 ```
 
-Store the generated credentials in your secret manager. Configure your backend with the same API key. Provision your TLS Secret separately in namespace `actors`; its certificate must cover your public hostname.
+For more than one replica, also add `--from-literal=redis-url="$REDIS_URL"` and set `redis.urlSecretKey: redis-url`. For a private CA such as Memorystore's, add `--from-file=redis-ca=server-ca.pem` and set `redis.caSecretKey: redis-ca`. Store the generated credentials in your secret manager. Configure your backend with the same API key. Provision your TLS Secret separately in namespace `actors`; its certificate must cover your public hostname.
 
 ## Install
 
@@ -93,7 +94,7 @@ curl --fail https://actors.example.com/healthz
 
 Use the [deployment registration API](reference/openapi.md) to register compiled actor code and its contract for your project, then generate your application client using the [TypeScript](reference/typescript-guide.md) or [Python](reference/python-guide.md) guide. A healthy controller does not register or deploy an application automatically. Upload immutable compiled artifacts into the configured bucket and register their manifest; artifact format and registration endpoints are described in the [OpenAPI specification](reference/openapi.yaml).
 
-Verify an actor write and read, restart its sandbox, and read the value again. Also verify a WebSocket connection through your chosen ingress. One controller handles HTTP and sockets by default; actors start on demand. Increase `actors.warm` for lower cold-start latency and `replicaCount` for controller redundancy. These settings do not create additional node pools or guarantee capacity.
+Verify an actor write and read, restart its sandbox, and read the value again. Also verify a WebSocket connection through your chosen ingress. One controller handles HTTP and sockets by default; actors start on demand. Increase `actors.warm` for lower cold-start latency and `replicaCount` for controller redundancy; more than one replica requires Redis. These settings do not create additional node pools or guarantee capacity.
 
 ## Speed up writes with GCS Rapid
 
@@ -152,6 +153,6 @@ kubectl -n actors-actors get events --sort-by=.lastTimestamp
 - Storage permission errors: check bucket roles, the Google service account annotation, and the Workload Identity binding.
 - DNS failures: for host-networked or link-local DNS, add the resolver address to `networkPolicy.dnsCidrs`, such as a `/32` for your cluster's NodeLocal DNS listener.
 - Controller startup failures: check PostgreSQL reachability, migration permissions, and the signing-key format.
-- WebSocket disconnects: check ingress upgrade support and connection timeouts.
+- WebSocket disconnects: check ingress upgrade support and connection timeouts, and look for "socket bus lost its Redis subscription" in controller logs.
 
 See the [chart values](../charts/durable-actors/values.yaml) for resource limits and optional settings.

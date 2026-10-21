@@ -10,6 +10,7 @@ mod litestream;
 mod payload;
 pub mod placement;
 mod postgres;
+mod redis_client;
 pub mod sandbox;
 pub mod state_log;
 pub mod state_transport;

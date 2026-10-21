@@ -58,6 +58,7 @@ rusqlite = { version = "0.40.2", features = ["bundled", "hooks"], default-featur
 gcp_auth = { version = "0.12.7", default-features = false, features = ["aws-lc-rs"] }
 memmap2 = "0.9"
 backon = "1"
+redis = { version = "1.7.1", default-features = false, features = ["tokio-comp", "connection-manager", "tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 
 [build-dependencies]
 protoc-bin-vendored = "3"

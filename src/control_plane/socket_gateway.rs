@@ -1,7 +1,7 @@
 use super::{
-    gateway::Gateway,
     service::{ActorTarget, ControlPlaneService},
-    socket_directory::{GATEWAY_LEASE, GatewayOwner, SocketDirectory},
+    socket_bus::SocketBus,
+    socket_inventory::SocketInventory,
     socket_ticket::SocketTicket,
 };
 use crate::request_tracking::HostState;
@@ -11,16 +11,9 @@ use crate::{
 };
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
-use axum::{
-    Json,
-    extract::State,
-    http::{HeaderMap, StatusCode, header},
-};
+use axum::http::StatusCode;
 use serde::{Deserialize, Serialize};
-use std::{
-    sync::{Arc, Mutex},
-    time::Duration,
-};
+use std::{sync::Arc, time::Duration};
 use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 
@@ -42,51 +35,28 @@ pub(crate) enum SocketEventReply {
     Failed { message: String },
 }
 
-#[derive(Serialize, Deserialize)]
-pub(super) struct GatewayOperationRequest {
-    actor: ActorKey,
-    gateway_id: String,
-    operation: SocketOperation,
-}
-
 type ActorRoute = Arc<tokio::sync::Mutex<Option<ActorTarget>>>;
 
 pub(super) struct SocketGateway {
-    pub owner: GatewayOwner,
     pub registry: SocketRegistry,
     pub stop: CancellationToken,
-    pub(super) directory: Arc<dyn SocketDirectory>,
-    deadline: Mutex<Instant>,
-    owners: moka::future::Cache<ActorKey, GatewayOwner>,
+    pub(super) bus: Arc<dyn SocketBus>,
+    pub(super) accepts_sockets: bool,
     routes: moka::future::Cache<ActorKey, ActorRoute>,
     pub(super) http: reqwest::Client,
 }
 
 impl SocketGateway {
-    pub(super) async fn start(
-        route: String,
-        directory: Arc<dyn SocketDirectory>,
-        max_connections: usize,
-        accepts_rooms: bool,
+    pub(super) fn start(
+        bus: Arc<dyn SocketBus>,
+        accepts_sockets: bool,
         stop: CancellationToken,
     ) -> Result<Arc<Self>> {
-        super::gateway::backend_origin(&route)?;
-        let owner = GatewayOwner {
-            id: uuid::Uuid::new_v4().to_string(),
-            route,
-        };
-        let started = Instant::now();
-        directory.register(&owner, accepts_rooms).await?;
-        let gateway = Arc::new(Self {
-            owner,
-            directory,
+        Ok(Arc::new(Self {
+            registry: bus.registry().clone(),
+            bus,
+            accepts_sockets,
             stop,
-            registry: SocketRegistry::with_max_connections(max_connections),
-            deadline: Mutex::new(started + GATEWAY_LEASE - Duration::from_secs(5)),
-            owners: moka::future::Cache::builder()
-                .max_capacity(100_000)
-                .time_to_live(Duration::from_secs(5))
-                .build(),
             routes: moka::future::Cache::builder()
                 .max_capacity(100_000)
                 .time_to_idle(Duration::from_secs(300))
@@ -96,118 +66,48 @@ impl SocketGateway {
                 .redirect(reqwest::redirect::Policy::none())
                 .connect_timeout(Duration::from_secs(5))
                 .build()?,
-        });
-        gateway.maintain_lease();
-        Ok(gateway)
+        }))
     }
 
-    fn maintain_lease(self: &Arc<Self>) {
-        let weak = Arc::downgrade(self);
-        let stop = self.stop.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! { _ = stop.cancelled() => break, _ = tokio::time::sleep(Duration::from_secs(5)) => {} }
-                let Some(gateway) = weak.upgrade() else {
-                    break;
-                };
-                if gateway.ensure_authority().is_err() {
-                    stop.cancel();
-                    break;
-                }
-                let started = Instant::now();
-                let renewed = tokio::time::timeout(
-                    Duration::from_secs(5),
-                    gateway.directory.renew(&gateway.owner),
-                )
-                .await;
-                match renewed {
-                    Ok(Ok(())) if gateway.ensure_authority().is_ok() => {
-                        *gateway.deadline.lock().unwrap() =
-                            started + GATEWAY_LEASE - Duration::from_secs(5)
-                    }
-                    _ => {
-                        tracing::warn!(gateway_id = %gateway.owner.id, "socket gateway lease renewal failed");
-                    }
-                }
-            }
-        });
+    pub(super) fn generation(&self) -> Option<u64> {
+        if self.stop.is_cancelled() {
+            return None;
+        }
+        self.bus.generation()
     }
 
-    pub(super) fn ensure_authority(&self) -> Result<()> {
+    pub(super) fn ensure_delivery(&self, generation: u64) -> Result<()> {
         ensure!(
-            !self.stop.is_cancelled() && Instant::now() < *self.deadline.lock().unwrap(),
-            "socket gateway lease expired"
+            self.generation() == Some(generation),
+            "socket gateway lost its subscription"
         );
         Ok(())
-    }
-
-    pub(super) async fn owner(&self, actor: &ActorKey) -> Result<GatewayOwner> {
-        self.ensure_authority()?;
-        self.owners
-            .try_get_with(actor.clone(), self.directory.claim(actor, &self.owner))
-            .await
-            .map_err(|error| anyhow::anyhow!("{error:#}"))
     }
 
     pub(super) async fn operation(
         &self,
         actor: &ActorKey,
         operation: SocketOperation,
-        authorization: &str,
     ) -> Result<SocketOperationReply> {
-        let owner = self.owner(actor).await?;
-        if owner.id == self.owner.id {
-            return self.apply(actor, operation).await;
-        }
-        let response = self
-            .http
-            .post(format!(
-                "{}/internal/socket-operation",
-                owner.route.trim_end_matches('/')
-            ))
-            .header(header::AUTHORIZATION, authorization)
-            .json(&GatewayOperationRequest {
-                actor: actor.clone(),
-                gateway_id: owner.id,
-                operation,
-            })
-            .send()
-            .await?;
-        let status = response.status();
-        if !status.is_success() {
-            anyhow::bail!(
-                "gateway operation failed ({status}): {}",
-                response.text().await?
-            );
-        }
-        response
-            .json()
-            .await
-            .context("read gateway operation reply")
-    }
-
-    pub(super) async fn apply(
-        &self,
-        actor: &ActorKey,
-        operation: SocketOperation,
-    ) -> Result<SocketOperationReply> {
-        self.ensure_authority()?;
+        ensure!(!self.stop.is_cancelled(), "socket gateway stopping");
         match operation {
             SocketOperation::Publish { effects } => {
                 crate::actor::validate_socket_effects(&effects)?;
-                self.registry.apply(actor, effects).await;
+                self.bus.publish(actor, effects).await?;
                 Ok(SocketOperationReply::Published)
             }
             SocketOperation::Connections { tag } => Ok(SocketOperationReply::Connections {
-                connections: self
-                    .registry
-                    .connections_with_tag(actor, tag.as_deref())
-                    .await,
+                connections: self.bus.connections(actor, tag.as_deref()).await?,
             }),
             SocketOperation::Count => Ok(SocketOperationReply::Count {
-                count: self.registry.count(actor).await,
+                count: self.bus.count(actor).await?,
             }),
         }
+    }
+
+    pub(super) async fn inventory(&self, project: &str) -> Result<SocketInventory> {
+        ensure!(!self.stop.is_cancelled(), "socket gateway stopping");
+        self.bus.inventory(project).await
     }
 
     async fn target(
@@ -256,7 +156,7 @@ impl SocketGateway {
         let retry_deadline = started + super::CONTROL_PLANE_REQUEST_TIMEOUT;
         let mut host_state = HostState::Warm;
         loop {
-            self.ensure_authority()?;
+            ensure!(!self.stop.is_cancelled(), "socket gateway stopping");
             ensure!(
                 Instant::now() < retry_deadline,
                 "actor remained unavailable during socket handoff"
@@ -312,10 +212,7 @@ impl SocketGateway {
                     self.invalidate(actor, &target).await;
                 }
                 Ok(reply) => match reply.error_for_status()?.json::<SocketEventReply>().await? {
-                    SocketEventReply::Completed { effects } => {
-                        self.ensure_authority()?;
-                        return Ok(effects);
-                    }
+                    SocketEventReply::Completed { effects } => return Ok(effects),
                     SocketEventReply::NotExecuted => {
                         self.invalidate(actor, &target).await;
                     }
@@ -339,12 +236,13 @@ impl SocketGateway {
 pub(super) struct GatewaySocketDispatcher {
     pub gateway: Arc<SocketGateway>,
     pub service: ControlPlaneService,
+    pub generation: u64,
 }
 
 #[async_trait]
 impl SocketDispatcher for GatewaySocketDispatcher {
     fn ensure_authority(&self) -> Result<()> {
-        self.gateway.ensure_authority()
+        self.gateway.ensure_delivery(self.generation)
     }
     async fn dispatch(
         &self,
@@ -360,56 +258,16 @@ impl SocketDispatcher for GatewaySocketDispatcher {
         }
         result
     }
+    async fn deliver(
+        &self,
+        _: &SocketRegistry,
+        actor: &ActorKey,
+        effects: Vec<ActorSocketEffect>,
+    ) -> Result<()> {
+        self.gateway.bus.publish(actor, effects).await
+    }
     fn notify(&self, ticket: &SocketTicket, event: &crate::actor::ActorSocketEvent) {
         self.service
             .deliver_socket_message_event(&ticket.actor, None, event);
     }
-}
-
-pub(super) async fn internal_operation(
-    State(service): State<ControlPlaneService>,
-    headers: HeaderMap,
-    Json(request): Json<GatewayOperationRequest>,
-) -> Result<Json<SocketOperationReply>, (StatusCode, String)> {
-    let result = async {
-        let authorization = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|value| value.to_str().ok())
-            .unwrap_or("");
-        let gateway = service
-            .gateway
-            .as_ref()
-            .context("socket gateway unavailable")?;
-        authorize_operation(&service, gateway, &request, authorization).await?;
-        let connections = &gateway.connections;
-        ensure!(
-            connections.owner(&request.actor).await?.id == connections.owner.id
-                && connections.owner.id == request.gateway_id,
-            "socket gateway ownership changed"
-        );
-        connections.apply(&request.actor, request.operation).await
-    }
-    .await;
-    result
-        .map(Json)
-        .map_err(|error: anyhow::Error| (StatusCode::FORBIDDEN, format!("{error:#}")))
-}
-
-async fn authorize_operation(
-    service: &ControlPlaneService,
-    gateway: &Gateway,
-    request: &GatewayOperationRequest,
-    authorization: &str,
-) -> Result<()> {
-    if let Ok(principal) = service.auth.authenticate_authorization(authorization) {
-        return service
-            .authorize_socket_host(&principal, &request.actor)
-            .await;
-    }
-    ensure!(
-        matches!(request.operation, SocketOperation::Publish { .. }),
-        "actor tickets can only publish socket effects"
-    );
-    gateway.authorize_publish(&request.actor, authorization)?;
-    Ok(())
 }

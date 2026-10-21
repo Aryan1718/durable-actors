@@ -3,19 +3,14 @@ use axum::{
     Router,
     extract::{
         Query, State, WebSocketUpgrade,
-        ws::{Message, WebSocket},
+        ws::{CloseFrame, Message},
     },
     http::StatusCode,
     response::Response,
-    routing::{get, post},
+    routing::get,
 };
-use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
 use std::sync::Arc;
-use tokio_tungstenite::{
-    connect_async_with_config,
-    tungstenite::{Message as UpstreamMessage, protocol::WebSocketConfig},
-};
 
 use super::{
     ActorJwtVerifier, auth::ActorInvocationCapability, issuer::ActorJwtIssuer,
@@ -73,21 +68,10 @@ impl Gateway {
         Ok(capability.owner_epoch)
     }
 
-    pub fn router(self, service: ControlPlaneService, admin: super::admin::AdminService) -> Router {
-        let inventory = super::socket_inventory::router(self.connections.clone(), admin);
+    pub fn router(self, service: ControlPlaneService) -> Router {
         Router::new()
             .route("/v1/socket", get(connect))
-            .with_state((self, service.clone()))
-            .merge(inventory)
-            .merge(
-                Router::new()
-                    .route(
-                        "/internal/socket-operation",
-                        post(super::socket_gateway::internal_operation),
-                    )
-                    .layer(axum::extract::DefaultBodyLimit::disable())
-                    .with_state(service),
-            )
+            .with_state((self, service))
     }
 
     fn capability(
@@ -137,127 +121,41 @@ async fn connect(
         .sockets
         .verify(&key)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    let owner = gateway
-        .connections
-        .owner(&ticket.actor)
-        .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    if owner.id == gateway.connections.owner.id {
-        let state = SocketServerState {
-            registry: gateway.connections.registry.clone(),
-            dispatcher: Arc::new(GatewaySocketDispatcher {
-                gateway: gateway.connections.clone(),
-                service,
-            }),
-            stop: gateway.connections.stop.clone(),
-        };
-        return Ok(upgrade
-            .read_buffer_size(READ_BUFFER_BYTES)
-            .write_buffer_size(WRITE_BUFFER_BYTES)
-            .max_message_size(MAX_MESSAGE_BYTES)
-            .max_frame_size(MAX_MESSAGE_BYTES)
-            .on_upgrade(move |socket| run(socket, state, ticket)));
+    let connections = gateway.connections.clone();
+    if !connections.accepts_sockets {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
     }
-    let mut url = backend_origin(&owner.route).map_err(|_| StatusCode::BAD_GATEWAY)?;
-    let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
-    url.set_scheme(scheme)
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    url.set_path("/v1/socket");
-    url.query_pairs_mut().append_pair("key", &key);
-    let config = WebSocketConfig::default()
-        .read_buffer_size(READ_BUFFER_BYTES)
-        .write_buffer_size(WRITE_BUFFER_BYTES)
-        .max_message_size(None)
-        .max_frame_size(None);
-    let (upstream, _) = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        connect_async_with_config(url.as_str(), Some(config), false),
-    )
-    .await
-    .map_err(|_| StatusCode::GATEWAY_TIMEOUT)?
-    .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    let generation = connections
+        .generation()
+        .ok_or(StatusCode::SERVICE_UNAVAILABLE)?;
+    let state = SocketServerState {
+        registry: connections.registry.clone(),
+        dispatcher: Arc::new(GatewaySocketDispatcher {
+            gateway: connections.clone(),
+            service,
+            generation,
+        }),
+        stop: connections.stop.clone(),
+    };
     Ok(upgrade
         .read_buffer_size(READ_BUFFER_BYTES)
         .write_buffer_size(WRITE_BUFFER_BYTES)
         .max_message_size(MAX_MESSAGE_BYTES)
         .max_frame_size(MAX_MESSAGE_BYTES)
-        .on_upgrade(|socket| bridge(socket, upstream)))
-}
-
-async fn bridge(
-    socket: WebSocket,
-    upstream: tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    >,
-) {
-    let (mut downstream_sink, mut downstream) = socket.split();
-    let (mut upstream_sink, mut upstream) = upstream.split();
-    let oversized = {
-        let upload = async {
-            while let Some(message) = downstream.next().await {
-                let message = match message {
-                    Ok(message) => message,
-                    Err(error) => return crate::sockets::message_too_large(&error),
-                };
-                let closing = matches!(message, Message::Close(_));
-                let message = match message {
-                    Message::Text(text) => UpstreamMessage::Text(text.to_string().into()),
-                    Message::Binary(bytes) => UpstreamMessage::Binary(bytes),
-                    Message::Ping(bytes) => UpstreamMessage::Ping(bytes),
-                    Message::Pong(bytes) => UpstreamMessage::Pong(bytes),
-                    Message::Close(frame) => UpstreamMessage::Close(frame.map(|frame| {
-                        tokio_tungstenite::tungstenite::protocol::CloseFrame {
-                            code: frame.code.into(),
-                            reason: frame.reason.to_string().into(),
-                        }
-                    })),
-                };
-                if upstream_sink.send(message).await.is_err() || closing {
-                    break;
-                }
+        .on_upgrade(move |mut socket| async move {
+            let actor = ticket.actor.clone();
+            if connections.bus.watch(&actor).await.is_err() {
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1013,
+                        reason: "socket gateway unavailable".into(),
+                    })))
+                    .await;
+                return;
             }
-            let _ = upstream_sink.close().await;
-            false
-        };
-        let download = async {
-            while let Some(Ok(message)) = upstream.next().await {
-                let closing = matches!(message, UpstreamMessage::Close(_));
-                let message = match message {
-                    UpstreamMessage::Text(text) => Message::Text(text.to_string().into()),
-                    UpstreamMessage::Binary(bytes) => Message::Binary(bytes),
-                    UpstreamMessage::Ping(bytes) => Message::Ping(bytes),
-                    UpstreamMessage::Pong(bytes) => Message::Pong(bytes),
-                    UpstreamMessage::Close(frame) => {
-                        Message::Close(frame.map(|frame| axum::extract::ws::CloseFrame {
-                            code: frame.code.into(),
-                            reason: frame.reason.to_string().into(),
-                        }))
-                    }
-                    UpstreamMessage::Frame(_) => continue,
-                };
-                if downstream_sink.send(message).await.is_err() || closing {
-                    break;
-                }
-            }
-            let _ = downstream_sink.close().await;
-        };
-        tokio::pin!(upload, download);
-        tokio::select! {
-            oversized = &mut upload => {
-                if !oversized { let _ = tokio::time::timeout(std::time::Duration::from_secs(5), download).await; }
-                oversized
-            },
-            () = &mut download => tokio::time::timeout(std::time::Duration::from_secs(5), upload).await.unwrap_or(false),
-        }
-    };
-    if oversized {
-        let _ = downstream_sink
-            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                code: 1009,
-                reason: "message exceeds 32 MiB".into(),
-            })))
-            .await;
-    }
+            run(socket, state, ticket).await;
+            connections.bus.unwatch(&actor).await;
+        }))
 }
 
 #[cfg(test)]

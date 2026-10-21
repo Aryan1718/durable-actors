@@ -1804,13 +1804,11 @@ async fn socket_authorization_accepts_a_host_renewing_its_lease() -> Result<()> 
 async fn with_socket_gateway(mut service: ControlPlaneService) -> Result<ControlPlaneService> {
     let origin = "https://gateway.example.com".to_owned();
     let sockets = super::super::socket_gateway::SocketGateway::start(
-        origin.clone(),
-        Arc::new(super::super::socket_directory::MemorySocketDirectory::default()),
-        crate::sockets::DEFAULT_MAX_CONNECTIONS,
+        super::super::socket_bus::MemorySocketHub::default()
+            .join(crate::sockets::DEFAULT_MAX_CONNECTIONS),
         true,
         tokio_util::sync::CancellationToken::new(),
-    )
-    .await?;
+    )?;
     service.gateway = Some(super::super::gateway::Gateway::new(
         &service.host_token_issuer,
         origin,

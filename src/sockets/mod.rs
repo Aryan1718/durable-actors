@@ -272,12 +272,20 @@ impl SocketRegistry {
     async fn apply_one(&self, actor: &ActorKey, effect: ActorSocketEffect) {
         match effect {
             ActorSocketEffect::SetAutoResponse { request, response } => {
-                self.entries
-                    .write()
-                    .await
-                    .entry(actor.clone())
-                    .or_default()
-                    .auto_response = request.zip(response);
+                let mut entries = self.entries.write().await;
+                match request.zip(response) {
+                    Some(pair) => {
+                        entries.entry(actor.clone()).or_default().auto_response = Some(pair)
+                    }
+                    None => {
+                        if let Some(room) = entries.get_mut(actor) {
+                            room.auto_response = None;
+                            if room.is_empty() {
+                                entries.remove(actor);
+                            }
+                        }
+                    }
+                }
             }
             ActorSocketEffect::StateSnapshot {
                 connection_id,
