@@ -7,7 +7,9 @@ use crate::host::HostId;
 pub(crate) mod gke;
 mod local;
 mod local_store;
+pub(crate) mod modal;
 pub(crate) mod pool;
+mod remote;
 
 pub(crate) use local::LocalSandboxProvider;
 

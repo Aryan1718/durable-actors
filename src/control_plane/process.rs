@@ -8,10 +8,7 @@ use crate::{
     postgres::PostgresDatabase,
     redis_client::{Redis, RedisConfig},
     request_traces::{TraceStore, persistence::postgres::PostgresTracePersistence},
-    sandbox::{
-        HostSandboxRuntimeConfig,
-        gke::{GkeConfig, GkeSandboxProvider},
-    },
+    sandbox::{HostSandboxRuntimeConfig, gke::GkeConfig, modal::ModalConfig},
 };
 
 use super::{ActorJwtVerifier, ControlPlaneService};
@@ -70,8 +67,14 @@ impl RuntimeImages {
 pub struct SandboxProviderConfig {
     pub runtime_images: RuntimeImages,
     pub(super) pool: crate::sandbox::pool::PoolConfig,
-    pub(crate) gke: GkeConfig,
+    pub(crate) backend: SandboxBackend,
+    pub(crate) public_origin: String,
     pub runtime: HostSandboxRuntimeConfig,
+}
+
+pub(crate) enum SandboxBackend {
+    Gke(GkeConfig),
+    Modal(ModalConfig),
 }
 
 pub struct SocketEventSinkConfig {
@@ -196,7 +199,7 @@ async fn control_plane_routes(
     )?;
     let gateway = super::gateway::Gateway::new(
         &issuer,
-        config.sandbox_provider.gke.public_origin.clone(),
+        config.sandbox_provider.public_origin.clone(),
         socket_gateway,
     )?;
     let provisioner = sandbox_provisioner(
@@ -269,7 +272,19 @@ async fn sandbox_provisioner(
     registry: Arc<dyn super::admin::AdminRegistry>,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<Arc<dyn super::service::HostProvisioner>> {
-    let provider = Arc::new(GkeSandboxProvider::new(config.gke).await?);
+    let provider = Arc::new(match config.backend {
+        SandboxBackend::Gke(gke) => crate::sandbox::gke::provider(gke).await?,
+        SandboxBackend::Modal(modal) => {
+            crate::sandbox::modal::provider(
+                modal,
+                &[
+                    &config.runtime_images.typescript,
+                    &config.runtime_images.python,
+                ],
+            )
+            .await?
+        }
+    });
     let pool = crate::sandbox::pool::SparePool::new(database, provider.clone(), config.pool);
     pool.start(registry, stop);
     Ok(Arc::new(
@@ -343,12 +358,12 @@ impl ControlPlaneProcessConfig {
         };
         let sandbox_provider =
             sandbox_provider_config(&mut get, &jwt_issuer, &invocation_audience)?;
-        let region = region.or_else(|| sandbox_provider.gke.zones.keys().next().cloned());
+        let region = region.or_else(|| sandbox_provider.pool.regions.first().cloned());
         ensure!(
             region
                 .as_ref()
-                .is_some_and(|region| sandbox_provider.gke.zones.contains_key(region)),
-            "default region has no configured GKE zone"
+                .is_some_and(|region| sandbox_provider.pool.regions.contains(region)),
+            "default region has no configured sandbox placement"
         );
         let socket_event_sink = socket_event_sink_config(&mut get)?;
         let alarm_poll_interval = alarm_poll_interval(&mut get)?;
@@ -505,7 +520,6 @@ fn sandbox_provider_config(
     jwt_issuer: &str,
     invocation_audience: &str,
 ) -> Result<SandboxProviderConfig> {
-    let zones = placement_zones(get)?;
     let public_origin = validated_http_url(
         &required(get, "DURABLE_ACTORS_PUBLIC_URL")?,
         "DURABLE_ACTORS_PUBLIC_URL",
@@ -530,7 +544,7 @@ fn sandbox_provider_config(
         idle <= fleet_maximum,
         "DURABLE_ACTORS_SPARE_IDLE must not exceed DURABLE_ACTORS_SPARE_FLEET_MAX"
     );
-    let regions = zones.keys().cloned().collect();
+    let (backend, regions) = sandbox_backend(get, &control_plane_url)?;
     Ok(SandboxProviderConfig {
         runtime_images: RuntimeImages {
             typescript: runtime_image(get, "DURABLE_ACTORS_TYPESCRIPT_IMAGE")?,
@@ -549,12 +563,8 @@ fn sandbox_provider_config(
                 memory_mib: pool_number(get, "DURABLE_ACTORS_HOST_MEMORY_MIB", 256, 128, 262144)?,
             },
         },
-        gke: GkeConfig {
-            namespace: get("DURABLE_ACTORS_GKE_NAMESPACE")
-                .unwrap_or_else(|| "terse-sandboxes".into()),
-            zones,
-            public_origin,
-        },
+        backend,
+        public_origin,
         runtime: HostSandboxRuntimeConfig {
             control_plane_url,
             jwt_issuer: jwt_issuer.into(),
@@ -562,6 +572,84 @@ fn sandbox_provider_config(
             host_idle_timeout_ms: crate::host::host_idle_timeout_ms(get)?,
         },
     })
+}
+
+fn sandbox_backend(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    control_plane_url: &str,
+) -> Result<(SandboxBackend, Vec<String>)> {
+    match get("DURABLE_ACTORS_SANDBOX_PROVIDER")
+        .as_deref()
+        .unwrap_or("gke")
+    {
+        "gke" => {
+            let zones = placement_zones(get)?;
+            let regions = zones.keys().cloned().collect();
+            Ok((
+                SandboxBackend::Gke(GkeConfig {
+                    namespace: get("DURABLE_ACTORS_GKE_NAMESPACE")
+                        .unwrap_or_else(|| "terse-sandboxes".into()),
+                    zones,
+                }),
+                regions,
+            ))
+        }
+        "modal" => {
+            let url = reqwest::Url::parse(control_plane_url)?;
+            ensure!(
+                url.scheme() == "https"
+                    && url.path() == "/"
+                    && url.query().is_none()
+                    && url.fragment().is_none()
+                    && url.username().is_empty()
+                    && url.password().is_none(),
+                "Modal requires an HTTPS control-plane origin supporting gRPC"
+            );
+            let regions: BTreeMap<String, String> =
+                serde_json::from_str(&required(get, "DURABLE_ACTORS_MODAL_REGIONS")?)?;
+            ensure!(
+                !regions.is_empty(),
+                "at least one Modal placement region is required"
+            );
+            for (canonical, modal) in &regions {
+                ensure!(
+                    modal_region(modal) == Some(canonical.as_str()),
+                    "Modal region {modal} does not match canonical region {canonical}"
+                );
+            }
+            let canonical = regions.keys().cloned().collect();
+            let app_name = required(get, "DURABLE_ACTORS_MODAL_APP")?;
+            let seconds = pool_number(
+                get,
+                "DURABLE_ACTORS_MODAL_TIMEOUT_SECONDS",
+                3600,
+                120,
+                86400,
+            )?;
+            Ok((
+                SandboxBackend::Modal(ModalConfig {
+                    app_name,
+                    regions,
+                    timeout: Duration::from_secs(seconds.into()),
+                }),
+                canonical,
+            ))
+        }
+        provider => anyhow::bail!("unsupported DURABLE_ACTORS_SANDBOX_PROVIDER {provider:?}"),
+    }
+}
+
+fn modal_region(region: &str) -> Option<&'static str> {
+    match region {
+        "ca" => Some("canada"),
+        "us-east" => Some("north-america-east"),
+        "us-central" => Some("north-america-central"),
+        "us-south" => Some("north-america-south"),
+        "us-west" => Some("north-america-west"),
+        "eu-west" => Some("europe-west"),
+        "ap-southeast" => Some("asia-southeast"),
+        _ => None,
+    }
 }
 
 fn placement_zones(

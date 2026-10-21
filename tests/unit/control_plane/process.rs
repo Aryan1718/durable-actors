@@ -200,10 +200,7 @@ fn rapid_configuration_uses_two_zones_and_gke() -> Result<()> {
         config.storage.persistence,
         crate::bucket::SnapshotStoreConfig::Rapid { .. }
     ));
-    assert_eq!(
-        config.sandbox_provider.gke.zones["north-america-west"],
-        vec!["us-west4-a"]
-    );
+    assert_eq!(gke(&config).zones["north-america-west"], vec!["us-west4-a"]);
     Ok(())
 }
 
@@ -439,10 +436,7 @@ fn single_gke_zone_infers_the_actor_region() -> Result<()> {
     let config =
         ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|v| (*v).into()))?;
     assert_eq!(config.region.as_deref(), Some("north-america-east"));
-    assert_eq!(
-        config.sandbox_provider.gke.zones["north-america-east"],
-        ["us-east4-a"]
-    );
+    assert_eq!(gke(&config).zones["north-america-east"], ["us-east4-a"]);
     values.insert(
         "DURABLE_ACTORS_GKE_ZONES",
         r#"{"north-america-west":"us-west4-a"}"#,
@@ -506,5 +500,61 @@ fn replicas_share_caches_through_redis_when_configured() -> Result<()> {
     assert!(parse(&values).is_err());
     values.remove("DURABLE_ACTORS_REDIS_CA_CERT");
     assert!(parse(&values)?.redis.is_none());
+    Ok(())
+}
+
+fn gke(config: &ControlPlaneProcessConfig) -> &GkeConfig {
+    match &config.sandbox_provider.backend {
+        SandboxBackend::Gke(gke) => gke,
+        _ => panic!("expected GKE"),
+    }
+}
+
+#[test]
+fn modal_configuration_does_not_require_kubernetes() -> Result<()> {
+    let mut values = process_environment();
+    values.remove("DURABLE_ACTORS_GKE_ZONES");
+    values.remove("DURABLE_ACTORS_GKE_ZONE");
+    values.extend([
+        ("DURABLE_ACTORS_SANDBOX_PROVIDER", "modal"),
+        ("DURABLE_ACTORS_MODAL_APP", "modal-test"),
+        (
+            "DURABLE_ACTORS_CONTROL_PLANE_URL",
+            "https://control.example.com",
+        ),
+        (
+            "DURABLE_ACTORS_MODAL_REGIONS",
+            r#"{"north-america-west":"us-west"}"#,
+        ),
+    ]);
+    let parse = |values: &HashMap<&str, &str>| {
+        ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|v| (*v).into()))
+    };
+    let config = parse(&values)?;
+    assert_eq!(config.region.as_deref(), Some("north-america-west"));
+    assert_eq!(config.sandbox_provider.pool.regions, ["north-america-west"]);
+    let SandboxBackend::Modal(modal) = config.sandbox_provider.backend else {
+        panic!("expected Modal")
+    };
+    assert_eq!(modal.app_name, "modal-test");
+    assert_eq!(modal.timeout, Duration::from_secs(3600));
+    for (key, value) in [
+        ("DURABLE_ACTORS_SANDBOX_PROVIDER", "unknown"),
+        ("DURABLE_ACTORS_CONTROL_PLANE_URL", "http://localhost:7100"),
+        (
+            "DURABLE_ACTORS_CONTROL_PLANE_URL",
+            "https://control.example.com/path",
+        ),
+        ("DURABLE_ACTORS_MODAL_REGIONS", "{}"),
+        (
+            "DURABLE_ACTORS_MODAL_REGIONS",
+            r#"{"north-america-west":"us-east"}"#,
+        ),
+        ("DURABLE_ACTORS_MODAL_TIMEOUT_SECONDS", "0"),
+    ] {
+        let mut invalid = values.clone();
+        invalid.insert(key, value);
+        assert!(parse(&invalid).is_err(), "accepted {key}={value}");
+    }
     Ok(())
 }

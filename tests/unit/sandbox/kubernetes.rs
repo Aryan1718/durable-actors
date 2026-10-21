@@ -103,7 +103,6 @@ async fn retirement_recovers_a_lost_create_reply_and_uses_a_uid_precondition() -
         GkeConfig {
             namespace: "sandboxes".into(),
             zones: BTreeMap::new(),
-            public_origin: "https://actors.example.com".into(),
         },
     );
     let result = cluster
@@ -151,7 +150,6 @@ async fn stopped_spares_identifies_missing_and_completed_pod_identities() -> Res
         GkeConfig {
             namespace: "sandboxes".into(),
             zones: BTreeMap::new(),
-            public_origin: "https://actors.example.com".into(),
         },
     );
     let spares: Vec<_> = [

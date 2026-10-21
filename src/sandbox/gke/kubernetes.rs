@@ -14,7 +14,6 @@ use super::*;
 pub(crate) struct GkeConfig {
     pub namespace: String,
     pub zones: BTreeMap<String, Vec<String>>,
-    pub public_origin: String,
 }
 
 pub(super) struct Kubernetes {

@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Cluster {
     creates: AtomicUsize,
+    retires: AtomicUsize,
 }
 #[async_trait]
 impl SandboxCluster for Cluster {
@@ -14,6 +15,7 @@ impl SandboxCluster for Cluster {
         anyhow::bail!("unexpected pod creation")
     }
     async fn retire_spare(&self, _: &SpareHandle) -> Result<()> {
+        self.retires.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
     async fn secrets(&self, _: &[String]) -> Result<HashMap<String, String>> {
@@ -60,8 +62,10 @@ impl HostAssignment for Assign {
 async fn prewarmed_assignment_uses_ready_host_without_creating_a_pod() -> Result<()> {
     let cluster = Arc::new(Cluster {
         creates: AtomicUsize::new(0),
+        retires: AtomicUsize::new(0),
     });
-    let provider = GkeSandboxProvider {
+    let provider = RemoteSandboxProvider {
+        name: "gke",
         cluster: cluster.clone(),
         assignment: Arc::new(Assign),
     };
@@ -151,12 +155,50 @@ impl HostAssignment for ExpiredAssignment {
 
 #[tokio::test]
 async fn assignment_rejects_a_host_whose_lease_expired_before_its_reply() -> Result<()> {
-    let provider = GkeSandboxProvider {
+    let provider = RemoteSandboxProvider {
+        name: "gke",
         cluster: Arc::new(Cluster {
             creates: AtomicUsize::new(0),
+            retires: AtomicUsize::new(0),
         }),
         assignment: Arc::new(ExpiredAssignment),
     };
     assert!(provider.ensure_host(&request()?).await.is_err());
+    Ok(())
+}
+
+#[tokio::test]
+async fn modal_assignment_failure_retires_the_claimed_spare() -> Result<()> {
+    let cluster = Arc::new(Cluster {
+        creates: AtomicUsize::new(0),
+        retires: AtomicUsize::new(0),
+    });
+    let provider = RemoteSandboxProvider {
+        name: "modal",
+        cluster: cluster.clone(),
+        assignment: Arc::new(ExpiredAssignment),
+    };
+    assert!(provider.ensure_host(&request()?).await.is_err());
+    assert_eq!(cluster.retires.load(Ordering::SeqCst), 1);
+    assert_eq!(cluster.creates.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn modal_reuses_the_same_assignment_protocol_and_reports_its_provider() -> Result<()> {
+    let provider = RemoteSandboxProvider {
+        name: "modal",
+        cluster: Arc::new(Cluster {
+            creates: AtomicUsize::new(0),
+            retires: AtomicUsize::new(0),
+        }),
+        assignment: Arc::new(Assign),
+    };
+    let request = request()?;
+    let result = provider.ensure_host(&request).await?;
+    let provisioning = result.provisioning.unwrap();
+    assert_eq!(provisioning.provider, "modal");
+    assert!(provisioning.reused);
+    assert_eq!(provisioning.resource_id, request.spare.unwrap().resource_id);
     Ok(())
 }

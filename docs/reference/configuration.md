@@ -94,3 +94,25 @@ Use the [self-hosting guide](../self-hosting.md) and [Helm chart](../../charts/d
 | `GOOGLE_APPLICATION_CREDENTIALS` | Optional ADC file; use Workload Identity on GKE. |
 
 Standard mode rejects Rapid bucket and archive settings. Storage mode and bucket identities are fixed for existing actor ownership records; changing them requires a planned data migration. See [Rapid configuration](../self-hosting.md#speed-up-writes-with-gcs-rapid) for bucket creation, IAM, and chart values.
+
+## Modal data plane
+
+Set `DURABLE_ACTORS_SANDBOX_PROVIDER=modal` to run hosts on Modal. The default is `gke`.
+Both providers use the same PostgreSQL spare pool, deployment API, actor runtime, and GCS storage.
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `DURABLE_ACTORS_SANDBOX_PROVIDER` | `gke` | `gke` or `modal`. |
+| `DURABLE_ACTORS_MODAL_APP` | Required for Modal | Dedicated Modal App for this control-plane installation. |
+| `DURABLE_ACTORS_MODAL_REGIONS` | Required for Modal | JSON mapping of canonical actor regions to Modal regions, e.g. `{"north-america-west":"us-west"}`. |
+| `DURABLE_ACTORS_MODAL_TIMEOUT_SECONDS` | `3600` | Maximum sandbox lifetime, 120–86400 seconds, including time spent as a spare. |
+
+Modal reads the active `~/.modal.toml` profile or `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`.
+Its control-plane URL must be an HTTPS origin that carries gRPC. Proxies must preserve HTTP/2
+and gRPC response trailers on `/durable_actors.v1.ActorControlPlaneService/*`. GKE zone and
+namespace settings are unnecessary in Modal mode. CPU requests and limits are passed as Modal physical cores
+(`cpu_millis / 1000`); memory requests and limits retain their MiB values.
+
+Sandboxes run on GCP. Use a dedicated Modal App and PostgreSQL spare registry for each
+installation; sharing a registry between providers is unsupported. Runtime images must be
+accessible without private registry credentials. Deployment `secretRefs` are unsupported.
