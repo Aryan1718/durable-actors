@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use tracing::{info, warn};
 
 use crate::{
-    bucket::{GcsBucket, RuntimeStorageReader},
+    bucket::{Bucket, GcsBucket, RuntimeStorageReader, S3Bucket},
     postgres::PostgresDatabase,
     redis_client::{Redis, RedisConfig},
     request_traces::{
@@ -52,6 +52,13 @@ pub struct ControlPlaneStorageConfig {
     pub bucket: String,
     pub persistence: crate::bucket::SnapshotStoreConfig,
     pub artifact_bucket: String,
+    pub provider: StorageProviderConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum StorageProviderConfig {
+    Gcs,
+    S3 { region: String },
 }
 
 #[derive(Default)]
@@ -236,12 +243,36 @@ async fn control_plane_routes(
             ),
         ));
     }
-    let authority = Arc::new(GcsBucket::new(&config.storage.bucket).await?);
+    let (authority, gcs): (Arc<dyn Bucket>, Option<Arc<GcsBucket>>) = match &config.storage.provider
+    {
+        StorageProviderConfig::Gcs => {
+            let bucket = Arc::new(GcsBucket::new(&config.storage.bucket).await?);
+            (bucket.clone(), Some(bucket))
+        }
+        StorageProviderConfig::S3 { region } => {
+            let sdk = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                .region(aws_config::Region::new(region.clone()))
+                .load()
+                .await;
+            (
+                Arc::new(S3Bucket::new(
+                    &config.storage.bucket,
+                    aws_sdk_s3::Client::new(&sdk),
+                )?),
+                None,
+            )
+        }
+    };
     let registry = Arc::new(super::PostgresAdminRegistry::from_database(
         database.clone(),
     ));
-    let snapshots =
-        snapshot_store(authority.clone(), &config.storage.persistence, stop.clone()).await?;
+    let snapshots = snapshot_store(
+        authority.clone(),
+        gcs.as_deref(),
+        &config.storage.persistence,
+        stop.clone(),
+    )
+    .await?;
     let storage = Arc::new(
         RuntimeStorageReader::new(
             authority,
@@ -251,9 +282,16 @@ async fn control_plane_routes(
         .with_persistence(config.storage.persistence, snapshots)?,
     );
     let runtime_access = Arc::new(crate::bucket::access::RuntimeAccess::new(
-        crate::bucket::access::BucketLocation::Gcs {
-            artifact_bucket: config.storage.artifact_bucket.clone(),
-            bucket: config.storage.bucket.clone(),
+        match &config.storage.provider {
+            StorageProviderConfig::Gcs => crate::bucket::access::BucketLocation::Gcs {
+                artifact_bucket: config.storage.artifact_bucket.clone(),
+                bucket: config.storage.bucket.clone(),
+            },
+            StorageProviderConfig::S3 { region } => crate::bucket::access::BucketLocation::S3 {
+                artifact_bucket: config.storage.artifact_bucket.clone(),
+                bucket: config.storage.bucket.clone(),
+                region: region.clone(),
+            },
         },
         storage.persistence.clone(),
     )?);
@@ -334,17 +372,19 @@ async fn control_plane_routes(
 }
 
 async fn snapshot_store(
-    authority: Arc<GcsBucket>,
+    authority: Arc<dyn Bucket>,
+    gcs: Option<&GcsBucket>,
     persistence: &crate::bucket::SnapshotStoreConfig,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<Arc<dyn crate::bucket::SnapshotStore>> {
     if persistence.rapid_settings().is_none() {
         return Ok(Arc::new(crate::bucket::BucketSnapshots(authority)));
     }
-    crate::bucket::RapidSnapshots::validate_gcs(persistence, authority.clients()).await?;
+    let gcs = gcs.context("Rapid persistence requires GCS storage")?;
+    crate::bucket::RapidSnapshots::validate_gcs(persistence, gcs.clients()).await?;
     Ok(Arc::new(crate::bucket::RapidSnapshots::gcs(
         persistence,
-        authority.clients(),
+        gcs.clients(),
         stop,
         None,
     )?))
@@ -472,6 +512,7 @@ impl ControlPlaneProcessConfig {
         let bucket = required(&mut get, "DURABLE_ACTORS_BUCKET")?;
         crate::storage::validate_bucket(&bucket)?;
         let persistence = persistence_config(&mut get)?;
+        let provider = storage_provider_config(&mut get, &persistence)?;
         let artifact_bucket = if persistence.rapid_settings().is_none() {
             get("DURABLE_ACTORS_ARTIFACT_BUCKET").unwrap_or_else(|| bucket.clone())
         } else {
@@ -490,6 +531,7 @@ impl ControlPlaneProcessConfig {
             trace_retention: trace_retention(&mut get)?,
             analytics: analytics_backend(&mut get)?,
             bucket,
+            provider,
         };
         let sandbox_provider =
             sandbox_provider_config(&mut get, &jwt_issuer, &invocation_audience)?;
@@ -526,6 +568,31 @@ impl ControlPlaneProcessConfig {
             redis: redis_config(&mut get)?,
             project_limits: super::ProjectLimits::from_lookup(&mut get, true)?,
         })
+    }
+}
+
+fn storage_provider_config(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    persistence: &crate::bucket::SnapshotStoreConfig,
+) -> Result<StorageProviderConfig> {
+    match get("DURABLE_ACTORS_STORAGE_PROVIDER")
+        .as_deref()
+        .unwrap_or("gcs")
+    {
+        "gcs" => Ok(StorageProviderConfig::Gcs),
+        "s3" => {
+            ensure!(
+                persistence.rapid_settings().is_none(),
+                "S3 currently supports standard persistence only"
+            );
+            let region = required(get, "DURABLE_ACTORS_AWS_REGION")?;
+            ensure!(
+                !region.is_empty() && region.trim() == region,
+                "DURABLE_ACTORS_AWS_REGION must not be empty or contain surrounding whitespace"
+            );
+            Ok(StorageProviderConfig::S3 { region })
+        }
+        _ => anyhow::bail!("DURABLE_ACTORS_STORAGE_PROVIDER must be gcs or s3"),
     }
 }
 

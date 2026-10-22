@@ -90,6 +90,25 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
 }
 
 #[test]
+fn s3_state_storage_issues_gcs_access_for_code_only() -> Result<()> {
+    let code = crate::bundle::ActorBundle {
+        bucket: "code".into(),
+        files: vec![crate::bundle::BundleFile {
+            path: "actors.mjs".into(),
+            object: "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs"
+                .into(),
+            generation: 1,
+            sha256: "unused".into(),
+        }],
+    };
+    let rules = code_rules("code", Some(&code))?;
+    assert_eq!(rules.len(), 1);
+    assert_eq!(rules[0].bucket, "code");
+    assert_eq!(rules[0].permissions, Permissions::OBJECT_VIEWER);
+    Ok(())
+}
+
+#[test]
 fn log_credentials_cover_only_this_actors_logs_and_archive() -> Result<()> {
     let actor = actor();
     let config: super::super::SnapshotStoreConfig = serde_json::from_value(

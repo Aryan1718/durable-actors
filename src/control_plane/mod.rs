@@ -39,7 +39,8 @@ pub use project_limits::ProjectLimits;
 #[cfg(test)]
 pub(crate) use self::auth::ActorInvocationCapability;
 pub use self::process::{
-    AnalyticsBackend, ControlPlaneProcessConfig, ControlPlaneStorageConfig, serve_control_plane,
+    AnalyticsBackend, ControlPlaneProcessConfig, ControlPlaneStorageConfig, StorageProviderConfig,
+    serve_control_plane,
 };
 pub(crate) use self::{
     admin::PostgresAdminRegistry,
