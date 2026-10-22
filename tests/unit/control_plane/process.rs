@@ -563,11 +563,17 @@ fn modal_configuration_does_not_require_kubernetes() -> Result<()> {
     let config = parse(&values)?;
     assert_eq!(config.region.as_deref(), Some("north-america-west"));
     assert_eq!(config.sandbox_provider.pool.regions, ["north-america-west"]);
+    assert_eq!(config.sandbox_provider.secret_namespace, "terse-sandboxes");
     let SandboxBackend::Modal(modal) = config.sandbox_provider.backend else {
         panic!("expected Modal")
     };
     assert_eq!(modal.app_name, "modal-test");
     assert_eq!(modal.timeout, Duration::from_secs(3600));
+    values.insert("DURABLE_ACTORS_GKE_NAMESPACE", "project-secrets");
+    assert_eq!(
+        parse(&values)?.sandbox_provider.secret_namespace,
+        "project-secrets"
+    );
     for (key, value) in [
         ("DURABLE_ACTORS_SANDBOX_PROVIDER", "unknown"),
         ("DURABLE_ACTORS_CONTROL_PLANE_URL", "http://localhost:7100"),

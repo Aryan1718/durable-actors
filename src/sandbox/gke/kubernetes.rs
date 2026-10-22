@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use k8s_openapi::api::core::v1::{Pod, Secret};
+use k8s_openapi::api::core::v1::Pod;
 use kube::{
     Api, Client, ResourceExt,
     api::{DeleteParams, ListParams, PostParams, Preconditions},
@@ -18,13 +18,12 @@ pub(crate) struct GkeConfig {
 
 pub(super) struct Kubernetes {
     pods: Api<Pod>,
-    secrets: Api<Secret>,
     config: GkeConfig,
     _cleanup: tokio_util::task::AbortOnDropHandle<()>,
 }
 impl Kubernetes {
     pub fn new(client: Client, config: GkeConfig) -> Self {
-        let pods = Api::namespaced(client.clone(), &config.namespace);
+        let pods = Api::namespaced(client, &config.namespace);
         let cleanup_pods = pods.clone();
         let cleanup = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
             loop {
@@ -36,7 +35,6 @@ impl Kubernetes {
         }));
         Self {
             pods,
-            secrets: Api::namespaced(client, &config.namespace),
             config,
             _cleanup: cleanup,
         }
@@ -165,33 +163,6 @@ impl SandboxCluster for Kubernetes {
             }
         }
         Ok(stopped)
-    }
-
-    async fn secrets(&self, names: &[String]) -> Result<HashMap<String, String>> {
-        let loaded =
-            futures_util::future::try_join_all(names.iter().map(|name| self.secrets.get(name)))
-                .await?;
-        let mut environment = HashMap::new();
-        for secret in loaded {
-            ensure!(
-                secret
-                    .labels()
-                    .get("terse.ai/customer-secret")
-                    .is_some_and(|value| value == "true"),
-                "secret is not marked for customer code"
-            );
-            for (name, value) in secret.data.unwrap_or_default() {
-                ensure!(
-                    !environment.contains_key(&name),
-                    "duplicate customer environment variable {name}"
-                );
-                environment.insert(
-                    name,
-                    String::from_utf8(value.0).context("customer secret must be UTF-8")?,
-                );
-            }
-        }
-        Ok(environment)
     }
 }
 

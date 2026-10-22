@@ -18,7 +18,13 @@ impl SandboxCluster for Cluster {
         self.retires.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
-    async fn secrets(&self, _: &[String]) -> Result<HashMap<String, String>> {
+}
+
+struct Secrets;
+#[async_trait]
+impl SecretResolver for Secrets {
+    async fn resolve(&self, names: &[String]) -> Result<HashMap<String, String>> {
+        assert_eq!(names, ["customer"]);
         Ok(HashMap::from([(
             "CUSTOMER_SECRET".into(),
             "assigned-secret".into(),
@@ -67,6 +73,7 @@ async fn prewarmed_assignment_uses_ready_host_without_creating_a_pod() -> Result
     let provider = RemoteSandboxProvider {
         name: "gke",
         cluster: cluster.clone(),
+        secrets: Arc::new(Secrets),
         assignment: Arc::new(Assign),
     };
     let request = request()?;
@@ -157,6 +164,7 @@ impl HostAssignment for ExpiredAssignment {
 async fn assignment_rejects_a_host_whose_lease_expired_before_its_reply() -> Result<()> {
     let provider = RemoteSandboxProvider {
         name: "gke",
+        secrets: Arc::new(Secrets),
         cluster: Arc::new(Cluster {
             creates: AtomicUsize::new(0),
             retires: AtomicUsize::new(0),
@@ -175,6 +183,7 @@ async fn modal_assignment_failure_retires_the_claimed_spare() -> Result<()> {
     });
     let provider = RemoteSandboxProvider {
         name: "modal",
+        secrets: Arc::new(Secrets),
         cluster: cluster.clone(),
         assignment: Arc::new(ExpiredAssignment),
     };
@@ -185,20 +194,44 @@ async fn modal_assignment_failure_retires_the_claimed_spare() -> Result<()> {
 }
 
 #[tokio::test]
-async fn modal_reuses_the_same_assignment_protocol_and_reports_its_provider() -> Result<()> {
-    let provider = RemoteSandboxProvider {
-        name: "modal",
-        cluster: Arc::new(Cluster {
+async fn modal_assignment_delivers_resolved_project_secrets() -> Result<()> {
+    let mut provider = RemoteSandboxProvider::new(
+        "modal",
+        Arc::new(Cluster {
             creates: AtomicUsize::new(0),
             retires: AtomicUsize::new(0),
         }),
-        assignment: Arc::new(Assign),
-    };
+        Arc::new(Secrets),
+    )?;
+    provider.assignment = Arc::new(Assign);
     let request = request()?;
     let result = provider.ensure_host(&request).await?;
     let provisioning = result.provisioning.unwrap();
     assert_eq!(provisioning.provider, "modal");
     assert!(provisioning.reused);
     assert_eq!(provisioning.resource_id, request.spare.unwrap().resource_id);
+    Ok(())
+}
+
+struct UnavailableSecrets;
+#[async_trait]
+impl SecretResolver for UnavailableSecrets {
+    async fn resolve(&self, _: &[String]) -> Result<HashMap<String, String>> {
+        anyhow::bail!("secret unavailable")
+    }
+}
+
+#[tokio::test]
+async fn secret_resolution_failure_retires_the_modal_spare_without_assignment() -> Result<()> {
+    let cluster = Arc::new(Cluster {
+        creates: AtomicUsize::new(0),
+        retires: AtomicUsize::new(0),
+    });
+    let provider =
+        RemoteSandboxProvider::new("modal", cluster.clone(), Arc::new(UnavailableSecrets))?;
+    let error = provider.ensure_host(&request()?).await.unwrap_err();
+    assert_eq!(error.to_string(), "secret unavailable");
+    assert_eq!(cluster.retires.load(Ordering::SeqCst), 1);
+    assert_eq!(cluster.creates.load(Ordering::SeqCst), 0);
     Ok(())
 }

@@ -12,6 +12,7 @@ mod local_store;
 pub(crate) mod modal;
 pub(crate) mod pool;
 mod remote;
+pub(crate) mod secrets;
 
 pub(crate) use local::LocalSandboxProvider;
 

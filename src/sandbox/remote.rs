@@ -3,19 +3,26 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 
+use super::secrets::SecretResolver;
 use super::*;
 
 pub(crate) struct RemoteSandboxProvider {
     name: &'static str,
     cluster: Arc<dyn SandboxCluster>,
+    secrets: Arc<dyn SecretResolver>,
     assignment: Arc<dyn HostAssignment>,
 }
 
 impl RemoteSandboxProvider {
-    pub(super) fn new(name: &'static str, cluster: Arc<dyn SandboxCluster>) -> Result<Self> {
+    pub(super) fn new(
+        name: &'static str,
+        cluster: Arc<dyn SandboxCluster>,
+        secrets: Arc<dyn SecretResolver>,
+    ) -> Result<Self> {
         Ok(Self {
             name,
             cluster,
+            secrets,
             assignment: Arc::new(HttpAssignment(
                 reqwest::Client::builder()
                     .timeout(Duration::from_secs(120))
@@ -34,7 +41,7 @@ impl RemoteSandboxProvider {
             spare.canonical_region == request.canonical_region,
             "spare region mismatch"
         );
-        let secrets = self.cluster.secrets(&request.secret_refs).await?;
+        let secrets = self.secrets.resolve(&request.secret_refs).await?;
         let environment = assignment_environment(request, spare, secrets)?;
         let handle = self.assignment.assign(spare, environment).await?;
         let lease = handle
@@ -229,7 +236,6 @@ pub(super) trait SandboxCluster: Send + Sync {
     async fn stopped_spares(&self, spares: &[SpareHandle]) -> Result<Vec<String>>;
     async fn create_spare(&self, request: &CreateSpareRequest) -> Result<SpareHandle>;
     async fn retire_spare(&self, spare: &SpareHandle) -> Result<()>;
-    async fn secrets(&self, names: &[String]) -> Result<HashMap<String, String>>;
 }
 
 #[async_trait]

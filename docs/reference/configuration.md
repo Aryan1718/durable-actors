@@ -120,10 +120,16 @@ Both providers use the same PostgreSQL spare pool, deployment API, actor runtime
 
 Modal reads the active `~/.modal.toml` profile or `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`.
 Its control-plane URL must be an HTTPS origin that carries gRPC. Proxies must preserve HTTP/2
-and gRPC response trailers on `/durable_actors.v1.ActorControlPlaneService/*`. GKE zone and
-namespace settings are unnecessary in Modal mode. CPU requests and limits are passed as Modal physical cores
+and gRPC response trailers on `/durable_actors.v1.ActorControlPlaneService/*`. GKE zone settings
+are unnecessary in Modal mode. CPU requests and limits are passed as Modal physical cores
 (`cpu_millis / 1000`); memory requests and limits retain their MiB values.
 
 Sandboxes run on GCP. Use a dedicated Modal App and PostgreSQL spare registry for each
 installation; sharing a registry between providers is unsupported. Runtime images must be
-accessible without private registry credentials. Deployment `secretRefs` are unsupported.
+accessible without private registry credentials.
+
+Deployment `secretRefs` use the same Kubernetes secrets as GKE. The control plane reads them
+from `DURABLE_ACTORS_GKE_NAMESPACE` (default `terse-sandboxes`) at assignment and requires
+Kubernetes credentials with permission to get those secrets. Secrets must carry the
+`terse.ai/customer-secret=true` label; duplicate environment keys and non-UTF-8 values are rejected.
+Deployments without secret references do not require Kubernetes access in Modal mode.

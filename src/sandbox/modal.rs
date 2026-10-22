@@ -7,11 +7,12 @@ use std::{
 use ::modal::{
     App, AppLookupParams, Client, Image, Probe, Sandbox, SandboxCreateParams, SandboxListParams,
 };
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 
 use super::{
     remote::{RemoteSandboxProvider, SandboxCluster},
+    secrets::SecretResolver,
     *,
 };
 
@@ -28,6 +29,7 @@ pub(crate) struct ModalConfig {
 pub(crate) async fn provider(
     config: ModalConfig,
     images: &[&str],
+    secrets: Arc<dyn SecretResolver>,
 ) -> Result<RemoteSandboxProvider> {
     let client = Client::from_env()?;
     let app = client
@@ -58,6 +60,7 @@ pub(crate) async fn provider(
             config,
             images: imported,
         }),
+        secrets,
     )
 }
 
@@ -132,14 +135,6 @@ impl SandboxCluster for ModalCluster {
             .filter(|spare| !running.contains(&spare.resource_id))
             .map(|spare| spare.resource_id.clone())
             .collect())
-    }
-
-    async fn secrets(&self, names: &[String]) -> Result<HashMap<String, String>> {
-        ensure!(
-            names.is_empty(),
-            "Modal does not support deployment secretRefs"
-        );
-        Ok(HashMap::new())
     }
 }
 

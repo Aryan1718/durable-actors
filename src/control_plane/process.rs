@@ -79,6 +79,7 @@ pub struct SandboxProviderConfig {
     pub runtime_images: RuntimeImages,
     pub(super) pool: crate::sandbox::pool::PoolConfig,
     pub(crate) backend: SandboxBackend,
+    pub(crate) secret_namespace: String,
     pub(crate) public_origin: String,
     pub(super) resource_bounds: crate::sandbox::ResourceBounds,
     pub runtime: HostSandboxRuntimeConfig,
@@ -318,8 +319,11 @@ async fn sandbox_provisioner(
     registry: Arc<dyn super::admin::AdminRegistry>,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<Arc<dyn super::service::HostProvisioner>> {
+    let secrets = Arc::new(crate::sandbox::secrets::KubernetesSecrets::new(
+        config.secret_namespace,
+    ));
     let provider = Arc::new(match config.backend {
-        SandboxBackend::Gke(gke) => crate::sandbox::gke::provider(gke).await?,
+        SandboxBackend::Gke(gke) => crate::sandbox::gke::provider(gke, secrets).await?,
         SandboxBackend::Modal(modal) => {
             crate::sandbox::modal::provider(
                 modal,
@@ -327,6 +331,7 @@ async fn sandbox_provisioner(
                     &config.runtime_images.typescript,
                     &config.runtime_images.python,
                 ],
+                secrets,
             )
             .await?
         }
@@ -628,6 +633,8 @@ fn sandbox_provider_config(
             resources: host_resources(get)?,
         },
         backend,
+        secret_namespace: get("DURABLE_ACTORS_GKE_NAMESPACE")
+            .unwrap_or_else(|| "terse-sandboxes".into()),
         public_origin,
         resource_bounds: resource_bounds(get)?,
         runtime: HostSandboxRuntimeConfig {
