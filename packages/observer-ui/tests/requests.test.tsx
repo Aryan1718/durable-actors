@@ -80,6 +80,10 @@ test("request history shows both timings, deduplicates replay, and can pause for
     await act(async () => publish({ ...page, epoch: "restarted" }))
     assert.equal(view.queryByText("request-two"), null)
     assert.equal(view.getAllByRole("button", { name: "Inspect post request" }).length, 1)
+    await act(async () => publish({ ...next, epoch: "restarted", dropped: 0, snapshot: true }))
+    assert.equal(view.queryByRole("button", { name: "Inspect post request" }), null)
+    assert.ok(view.getByRole("button", { name: "Inspect onMessage request" }))
+    assert.equal(view.queryByRole("alert"), null)
 })
 
 test("persistence failures warn without hiding live requests", async () => {

@@ -158,6 +158,108 @@ async fn durability_endpoint_is_not_exposed() -> Result<()> {
 }
 
 #[tokio::test]
+async fn committed_clickhouse_traces_stream_across_replicas_and_recover_on_reconnect() -> Result<()>
+{
+    use crate::{
+        redis_client::{Redis, RedisConfig},
+        request_traces::{
+            TraceStore,
+            live::{LiveTraceFeed, LiveTraceUpdate},
+            persistence::clickhouse::{ClickHouseConfig, ClickHouseTracePersistence},
+        },
+    };
+    let (Ok(url), Ok(redis_url)) = (
+        std::env::var("DURABLE_ACTORS_TEST_CLICKHOUSE_URL"),
+        std::env::var("DURABLE_ACTORS_TEST_REDIS_URL"),
+    ) else {
+        return Ok(());
+    };
+    let stop = tokio_util::sync::CancellationToken::new();
+    let _guard = stop.clone().drop_guard();
+    let redis = Redis::connect(&RedisConfig {
+        url: redis_url,
+        ca_cert: None,
+    })?;
+    let mut stores = Vec::new();
+    for _ in 0..2 {
+        let feed = LiveTraceFeed::start(Some(redis.clone()), stop.clone());
+        let mut ready = feed.subscribe();
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(5), ready.recv())
+                .await??
+                .as_ref(),
+            LiveTraceUpdate::Resync
+        ));
+        let mut store = TraceStore::open(Arc::new(ClickHouseTracePersistence::start(
+            ClickHouseConfig {
+                url: url.clone(),
+                database: "trace_test".into(),
+                user: "trace_test".into(),
+                password: "local-test-only".into(),
+            },
+            Duration::from_secs(86400),
+            Arc::new(feed.clone()),
+            stop.clone(),
+        )?))
+        .await?;
+        store.live = Some(feed);
+        stores.push(store);
+    }
+    let writer = stores.remove(0);
+    let fixture = Fixture::start_with_traces(stores.remove(0)).await?;
+    let project = format!("live-{}", uuid::Uuid::new_v4());
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while writer.replay(&project, &Default::default()).await.is_err() {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await?;
+    let route = format!("/v1/projects/{project}/observe/requests/events");
+    let mut stream = fixture.get(&route).await?.error_for_status()?;
+    let initial = stream_inventory(&mut stream).await?;
+    assert_eq!(initial["snapshot"], true);
+    assert_eq!(initial["records"], json!([]));
+    let trace = |project: &str, id: &str| {
+        serde_json::from_value(json!({
+            "projectId": project, "requestId": id, "actorName": "Counter", "actorId": "one",
+            "kind": "method", "operation": "increment", "connectionId": null,
+            "startedAtMs": 1000, "durationMs": 1, "routingMs": 0, "queueWaitMs": 0,
+            "outcome": "completed"
+        }))
+    };
+    writer
+        .record(
+            "foreign-live",
+            "host",
+            "session",
+            vec![trace("foreign-live", "private")?],
+            0,
+        )
+        .await?;
+    writer
+        .record(
+            &project,
+            "host",
+            "session",
+            vec![trace(&project, "first")?],
+            0,
+        )
+        .await?;
+    let live =
+        tokio::time::timeout(Duration::from_secs(5), stream_inventory(&mut stream)).await??;
+    assert_ne!(live["snapshot"], true);
+    assert_eq!(live["records"].as_array().unwrap().len(), 1);
+    assert_eq!(live["records"][0]["projectId"], project);
+    assert_eq!(live["records"][0]["requestId"], "first");
+    drop(stream);
+    let mut reconnected = fixture.get(&route).await?.error_for_status()?;
+    let restored = stream_inventory(&mut reconnected).await?;
+    assert_eq!(restored["snapshot"], true);
+    assert_eq!(restored["records"], live["records"]);
+    Ok(())
+}
+
+#[tokio::test]
 async fn observability_requires_admin_credentials() -> Result<()> {
     let fixture = Fixture::start().await?;
     let token = fixture

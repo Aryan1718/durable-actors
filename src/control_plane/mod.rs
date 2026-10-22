@@ -35,7 +35,7 @@ pub use local::{DevOptions, serve_local};
 #[cfg(test)]
 pub(crate) use self::auth::ActorInvocationCapability;
 pub use self::process::{
-    ControlPlaneProcessConfig, ControlPlaneStorageConfig, serve_control_plane,
+    AnalyticsBackend, ControlPlaneProcessConfig, ControlPlaneStorageConfig, serve_control_plane,
 };
 pub(crate) use self::{
     admin::PostgresAdminRegistry,
@@ -44,6 +44,7 @@ pub(crate) use self::{
     issuer::ActorJwtIssuer,
     service::ControlPlaneService,
 };
+pub use crate::request_traces::persistence::clickhouse::ClickHouseConfig;
 
 mod socket_bus;
 pub(crate) mod socket_gateway;

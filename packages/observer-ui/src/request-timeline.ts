@@ -1,7 +1,7 @@
 import type { RequestTrace } from "./client.js"
 
 export function requestTimeline(records: RequestTrace[]) {
-    const ordered = [...records].sort((a, b) => a.startedAtMs - b.startedAtMs || a.sequence - b.sequence)
+    const ordered = [...records].sort((a, b) => a.startedAtMs - b.startedAtMs || a.sequence - b.sequence || (a.eventId ?? "").localeCompare(b.eventId ?? ""))
     const start = ordered[0]?.startedAtMs ?? 0
     let end = start
     const finishes = new Map<string, number>()

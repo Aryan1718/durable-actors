@@ -226,6 +226,7 @@ export interface RequestTracePage {
     nextCursor?: string | null
     resumeCursor?: string
     reset?: boolean
+    snapshot?: boolean
     epoch: string
     cursor: number
     capacity: number
@@ -245,6 +246,7 @@ function isTracePage(value: unknown): value is RequestTracePage {
         (page.nextCursor == null || typeof page.nextCursor === "string") &&
         (page.resumeCursor === undefined || typeof page.resumeCursor === "string") &&
         (page.reset === undefined || typeof page.reset === "boolean") &&
+        (page.snapshot === undefined || typeof page.snapshot === "boolean") &&
         page.capacity > 0 &&
         page.capacity <= 500 &&
         Array.isArray(page.records) &&

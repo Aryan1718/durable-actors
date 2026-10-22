@@ -7,7 +7,10 @@ use crate::{
     bucket::{GcsBucket, RuntimeStorageReader},
     postgres::PostgresDatabase,
     redis_client::{Redis, RedisConfig},
-    request_traces::{TraceStore, persistence::postgres::PostgresTracePersistence},
+    request_traces::{
+        TraceStore,
+        persistence::{clickhouse::ClickHouseTracePersistence, postgres::PostgresTracePersistence},
+    },
     sandbox::{HostSandboxRuntimeConfig, gke::GkeConfig, modal::ModalConfig},
 };
 
@@ -43,9 +46,17 @@ pub struct ControlPlaneStorageConfig {
     pub postgres_url: String,
     pub postgres_max_connections: usize,
     pub trace_retention: Duration,
+    pub analytics: AnalyticsBackend,
     pub bucket: String,
     pub persistence: crate::bucket::SnapshotStoreConfig,
     pub artifact_bucket: String,
+}
+
+#[derive(Default)]
+pub enum AnalyticsBackend {
+    #[default]
+    Postgres,
+    ClickHouse(super::ClickHouseConfig),
 }
 
 pub struct RuntimeImages {
@@ -148,19 +159,20 @@ async fn control_plane_routes(
         &config.storage.postgres_url,
         config.storage.postgres_max_connections,
     )?;
-    let trace_persistence = Arc::new(PostgresTracePersistence::new(
-        database.clone(),
-        config.storage.trace_retention,
-    ));
     let changes = crate::postgres::notifications::ChangeFeed::postgres(
         database.clone(),
         &config.storage.postgres_url,
         stop.clone(),
     )
     .await?;
-    let mut traces = TraceStore::open(trace_persistence.clone()).await?;
-    traces.changes = changes.clone();
-    trace_persistence.start_retention(stop.clone());
+    let traces = trace_store(
+        &config.storage,
+        database.clone(),
+        changes.clone(),
+        redis.clone(),
+        stop.clone(),
+    )
+    .await?;
     let authority = Arc::new(GcsBucket::new(&config.storage.bucket).await?);
     let registry = Arc::new(super::PostgresAdminRegistry::from_database(
         database.clone(),
@@ -265,6 +277,39 @@ async fn snapshot_store(
     )?))
 }
 
+async fn trace_store(
+    storage: &ControlPlaneStorageConfig,
+    database: PostgresDatabase,
+    changes: crate::postgres::notifications::ChangeFeed,
+    redis: Option<Redis>,
+    stop: tokio_util::sync::CancellationToken,
+) -> Result<TraceStore> {
+    match &storage.analytics {
+        AnalyticsBackend::Postgres => {
+            let persistence = Arc::new(PostgresTracePersistence::new(
+                database,
+                storage.trace_retention,
+            ));
+            let mut traces = TraceStore::open(persistence.clone()).await?;
+            traces.changes = changes;
+            persistence.start_retention(stop);
+            Ok(traces)
+        }
+        AnalyticsBackend::ClickHouse(config) => {
+            let live = crate::request_traces::live::LiveTraceFeed::start(redis, stop.clone());
+            let mut traces = TraceStore::open(Arc::new(ClickHouseTracePersistence::start(
+                config.clone(),
+                storage.trace_retention,
+                Arc::new(live.clone()),
+                stop,
+            )?))
+            .await?;
+            traces.live = Some(live);
+            Ok(traces)
+        }
+    }
+}
+
 async fn sandbox_provisioner(
     config: SandboxProviderConfig,
     issuer: &super::ActorJwtIssuer,
@@ -356,6 +401,7 @@ impl ControlPlaneProcessConfig {
             postgres_url: required(&mut get, "DURABLE_ACTORS_POSTGRES_URL")?,
             postgres_max_connections: postgres_max_connections(&mut get)?,
             trace_retention: trace_retention(&mut get)?,
+            analytics: analytics_backend(&mut get)?,
             bucket,
         };
         let sandbox_provider =
@@ -455,6 +501,25 @@ fn postgres_max_connections(get: &mut impl FnMut(&str) -> Option<String>) -> Res
         "DURABLE_ACTORS_POSTGRES_MAX_CONNECTIONS must be between 1 and 1000"
     );
     Ok(connections)
+}
+
+fn analytics_backend(get: &mut impl FnMut(&str) -> Option<String>) -> Result<AnalyticsBackend> {
+    match get("DURABLE_ACTORS_ANALYTICS_BACKEND")
+        .as_deref()
+        .unwrap_or("postgres")
+    {
+        "postgres" => Ok(AnalyticsBackend::Postgres),
+        "clickhouse" => Ok(AnalyticsBackend::ClickHouse(super::ClickHouseConfig {
+            url: validated_http_url(
+                &required(get, "DURABLE_ACTORS_CLICKHOUSE_URL")?,
+                "DURABLE_ACTORS_CLICKHOUSE_URL",
+            )?,
+            database: required(get, "DURABLE_ACTORS_CLICKHOUSE_DATABASE")?,
+            user: required(get, "DURABLE_ACTORS_CLICKHOUSE_USER")?,
+            password: required(get, "DURABLE_ACTORS_CLICKHOUSE_PASSWORD")?,
+        })),
+        _ => anyhow::bail!("DURABLE_ACTORS_ANALYTICS_BACKEND must be postgres or clickhouse"),
+    }
 }
 
 fn trace_retention(get: &mut impl FnMut(&str) -> Option<String>) -> Result<Duration> {

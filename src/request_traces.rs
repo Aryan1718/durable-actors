@@ -15,6 +15,7 @@ pub(crate) use crate::request_tracking::RequestOutcome;
 use crate::request_tracking::{RequestCompletion, RequestObserver};
 
 pub(crate) mod history;
+pub(crate) mod live;
 pub(crate) mod metrics;
 pub(crate) mod persistence;
 pub(crate) mod replay;
@@ -148,6 +149,8 @@ pub(crate) struct TracePage {
     pub next_cursor: Option<String>,
     pub resume_cursor: String,
     pub reset: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub snapshot: bool,
 }
 
 #[derive(Debug)]
@@ -165,6 +168,7 @@ pub(crate) struct TraceStore {
     pending: Arc<tokio::sync::Semaphore>,
     persistence: Arc<dyn TracePersistence>,
     pub changes: crate::postgres::notifications::ChangeFeed,
+    pub live: Option<live::LiveTraceFeed>,
 }
 
 impl Default for TraceStore {
@@ -263,6 +267,7 @@ impl TraceStore {
             pending: Arc::new(tokio::sync::Semaphore::new(64)),
             persistence,
             changes: Default::default(),
+            live: None,
         }
     }
 
@@ -288,11 +293,12 @@ impl TraceStore {
         // Finish the commit even if the reporting connection is cancelled.
         tokio::spawn(async move {
             let _permit = permit;
-            match store.persistence.append(&events).await {
-                Ok(()) => store.publish_status(&project, dropped).await?,
+            let count = events.len();
+            match store.persistence.record(&project, events, dropped).await {
+                Ok(()) => store.changes.notify().await,
                 Err(error) => {
                     store
-                        .report_persistence_failure(&project, &error, events.len())
+                        .report_persistence_failure(&project, &error, count)
                         .await?;
                     return Err(error);
                 }

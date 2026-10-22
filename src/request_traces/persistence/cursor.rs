@@ -77,6 +77,7 @@ impl HistoryPage {
             records,
             next_cursor,
             reset: self.reset,
+            snapshot: false,
         })
     }
 }
@@ -177,6 +178,7 @@ impl ReplayPage {
             next_cursor: more.then(|| resume_cursor.clone()),
             resume_cursor,
             reset: self.reset,
+            snapshot: false,
         })
     }
 }

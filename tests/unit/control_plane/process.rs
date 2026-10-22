@@ -7,6 +7,36 @@ use super::*;
 use std::collections::HashMap;
 
 #[test]
+fn analytics_defaults_to_postgres_and_clickhouse_is_opt_in() -> Result<()> {
+    let mut values = process_environment();
+    let parse = |values: &HashMap<&str, &str>| {
+        ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|value| (*value).into()))
+    };
+    assert!(matches!(
+        parse(&values)?.storage.analytics,
+        AnalyticsBackend::Postgres
+    ));
+    values.insert("DURABLE_ACTORS_ANALYTICS_BACKEND", "clickhouse");
+    assert!(parse(&values).is_err());
+    values.extend([
+        (
+            "DURABLE_ACTORS_CLICKHOUSE_URL",
+            "https://clickhouse.example:8443",
+        ),
+        ("DURABLE_ACTORS_CLICKHOUSE_DATABASE", "traces"),
+        ("DURABLE_ACTORS_CLICKHOUSE_USER", "writer"),
+        ("DURABLE_ACTORS_CLICKHOUSE_PASSWORD", "test-only"),
+    ]);
+    assert!(matches!(
+        parse(&values)?.storage.analytics,
+        AnalyticsBackend::ClickHouse(_)
+    ));
+    values.insert("DURABLE_ACTORS_ANALYTICS_BACKEND", "unknown");
+    assert!(parse(&values).is_err());
+    Ok(())
+}
+
+#[test]
 fn configures_gateway_connection_limit() -> Result<()> {
     let mut values = process_environment();
     let parse = |values: &HashMap<&str, &str>| {

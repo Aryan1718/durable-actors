@@ -100,12 +100,12 @@ export function useRequests(client: Pick<ObserverClient, "watchRequests">, enabl
 }
 
 function mergePages(current: RequestTracePage | undefined, incoming: RequestTracePage): RequestTracePage {
-    const records = new Map((current?.epoch === incoming.epoch && !incoming.reset ? current.records : []).map(record => [record.eventId ?? record.sequence, record]))
+    const records = new Map((current?.epoch === incoming.epoch && !incoming.reset && !incoming.snapshot ? current.records : []).map(record => [record.eventId ?? record.sequence, record]))
     for (const record of incoming.records) records.set(record.eventId ?? record.sequence, record)
     return {
         ...incoming,
         reset: incoming.reset || (current?.epoch === incoming.epoch && current.reset),
-        records: [...records.values()].sort((a, b) => b.sequence - a.sequence).slice(0, incoming.capacity)
+        records: [...records.values()].sort((a, b) => b.sequence - a.sequence || (b.eventId ?? "").localeCompare(a.eventId ?? "")).slice(0, incoming.capacity)
     }
 }
 

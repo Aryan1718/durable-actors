@@ -557,7 +557,10 @@ paths:
             summary: Stream request history
             description: |
                 SSE requests events contain TracePage JSON. Resume with resumeCursor;
-                when reset=true, replace previous records. Error events contain text and close the stream.
+                when reset=true or snapshot=true, replace previous records. ClickHouse sends
+                an initial snapshot followed by committed batches, with reconciliation every
+                30 seconds and after live-delivery interruptions. Deduplicate records by eventId.
+                Error events contain text and close the stream.
             parameters:
                 - name: after
                   in: query
@@ -1157,6 +1160,7 @@ components:
                 nextCursor: { type: [string, "null"] }
                 resumeCursor: { type: string }
                 reset: { type: boolean }
+                snapshot: { type: boolean, description: "Replace the live list with this page. Used for ClickHouse initial history and reconciliation." }
         StateAttribution:
             type: [object, "null"]
             required: [operation, connectionId, committedAtMs, interleaved]

@@ -51,6 +51,20 @@ jobs:
         name: Rust runtime
         runs-on: blacksmith-4vcpu-ubuntu-2404
         services:
+            clickhouse:
+                image: clickhouse/clickhouse-server:26.6
+                env:
+                    CLICKHOUSE_DB: trace_test
+                    CLICKHOUSE_USER: trace_test
+                    CLICKHOUSE_PASSWORD: local-test-only
+                    CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+                ports:
+                    - 8123:8123
+                options: >-
+                    --health-cmd "wget -q -O - http://localhost:8123/ping"
+                    --health-interval 5s
+                    --health-timeout 5s
+                    --health-retries 10
             postgres:
                 image: postgres:16
                 env:
@@ -90,6 +104,7 @@ jobs:
             - name: Run tests
               env:
                   DURABLE_ACTORS_TEST_POSTGRES_URL: postgresql://postgres:postgres@127.0.0.1:5432/durable_actors_test?sslmode=disable
+                  DURABLE_ACTORS_TEST_CLICKHOUSE_URL: http://127.0.0.1:8123
                   DURABLE_ACTORS_TEST_REDIS_URL: redis://127.0.0.1:6379
               run: cargo test --locked --no-fail-fast
             - run: bun install --frozen-lockfile

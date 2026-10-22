@@ -8,6 +8,7 @@ use super::{
     replay::ReplayQuery,
 };
 
+pub(crate) mod clickhouse;
 mod cursor;
 pub(crate) mod postgres;
 pub(crate) mod sqlite;
@@ -22,6 +23,15 @@ pub(crate) struct TraceStatus {
 #[async_trait]
 pub(crate) trait TracePersistence: Send + Sync {
     async fn initialize(&self) -> Result<()>;
+    async fn record(&self, project: &str, events: Vec<TraceEvent>, dropped: u64) -> Result<()> {
+        if !events.is_empty() {
+            self.append(&events).await?;
+        }
+        if dropped > 0 {
+            self.record_status(project, dropped, false).await?;
+        }
+        Ok(())
+    }
     async fn record_status(&self, project: &str, dropped: u64, failed: bool) -> Result<()>;
     async fn status(&self, project: &str) -> Result<TraceStatus>;
     // Events have stable IDs; repeated appends must not duplicate them.
