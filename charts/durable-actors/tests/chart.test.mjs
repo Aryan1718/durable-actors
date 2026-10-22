@@ -53,6 +53,14 @@ test("enables Rapid with two distinct zones and the same Standard bucket for arc
     for (const value of ["rapid-a", "rapid-b", "us-west4-a", "us-west4-b"]) assert.ok(output.includes(value))
 })
 
+test("enables Rapid with one zone", () => {
+    const output = manifests({ storage: { mode: "rapid", rapid: { buckets: [
+        { bucket: "rapid-a", zone: "us-west4-a" }
+    ] } } })
+    assert.match(output, /DURABLE_ACTORS_RAPID_BUCKETS/)
+    assert.ok(output.includes("rapid-a"))
+})
+
 test("routes HTTPS and WebSockets to the same service through the selected ingress controller", () => {
     const output = manifests({ ingress: { enabled: true, className: "example", tlsSecret: "actors-tls", annotations: { "example.com/websocket-timeout": "3600" } } })
     assert.match(output, /apiVersion: networking.k8s.io\/v1\nkind: Ingress/)

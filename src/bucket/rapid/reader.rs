@@ -243,7 +243,7 @@ impl LogStorage {
         }
         ensure!(
             !copies.is_empty(),
-            "acknowledged log is unavailable in both zones"
+            "acknowledged log is unavailable in all configured zones"
         );
         let mut selected = Vec::new();
         for records in copies {

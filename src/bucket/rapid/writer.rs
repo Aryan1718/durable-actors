@@ -111,7 +111,10 @@ impl Session {
             event = "rapid_log_snapshot",
             state_version = self.version,
             owner_epoch = self.stream.owner_epoch,
-            ack_zones = if self.standard { 0 } else { 2 },
+            ack_zones = self
+                .segment
+                .as_ref()
+                .map_or(0, |s| s.manifest.replicas.len()),
             bytes = self.latest.as_ref().unwrap().1.len(),
             duration_ms = started.elapsed().as_secs_f64() * 1000.0
         );

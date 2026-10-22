@@ -120,8 +120,11 @@ impl RapidSnapshots {
         stop: CancellationToken,
     ) -> Result<Self> {
         ensure!(
-            zones.len() == 2 && zones[0].bucket() != zones[1].bucket(),
-            "two independent log replicas required"
+            (1..=2).contains(&zones.len())
+                && zones
+                    .windows(2)
+                    .all(|pair| pair[0].bucket() != pair[1].bucket()),
+            "one or two independent log replicas required"
         );
         batch.validate()?;
         let storage = Arc::new(LogStorage {

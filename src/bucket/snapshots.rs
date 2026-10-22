@@ -83,8 +83,8 @@ impl SnapshotStoreConfig {
             return Ok(());
         };
         ensure!(
-            buckets.len() == 2,
-            "append logs require exactly two Rapid zones"
+            (1..=2).contains(&buckets.len()),
+            "append logs require one or two Rapid zones"
         );
         crate::storage::validate_bucket(archive_bucket)?;
         let mut zones = HashSet::new();

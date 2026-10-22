@@ -98,7 +98,7 @@ Verify an actor write and read, restart its sandbox, and read the value again. A
 
 ## Speed up writes with GCS Rapid
 
-Rapid stores the hot write log in two zones and keeps permanent history in the Standard bucket. Each acknowledged write has durably flushed to both Rapid copies. This can reduce state-write latency; benchmark your workload and account for the extra storage and request costs.
+Rapid stores the hot write log in one or two zones and keeps permanent history in the Standard bucket. Each acknowledged write has durably flushed to every configured Rapid copy. A single zone has no second Rapid copy if that zone is lost before archival. This can reduce state-write latency; benchmark your workload and account for the extra storage and request costs.
 
 Choose a region with Rapid availability and use Google Cloud CLI 553 or newer. Create two distinct buckets once, then grant object access and bucket-metadata access to the controller identity. The following placements are examples; verify current [Rapid availability and requirements](https://docs.cloud.google.com/storage/docs/rapid-bucket).
 

@@ -43,6 +43,39 @@ async fn hot_writes_reuse_streams_and_a_fresh_reader_discovers_acknowledged_stat
     Ok(())
 }
 
+#[tokio::test]
+async fn single_zone_writes_recover_after_an_interrupted_flush() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.zones.truncate(1);
+    let store = f.store()?;
+    store.start(&f.stream).await?;
+    store.put(&f.stream.object(1), state(1, 1)?).await?;
+    assert_eq!(
+        f.store()?.latest(&f.stream.prefix).await?,
+        Some((f.stream.object(1), state(1, 1)?))
+    );
+    f.zones[0].stalled.store(true, Ordering::SeqCst);
+    assert!(
+        tokio::time::timeout(
+            Duration::from_millis(30),
+            store.put(&f.stream.object(2), state(2, 1)?)
+        )
+        .await
+        .is_err()
+    );
+    f.zones[0].stalled.store(false, Ordering::SeqCst);
+    assert!(store.put(&f.stream.object(2), state(2, 1)?).await.is_err());
+    drop(store);
+    let reader = f.store()?;
+    assert_eq!(
+        reader.recover(&f.stream.prefix).await?,
+        Some((f.stream.object(1), state(1, 1)?))
+    );
+    f.zones[0].offline.store(true, Ordering::SeqCst);
+    assert_eq!(reader.get(&f.stream.object(1)).await?, Some(state(1, 1)?));
+    Ok(())
+}
+
 fn state(version: u64, epoch: u64) -> Result<Bytes> {
     // LTX files contain timestamps; reuse captures for byte-for-byte recovery assertions.
     static STATES: OnceLock<Mutex<BTreeMap<(u64, u64), Bytes>>> = OnceLock::new();
@@ -506,30 +539,33 @@ async fn recovery_with_one_zone_unavailable_copies_missing_commits_to_standard()
 
 #[tokio::test]
 async fn shutdown_replicates_history_before_deleting_rapid_replicas() -> Result<()> {
-    let f = Fixture::new()?;
-    let store = f.store()?;
-    store.start(&f.stream).await?;
-    for v in 1..=3 {
-        store.put(&f.stream.object(v), state(v, 1)?).await?;
+    for zone_count in [1, 2] {
+        let mut f = Fixture::new()?;
+        f.zones.truncate(zone_count);
+        let store = f.store()?;
+        store.start(&f.stream).await?;
+        for v in 1..=3 {
+            store.put(&f.stream.object(v), state(v, 1)?).await?;
+        }
+        store
+            .finish(
+                &f.stream,
+                tokio::time::Instant::now() + Duration::from_secs(30),
+            )
+            .await?;
+        f.cleaned().await?;
+        assert!(f.zones.iter().all(|z| z.objects.lock().unwrap().is_empty()));
+        for zone in &f.zones {
+            zone.offline.store(true, Ordering::SeqCst);
+        }
+        let reader = f.store()?;
+        assert_eq!(
+            reader.latest(&f.stream.prefix).await?,
+            Some((f.stream.object(3), state(3, 1)?))
+        );
+        assert_eq!(reader.list(&f.stream.prefix).await?.len(), 3);
+        assert_eq!(reader.get(&f.stream.object(1)).await?, Some(state(1, 1)?));
     }
-    store
-        .finish(
-            &f.stream,
-            tokio::time::Instant::now() + Duration::from_secs(30),
-        )
-        .await?;
-    f.cleaned().await?;
-    assert!(f.zones.iter().all(|z| z.objects.lock().unwrap().is_empty()));
-    for zone in &f.zones {
-        zone.offline.store(true, Ordering::SeqCst);
-    }
-    let reader = f.store()?;
-    assert_eq!(
-        reader.latest(&f.stream.prefix).await?,
-        Some((f.stream.object(3), state(3, 1)?))
-    );
-    assert_eq!(reader.list(&f.stream.prefix).await?.len(), 3);
-    assert_eq!(reader.get(&f.stream.object(1)).await?, Some(state(1, 1)?));
     Ok(())
 }
 

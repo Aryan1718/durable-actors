@@ -14,7 +14,7 @@
 {{- if or (empty .Values.ingress.className) (empty .Values.ingress.tlsSecret) }}{{ fail "ingress requires className and tlsSecret" }}{{ end -}}
 {{- end -}}
 {{- if eq .Values.storage.mode "rapid" -}}
-{{- if ne (len .Values.storage.rapid.buckets) 2 }}{{ fail "Rapid requires exactly two buckets in distinct zones" }}{{ end -}}
+{{- if or (lt (len .Values.storage.rapid.buckets) 1) (gt (len .Values.storage.rapid.buckets) 2) }}{{ fail "Rapid requires one or two buckets in distinct zones" }}{{ end -}}
 {{- $zones := dict -}}{{- $buckets := dict -}}
 {{- range .Values.storage.rapid.buckets -}}
 {{- if hasKey $zones .zone }}{{ fail "Rapid buckets require distinct zones" }}{{ end -}}

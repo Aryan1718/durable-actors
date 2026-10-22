@@ -298,7 +298,7 @@ impl LogStorage {
                 Err(error) => tracing::warn!(%error, "Rapid archive source unavailable"),
             }
         }
-        anyhow::bail!("both Rapid archive sources unavailable")
+        anyhow::bail!("all Rapid archive sources unavailable")
     }
 
     pub async fn close_segment(&self, manifest: &Manifest, closed: &ClosedSegment) -> Result<()> {

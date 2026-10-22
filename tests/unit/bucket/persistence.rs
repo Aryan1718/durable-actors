@@ -2,7 +2,7 @@ use super::*;
 use serde_json::json;
 
 #[test]
-fn rapid_requires_exactly_two_distinct_zones_and_separate_archive() -> Result<()> {
+fn rapid_accepts_one_or_two_distinct_zones_and_separate_archive() -> Result<()> {
     let good = json!({"type":"rapid", "archive_bucket":"archive-test", "buckets":[
         {"bucket":"rapid-test-a", "zone":"us-west4-a"},
         {"bucket":"rapid-test-b", "zone":"us-west4-b"}
@@ -10,8 +10,13 @@ fn rapid_requires_exactly_two_distinct_zones_and_separate_archive() -> Result<()
     serde_json::from_value::<SnapshotStoreConfig>(good.clone())?.validate()?;
     let mut one = good.clone();
     one["buckets"].as_array_mut().unwrap().pop();
+    let single = serde_json::from_value::<SnapshotStoreConfig>(one)?;
+    single.validate()?;
+    assert!(!single.same_backend(&serde_json::from_value(good.clone())?));
+    let mut empty = good.clone();
+    empty["buckets"] = json!([]);
     assert!(
-        serde_json::from_value::<SnapshotStoreConfig>(one)?
+        serde_json::from_value::<SnapshotStoreConfig>(empty)?
             .validate()
             .is_err()
     );

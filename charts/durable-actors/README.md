@@ -40,7 +40,7 @@ A single controller can interrupt service during replacement; clients must recon
 
 ## Rapid writes
 
-Add two precreated Rapid buckets in different supported zones. The Standard bucket continues to store ownership, code, and permanent archives.
+Add one or two precreated Rapid buckets in distinct supported zones. The Standard bucket continues to store ownership, code, and permanent archives.
 
 ```yaml
 storage:
@@ -52,7 +52,7 @@ storage:
       - {bucket: my-actor-rapid-b, zone: us-west4-b}
 ```
 
-Both copies must durably flush before a Rapid write is acknowledged. Mode and bucket identities are fixed for existing actor ownership records; choose Rapid before creating actors in that installation. An existing installation needs a planned data migration, not a values-only mode change.
+Every configured copy must durably flush before a Rapid write is acknowledged. With one zone, there is no second Rapid copy if that zone is lost before archival. Mode and bucket identities are fixed for existing actor ownership records; choose Rapid before creating actors in that installation. An existing installation needs a planned data migration, not a values-only mode change.
 
 ## Advanced settings
 
