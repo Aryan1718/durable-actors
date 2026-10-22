@@ -359,7 +359,7 @@ impl PoolStore {
     async fn claim(&self, key: &str, host: &str, config_key: &str) -> Result<Option<SpareHandle>> {
         self.0.query_opt(
             "UPDATE durable_actors_spares SET status = 'claimed', host_id = $2, host_config_key = $3, expires_at = clock_timestamp() + interval '120 seconds' \
-             WHERE name = (SELECT name FROM durable_actors_spares WHERE pool_key = $1 AND status = 'ready' AND expires_at > clock_timestamp() ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING handle",
+             WHERE name = (SELECT name FROM durable_actors_spares WHERE pool_key = $1 AND status = 'ready' AND expires_at > statement_timestamp() AND expires_at > clock_timestamp() ORDER BY expires_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING handle",
             &[&key, &host, &config_key],
         ).await?.map(|row| serde_json::from_str(row.get::<_, &str>(0)).context("decode spare handle")).transpose()
     }
