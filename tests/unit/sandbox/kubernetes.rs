@@ -10,7 +10,9 @@ fn customer_pod_enforces_isolation_and_allows_node_scale_down() -> Result<()> {
         canonical_region: "north-america-west".into(),
         resources: ResourceLimits {
             cpu_millis: 2000,
+            cpu_limit_millis: None,
             memory_mib: 4096,
+            memory_limit_mib: Some(4096),
         },
     };
     let pod = spare_pod(
@@ -190,7 +192,9 @@ fn temporary_storage_is_disk_backed_and_bounded() {
         &["us-west4-a".into()],
         &ResourceLimits {
             cpu_millis: 500,
+            cpu_limit_millis: None,
             memory_mib: 143,
+            memory_limit_mib: Some(143),
         },
     );
     let resources = &pod["spec"]["containers"][0]["resources"];

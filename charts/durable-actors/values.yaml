@@ -17,8 +17,18 @@ ingress:
 replicaCount: 1
 actors:
   warm: 0
-  cpuMillis: 500
+  cpuMillis: 250
+  # Unset leaves actor CPU uncapped.
+  cpuLimitMillis: null
   memoryMiB: 256
+  # Unset matches memoryMiB.
+  memoryLimitMiB: null
+  # Range a deployment's @Compute may request; unset uses the runtime defaults.
+  bounds:
+    minCpuMillis: null
+    maxCpuMillis: null
+    minMemoryMiB: null
+    maxMemoryMiB: null
 alarms:
   pollIntervalMs: 100
 postgres:

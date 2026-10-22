@@ -34,7 +34,7 @@ async fn custom_resources_cannot_claim_default_sized_spares() -> Result<()> {
         let name = reserve(&pool.store, &key, 1).await?.unwrap();
         let spare = SpareHandle {name, resource_id:"sb-test".into(), route:"https://host.test".into(), canonical_region:"canada".into(), control_route:String::new(), control_token:String::new()};
         pool.store.publish(&key, &spare, 600).await?;
-        let larger = ResourceLimits {cpu_millis:2000, memory_mib:4096};
+        let larger = ResourceLimits {cpu_millis:2000, cpu_limit_millis:None, memory_mib:4096, memory_limit_mib:Some(4096)};
         assert!(pool.claim(&spec, "canada", "custom", &larger).await?.is_none());
         assert!(pool.claim(&spec, "canada", "default", &pool.config.resources).await?.is_some());
         Ok(())

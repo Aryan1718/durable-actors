@@ -174,8 +174,16 @@ struct ActorApi {
 pub(crate) struct SandboxOptions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<serde_json::Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_limit: Option<serde_json::Number>,
     #[serde(default, rename = "memoryMiB", skip_serializing_if = "Option::is_none")]
     pub memory_mib: Option<u32>,
+    #[serde(
+        default,
+        rename = "memoryLimitMiB",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub memory_limit_mib: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub regions: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -185,29 +193,83 @@ pub(crate) struct SandboxOptions {
 impl SandboxOptions {
     pub(crate) fn resources(
         &self,
-        mut defaults: crate::sandbox::ResourceLimits,
+        defaults: crate::sandbox::ResourceLimits,
     ) -> crate::sandbox::ResourceLimits {
-        if let Some(cpu) = self.cpu.as_ref().and_then(serde_json::Number::as_f64) {
-            defaults.cpu_millis = (cpu * 1000.0).round() as u32;
+        let (cpu_millis, cpu_limit_millis) = fill(
+            millis(&self.cpu),
+            millis(&self.cpu_limit),
+            defaults.cpu_millis,
+            defaults.cpu_limit_millis,
+        );
+        let (memory_mib, memory_limit_mib) = fill(
+            self.memory_mib,
+            self.memory_limit_mib,
+            defaults.memory_mib,
+            defaults.memory_limit_mib,
+        );
+        crate::sandbox::ResourceLimits {
+            cpu_millis,
+            cpu_limit_millis,
+            memory_mib,
+            memory_limit_mib,
         }
-        if let Some(memory) = self.memory_mib {
-            defaults.memory_mib = memory;
+    }
+
+    pub(crate) fn check_bounds(
+        &self,
+        actor: &str,
+        bounds: &crate::sandbox::ResourceBounds,
+    ) -> Result<()> {
+        let (cpu, memory) = (&bounds.cpu_millis, &bounds.memory_mib);
+        for value in [millis(&self.cpu), millis(&self.cpu_limit)]
+            .into_iter()
+            .flatten()
+        {
+            ensure!(
+                cpu.contains(&value),
+                "{actor}: sandbox CPU must be {}–{} cores on this server",
+                f64::from(*cpu.start()) / 1000.0,
+                f64::from(*cpu.end()) / 1000.0
+            );
         }
-        defaults
+        for value in [self.memory_mib, self.memory_limit_mib]
+            .into_iter()
+            .flatten()
+        {
+            ensure!(
+                memory.contains(&value),
+                "{actor}: sandbox memory must be {}–{} MiB on this server",
+                memory.start(),
+                memory.end()
+            );
+        }
+        Ok(())
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
-        if let Some(cpu) = &self.cpu {
+        for cpu in [&self.cpu, &self.cpu_limit].into_iter().flatten() {
             let cpu = cpu.as_f64().context("invalid sandbox CPU")?;
             ensure!(
                 (0.1..=64.0).contains(&cpu) && (cpu * 1000.0 - (cpu * 1000.0).round()).abs() < 1e-8,
                 "sandbox CPU must be 0.1–64 cores in increments of 0.001"
             );
         }
-        if let Some(memory) = self.memory_mib {
+        for memory in [self.memory_mib, self.memory_limit_mib]
+            .into_iter()
+            .flatten()
+        {
             ensure!(
                 (128..=262144).contains(&memory),
                 "sandbox memory must be 128–262144 MiB"
+            );
+        }
+        if let (Some(request), Some(limit)) = (millis(&self.cpu), millis(&self.cpu_limit)) {
+            ensure!(request <= limit, "sandbox cpu must not exceed cpuLimit");
+        }
+        if let (Some(request), Some(limit)) = (self.memory_mib, self.memory_limit_mib) {
+            ensure!(
+                request <= limit,
+                "sandbox memoryMiB must not exceed memoryLimitMiB"
             );
         }
         if let Some(timeout) = self.idle_timeout_ms {
@@ -228,6 +290,28 @@ impl SandboxOptions {
             );
         }
         Ok(())
+    }
+}
+
+fn millis(cores: &Option<serde_json::Number>) -> Option<u32> {
+    cores
+        .as_ref()
+        .and_then(serde_json::Number::as_f64)
+        .map(|cores| (cores * 1000.0).round() as u32)
+}
+
+// A lone request keeps the default limit, raised to fit it; a lone limit lowers the default
+// request to fit under it.
+fn fill(
+    request: Option<u32>,
+    limit: Option<u32>,
+    default_request: u32,
+    default_limit: Option<u32>,
+) -> (u32, Option<u32>) {
+    match (request, limit) {
+        (Some(request), None) => (request, default_limit.map(|limit| limit.max(request))),
+        (None, Some(limit)) => (default_request.min(limit), Some(limit)),
+        (request, limit) => (request.unwrap_or(default_request), limit.or(default_limit)),
     }
 }
 

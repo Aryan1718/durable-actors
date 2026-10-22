@@ -602,7 +602,9 @@ fn sandbox_resources_override_only_the_configured_fields() -> Result<()> {
             regions: vec!["north-america-east".into()],
             resources: crate::sandbox::ResourceLimits {
                 cpu_millis: 4000,
+                cpu_limit_millis: None,
                 memory_mib: 8192,
+                memory_limit_mib: Some(8192),
             },
         },
     );
@@ -622,7 +624,9 @@ fn sandbox_resources_override_only_the_configured_fields() -> Result<()> {
             request.resources,
             crate::sandbox::ResourceLimits {
                 cpu_millis,
-                memory_mib
+                cpu_limit_millis: None,
+                memory_mib,
+                memory_limit_mib: Some(8192),
             }
         );
         assert_eq!(

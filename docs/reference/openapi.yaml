@@ -907,8 +907,10 @@ components:
             additionalProperties: false
             description: Optional actor sandbox overrides compiled from the class decorator. Omitted fields inherit deployment defaults.
             properties:
-                cpu: { type: number, minimum: 0.1, maximum: 64, multipleOf: 0.001 }
-                memoryMiB: { type: integer, minimum: 128, maximum: 262144 }
+                cpu: { type: number, minimum: 0.1, maximum: 64, multipleOf: 0.001, description: CPU request in cores. The server may allow a narrower range. }
+                cpuLimit: { type: number, minimum: 0.1, maximum: 64, multipleOf: 0.001, description: CPU cap in cores; at least cpu. Omitted inherits the server default, which may be uncapped. }
+                memoryMiB: { type: integer, minimum: 128, maximum: 262144, description: Memory request in MiB. The server may allow a narrower range. }
+                memoryLimitMiB: { type: integer, minimum: 128, maximum: 262144, description: Memory cap in MiB; at least memoryMiB. Omitted inherits the server default, raised to memoryMiB. }
                 idleTimeoutMs: { type: integer, minimum: 1, maximum: 86400000 }
                 regions:
                     type: array

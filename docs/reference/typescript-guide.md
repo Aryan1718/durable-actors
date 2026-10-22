@@ -347,11 +347,13 @@ export class Ledger extends Actor {
 ```typescript
 import { Actor, Compute, Emittable, Persisted } from "durable-actors"
 
-@Compute({ cpu: 0.5, memoryMiB: 256, idleTimeoutMs: 60_000 })
+@Compute({ cpu: 0.5, cpuLimit: 2, memoryMiB: 512, idleTimeoutMs: 60_000 })
 export class BankAccount extends Actor {
     @Persisted @Emittable balance = 0
 }
 ```
+
+`cpu` and `memoryMiB` are requests; `cpuLimit` and `memoryLimitMiB` cap them and must be at least the request. An omitted limit inherits the server default, which may leave CPU uncapped, and is raised to fit your request. The server rejects deployments outside its configured range. Actors without `@Compute` resources start on prewarmed sandboxes; other sizes start a new sandbox.
 
 
 ## Using Unchecked<> 

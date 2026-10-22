@@ -69,6 +69,7 @@ pub struct SandboxProviderConfig {
     pub(super) pool: crate::sandbox::pool::PoolConfig,
     pub(crate) backend: SandboxBackend,
     pub(crate) public_origin: String,
+    pub(super) resource_bounds: crate::sandbox::ResourceBounds,
     pub runtime: HostSandboxRuntimeConfig,
 }
 
@@ -295,7 +296,8 @@ async fn sandbox_provisioner(
             Some(config.runtime_images),
         )
         .with_runtime_access(access)
-        .with_pool(pool),
+        .with_pool(pool)
+        .with_resource_bounds(config.resource_bounds),
     ))
 }
 
@@ -558,13 +560,11 @@ fn sandbox_provider_config(
             max_starting: pool_number(get, "DURABLE_ACTORS_SPARE_MAX_STARTING", 32, 1, u32::MAX)?,
             idle_ttl_seconds: pool_number(get, "DURABLE_ACTORS_SPARE_TTL_SECONDS", 600, 30, 3600)?,
             regions,
-            resources: crate::sandbox::ResourceLimits {
-                cpu_millis: pool_number(get, "DURABLE_ACTORS_HOST_CPU_MILLIS", 1000, 100, 64000)?,
-                memory_mib: pool_number(get, "DURABLE_ACTORS_HOST_MEMORY_MIB", 256, 128, 262144)?,
-            },
+            resources: host_resources(get)?,
         },
         backend,
         public_origin,
+        resource_bounds: resource_bounds(get)?,
         runtime: HostSandboxRuntimeConfig {
             control_plane_url,
             jwt_issuer: jwt_issuer.into(),
@@ -716,6 +716,66 @@ fn compute_zones(value: &str) -> Result<BTreeMap<String, Vec<String>>> {
     Ok(zones)
 }
 
+fn host_resources(
+    get: &mut impl FnMut(&str) -> Option<String>,
+) -> Result<crate::sandbox::ResourceLimits> {
+    let defaults = crate::sandbox::ResourceLimits::default();
+    let cpu_millis = pool_number(
+        get,
+        "DURABLE_ACTORS_HOST_CPU_MILLIS",
+        defaults.cpu_millis,
+        1,
+        u32::MAX,
+    )?;
+    let memory_mib = pool_number(
+        get,
+        "DURABLE_ACTORS_HOST_MEMORY_MIB",
+        defaults.memory_mib,
+        1,
+        u32::MAX,
+    )?;
+    let cpu_limit_millis = optional_number(get, "DURABLE_ACTORS_HOST_CPU_LIMIT_MILLIS")?;
+    let memory_limit_mib =
+        optional_number(get, "DURABLE_ACTORS_HOST_MEMORY_LIMIT_MIB")?.unwrap_or(memory_mib);
+    ensure!(
+        cpu_limit_millis.is_none_or(|limit| limit >= cpu_millis),
+        "DURABLE_ACTORS_HOST_CPU_LIMIT_MILLIS must be at least DURABLE_ACTORS_HOST_CPU_MILLIS"
+    );
+    ensure!(
+        memory_limit_mib >= memory_mib,
+        "DURABLE_ACTORS_HOST_MEMORY_LIMIT_MIB must be at least DURABLE_ACTORS_HOST_MEMORY_MIB"
+    );
+    Ok(crate::sandbox::ResourceLimits {
+        cpu_millis,
+        cpu_limit_millis,
+        memory_mib,
+        memory_limit_mib: Some(memory_limit_mib),
+    })
+}
+
+fn resource_bounds(
+    get: &mut impl FnMut(&str) -> Option<String>,
+) -> Result<crate::sandbox::ResourceBounds> {
+    let defaults = crate::sandbox::ResourceBounds::default();
+    Ok(crate::sandbox::ResourceBounds {
+        cpu_millis: bound(get, "CPU_MILLIS", defaults.cpu_millis)?,
+        memory_mib: bound(get, "MEMORY_MIB", defaults.memory_mib)?,
+    })
+}
+
+fn bound(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    unit: &str,
+    default: std::ops::RangeInclusive<u32>,
+) -> Result<std::ops::RangeInclusive<u32>> {
+    let min_name = format!("DURABLE_ACTORS_SANDBOX_MIN_{unit}");
+    let max_name = format!("DURABLE_ACTORS_SANDBOX_MAX_{unit}");
+    let min = pool_number(get, &min_name, *default.start(), 0, u32::MAX)?;
+    let max = pool_number(get, &max_name, *default.end(), 0, u32::MAX)?;
+    ensure!(min <= max, "{min_name} must not exceed {max_name}");
+    Ok(min..=max)
+}
+
 fn pool_number(
     get: &mut impl FnMut(&str) -> Option<String>,
     name: &str,
@@ -723,16 +783,22 @@ fn pool_number(
     min: u32,
     max: u32,
 ) -> Result<u32> {
-    let value = get(name)
-        .map(|value| value.parse::<u32>())
-        .transpose()
-        .with_context(|| format!("invalid {name}"))?
-        .unwrap_or(default);
+    let value = optional_number(get, name)?.unwrap_or(default);
     ensure!(
         (min..=max).contains(&value),
         "{name} must be between {min} and {max}"
     );
     Ok(value)
+}
+
+fn optional_number(
+    get: &mut impl FnMut(&str) -> Option<String>,
+    name: &str,
+) -> Result<Option<u32>> {
+    get(name)
+        .map(|value| value.parse::<u32>())
+        .transpose()
+        .with_context(|| format!("invalid {name}"))
 }
 
 fn required(get: &mut impl FnMut(&str) -> Option<String>, name: &str) -> Result<String> {

@@ -136,13 +136,29 @@
         },
         "cpuMillis": {
           "type": "integer",
-          "minimum": 100,
-          "maximum": 64000
+          "minimum": 1
+        },
+        "cpuLimitMillis": {
+          "type": ["integer", "null"],
+          "minimum": 1
         },
         "memoryMiB": {
           "type": "integer",
-          "minimum": 128,
-          "maximum": 262144
+          "minimum": 1
+        },
+        "memoryLimitMiB": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "bounds": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "minCpuMillis": {"type": ["integer", "null"], "minimum": 0},
+            "maxCpuMillis": {"type": ["integer", "null"], "minimum": 0},
+            "minMemoryMiB": {"type": ["integer", "null"], "minimum": 0},
+            "maxMemoryMiB": {"type": ["integer", "null"], "minimum": 0}
+          }
         }
       },
       "required": [

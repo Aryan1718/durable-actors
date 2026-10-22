@@ -17,7 +17,9 @@ fn request() -> CreateSpareRequest {
         canonical_region: "north-america-west".into(),
         resources: ResourceLimits {
             cpu_millis: 250,
+            cpu_limit_millis: Some(250),
             memory_mib: 256,
+            memory_limit_mib: Some(256),
         },
     }
 }

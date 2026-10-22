@@ -170,9 +170,12 @@ fn spare_params(
             ("TOKIO_WORKER_THREADS".into(), "2".into()),
         ]),
         cpu: Some(f64::from(request.resources.cpu_millis) / 1000.0),
-        cpu_limit: Some(f64::from(request.resources.cpu_millis) / 1000.0),
+        cpu_limit: request
+            .resources
+            .cpu_limit_millis
+            .map(|cpu| f64::from(cpu) / 1000.0),
         memory_mib: Some(request.resources.memory_mib),
-        memory_limit_mib: Some(request.resources.memory_mib),
+        memory_limit_mib: request.resources.memory_limit_mib,
         timeout: Some(config.timeout),
         cloud: Some("gcp".into()),
         regions: vec![region.clone()],

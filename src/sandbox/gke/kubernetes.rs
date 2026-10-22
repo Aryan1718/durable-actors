@@ -242,10 +242,24 @@ fn base_pod(
             "securityContext":{"runAsNonRoot":true, "runAsUser":10000, "runAsGroup":10000, "fsGroup":10000},
             "containers":[{"name":"runtime", "image":image, "imagePullPolicy":"IfNotPresent", "command":["/usr/local/bin/durable-actors"],
                 "securityContext":{"allowPrivilegeEscalation":false, "readOnlyRootFilesystem":true, "capabilities":{"drop":["ALL"]}},
-                "resources":{"requests":{"ephemeral-storage":"1Gi","cpu":format!("{}m", resources.cpu_millis),"memory":format!("{}Mi", resources.memory_mib)},"limits":{"ephemeral-storage":"8Gi","cpu":format!("{}m", resources.cpu_millis),"memory":format!("{}Mi", resources.memory_mib)}},
+                "resources":container_resources(resources),
                 "volumeMounts":[{"name":"tmp","mountPath":"/tmp"},{"name":"customer","mountPath":"/customer"}]
             }], "volumes":[{"name":"tmp","emptyDir":{"sizeLimit":"7Gi"}},{"name":"customer","emptyDir":{"sizeLimit":"1Gi"}}]
         }
+    })
+}
+
+fn container_resources(resources: &ResourceLimits) -> serde_json::Value {
+    let mut limits = json!({"ephemeral-storage":"8Gi"});
+    if let Some(cpu) = resources.cpu_limit_millis {
+        limits["cpu"] = json!(format!("{cpu}m"));
+    }
+    if let Some(memory) = resources.memory_limit_mib {
+        limits["memory"] = json!(format!("{memory}Mi"));
+    }
+    json!({
+        "requests":{"ephemeral-storage":"1Gi","cpu":format!("{}m", resources.cpu_millis),"memory":format!("{}Mi", resources.memory_mib)},
+        "limits":limits
     })
 }
 

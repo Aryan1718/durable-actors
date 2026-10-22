@@ -1,3 +1,5 @@
+use std::ops::RangeInclusive;
+
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -13,18 +15,42 @@ mod remote;
 
 pub(crate) use local::LocalSandboxProvider;
 
+/// Kubernetes-style resources: `cpu_millis` and `memory_mib` are requests; an unset limit
+/// leaves that resource uncapped.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ResourceLimits {
     pub cpu_millis: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_limit_millis: Option<u32>,
     pub memory_mib: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_limit_mib: Option<u32>,
 }
 
 impl Default for ResourceLimits {
     fn default() -> Self {
         Self {
-            cpu_millis: 1000,
+            cpu_millis: 250,
+            cpu_limit_millis: None,
             memory_mib: 256,
+            memory_limit_mib: Some(256),
+        }
+    }
+}
+
+/// Values a deployment may request through `@Compute`. Operator defaults are not held to them.
+#[derive(Clone, Debug)]
+pub struct ResourceBounds {
+    pub cpu_millis: RangeInclusive<u32>,
+    pub memory_mib: RangeInclusive<u32>,
+}
+
+impl Default for ResourceBounds {
+    fn default() -> Self {
+        Self {
+            cpu_millis: 125..=4000,
+            memory_mib: 256..=4096,
         }
     }
 }

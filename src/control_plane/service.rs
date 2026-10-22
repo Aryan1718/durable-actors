@@ -199,6 +199,7 @@ impl ControlPlaneService {
             .map(|contract| contract.sandboxes())
             .transpose()?
             .unwrap_or_default();
+        self.provisioner.check_sandboxes(&prepared)?;
         let changed = self
             .register_deployment(admin, update.as_mut(), &prepared, contract)
             .await?;
@@ -805,6 +806,10 @@ pub(crate) trait HostProvisioner: Send + Sync {
         HostLaunchSpec,
         Option<super::contracts::PublicActorContract>,
     )>;
+    fn check_sandboxes(&self, _spec: &HostLaunchSpec) -> Result<()> {
+        Ok(())
+    }
+
     async fn wait_ready(&self, _host: &HostId) -> Result<()> {
         Ok(())
     }
@@ -827,6 +832,7 @@ pub(crate) trait HostProvisioner: Send + Sync {
 pub(crate) struct SandboxHostProvisioner {
     runtime_images: Option<super::process::RuntimeImages>,
     pool: Option<Arc<crate::sandbox::pool::SparePool>>,
+    resource_bounds: Option<crate::sandbox::ResourceBounds>,
     runtime_access: Option<Arc<crate::bucket::access::RuntimeAccess>>,
     provider: Arc<dyn SandboxProvider>,
     runtime: HostSandboxRuntimeConfig,
@@ -836,6 +842,11 @@ pub(crate) struct SandboxHostProvisioner {
 impl SandboxHostProvisioner {
     pub(crate) fn with_pool(mut self, pool: Arc<crate::sandbox::pool::SparePool>) -> Self {
         self.pool = Some(pool);
+        self
+    }
+
+    pub(crate) fn with_resource_bounds(mut self, bounds: crate::sandbox::ResourceBounds) -> Self {
+        self.resource_bounds = Some(bounds);
         self
     }
 
@@ -855,6 +866,7 @@ impl SandboxHostProvisioner {
         Self {
             runtime_images,
             pool: None,
+            resource_bounds: None,
             runtime_access: None,
             provider,
             runtime,
@@ -896,6 +908,15 @@ impl HostProvisioner for SandboxHostProvisioner {
             .into();
         prepared.validate()?;
         Ok((prepared, None))
+    }
+
+    fn check_sandboxes(&self, spec: &HostLaunchSpec) -> Result<()> {
+        if let Some(bounds) = &self.resource_bounds {
+            for (actor, options) in &spec.sandboxes {
+                options.check_bounds(actor, bounds)?;
+            }
+        }
+        Ok(())
     }
     async fn wait_ready(&self, host: &HostId) -> Result<()> {
         match &self.pool {

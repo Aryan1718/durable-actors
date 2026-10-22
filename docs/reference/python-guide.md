@@ -318,7 +318,9 @@ class BankAccount(Actor):
 from durable_actors import Actor, compute, emitted, persisted
 
 
-@compute(cpu=0.5, memory_mib=256, idle_timeout_ms=60_000)
+@compute(cpu=0.5, cpu_limit=2, memory_mib=512, idle_timeout_ms=60_000)
 class BankAccount(Actor):
     balance: int = emitted(persisted(0))
 ```
+
+`cpu` and `memory_mib` are requests; `cpu_limit` and `memory_limit_mib` cap them and must be at least the request. An omitted limit inherits the server default, which may leave CPU uncapped, and is raised to fit your request. The server rejects deployments outside its configured range. Actors without `@compute` resources start on prewarmed sandboxes; other sizes start a new sandbox.
