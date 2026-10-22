@@ -66,6 +66,37 @@ impl HostStorage {
                 )
                 .await?
             }
+            crate::bucket::access::BucketLocation::S3 {
+                bucket,
+                region,
+                artifact_bucket,
+            } => {
+                ensure!(
+                    config.persistence.rapid_settings().is_none(),
+                    "Rapid persistence requires GCS"
+                );
+                let artifacts = match warm {
+                    Some(warm) => warm.ownership.bind(&artifact_bucket, credentials.into())?,
+                    None => {
+                        GcsBucket::with_credentials(&artifact_bucket, credentials.into()).await?
+                    }
+                };
+                let clients = artifacts.clients();
+                let sdk = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                    .region(aws_config::Region::new(region))
+                    .load()
+                    .await;
+                (
+                    RuntimeStorage::new(
+                        Arc::new(crate::bucket::S3Bucket::new(
+                            &bucket,
+                            aws_sdk_s3::Client::new(&sdk),
+                        )?),
+                        Arc::new(SystemClock),
+                    )?,
+                    Some(clients.storage),
+                )
+            }
             crate::bucket::access::BucketLocation::File { directory } => {
                 ensure!(
                     config.persistence.rapid_settings().is_none(),

@@ -35,6 +35,11 @@ pub(crate) enum BucketLocation {
         bucket: String,
         artifact_bucket: String,
     },
+    S3 {
+        bucket: String,
+        region: String,
+        artifact_bucket: String,
+    },
     File {
         directory: PathBuf,
     },
@@ -77,7 +82,9 @@ impl RuntimeAccess {
     pub fn new(location: BucketLocation, persistence: super::SnapshotStoreConfig) -> Result<Self> {
         Ok(Self {
             token_source: match &location {
-                BucketLocation::Gcs { .. } => Some(Box::new(ClientSideTokens::from_environment()?)),
+                BucketLocation::Gcs { .. } | BucketLocation::S3 { .. } => {
+                    Some(Box::new(ClientSideTokens::from_environment()?))
+                }
                 BucketLocation::File { .. } => None,
             },
             location,
@@ -86,11 +93,16 @@ impl RuntimeAccess {
     }
 
     pub(crate) fn validate_code(&self, code: &crate::bundle::ActorBundle) -> Result<()> {
-        let BucketLocation::Gcs {
-            artifact_bucket, ..
-        } = &self.location
-        else {
-            anyhow::bail!("compiled GCS bundles require GCS storage");
+        let artifact_bucket = match &self.location {
+            BucketLocation::Gcs {
+                artifact_bucket, ..
+            }
+            | BucketLocation::S3 {
+                artifact_bucket, ..
+            } => artifact_bucket,
+            BucketLocation::File { .. } => {
+                anyhow::bail!("compiled GCS bundles require GCS storage")
+            }
         };
         ensure!(
             code.bucket == *artifact_bucket,
@@ -119,16 +131,32 @@ impl RuntimeAccess {
         actor: &crate::actor::ActorKey,
         code_snapshot: Option<&str>,
     ) -> Result<Option<StorageTokens>> {
-        let BucketLocation::Gcs {
-            bucket,
-            artifact_bucket,
-        } = &self.location
-        else {
-            return Ok(None);
+        let (bucket, artifact_bucket) = match &self.location {
+            BucketLocation::Gcs {
+                bucket,
+                artifact_bucket,
+            } => (Some(bucket.as_str()), artifact_bucket),
+            BucketLocation::S3 {
+                artifact_bucket, ..
+            } => (None, artifact_bucket),
+            BucketLocation::File { .. } => return Ok(None),
         };
         let code = code_snapshot
             .map(crate::bundle::ActorBundle::decode)
             .transpose()?;
+        let source = self
+            .token_source
+            .as_ref()
+            .context("storage token issuer missing")?;
+        let Some(bucket) = bucket else {
+            let token = source
+                .issue(&code_rules(artifact_bucket, code.as_ref())?)
+                .await?;
+            return Ok(Some(StorageTokens {
+                ownership: token.clone(),
+                state: token,
+            }));
+        };
         let scopes = scopes(
             bucket,
             &self.persistence,
@@ -136,10 +164,6 @@ impl RuntimeAccess {
             actor,
             code.as_ref(),
         )?;
-        let source = self
-            .token_source
-            .as_ref()
-            .context("storage token issuer missing")?;
         let (ownership, state) =
             tokio::try_join!(source.issue(&scopes.ownership), source.issue(&scopes.state))?;
         Ok(Some(StorageTokens { ownership, state }))
@@ -149,6 +173,22 @@ impl RuntimeAccess {
 #[async_trait]
 trait StorageTokenSource: Send + Sync {
     async fn issue(&self, rules: &[Rule]) -> Result<StorageToken>;
+}
+
+fn code_rules(
+    artifact_bucket: &str,
+    code: Option<&crate::bundle::ActorBundle>,
+) -> Result<Vec<Rule>> {
+    let code = code.context("code snapshot required for S3 storage bootstrap")?;
+    ensure!(
+        code.bucket == artifact_bucket,
+        "code artifact belongs to another bucket"
+    );
+    Ok(vec![rule(
+        &code.bucket,
+        artifact_prefix(code)?,
+        Permissions::OBJECT_VIEWER,
+    )])
 }
 
 struct ClientSideTokens {

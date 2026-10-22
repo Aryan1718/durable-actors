@@ -84,7 +84,9 @@ Use the [self-hosting guide](../self-hosting.md) and [Helm chart](../../charts/d
 | `DURABLE_ACTORS_REDIS_URL` | Redis that carries socket messages between processes; required with more than one. `redis://host:6379`, or `rediss://:password@host:6378` for TLS. If the connection drops, the process closes its sockets with `1012` and browsers reconnect. Unset, a single process keeps everything in memory. The chart reads it from the key named by `redis.urlSecretKey`. |
 | `DURABLE_ACTORS_REDIS_CA_CERT` | PEM CA for a `rediss://` server with a private CA, such as Memorystore. The chart reads it from the key named by `redis.caSecretKey`. |
 | `DURABLE_ACTORS_PERSISTENCE` | `standard` by default. Select `rapid` for Rapid append logs with Standard archives. |
+| `DURABLE_ACTORS_STORAGE_PROVIDER` | State storage provider, `gcs` by default. `s3` currently supports Standard persistence only. |
 | `DURABLE_ACTORS_BUCKET` | Standard GCS bucket for ownership and, in Standard mode, immutable state snapshots. |
+| `DURABLE_ACTORS_AWS_REGION` | Required when `DURABLE_ACTORS_STORAGE_PROVIDER=s3`; AWS region containing the Standard S3 state bucket. |
 | `DURABLE_ACTORS_ARTIFACT_BUCKET` | Immutable compiled actor code. Defaults to `DURABLE_ACTORS_BUCKET` in Standard mode; the chart uses that bucket in both modes. |
 | `DURABLE_ACTORS_ARCHIVE_BUCKET` | Required only in Rapid mode: permanent Standard GCS manifests, checkpoints, and archived log segments. The chart uses `storage.bucket`. |
 | `DURABLE_ACTORS_RAPID_BUCKETS` | Required only in Rapid mode: JSON array of one or two `{ "bucket": "name", "zone": "us-west4-a" }` placements in distinct zones. Every configured zone must durably flush before acknowledgment. One zone has no second Rapid copy if that zone is lost before archival. |
@@ -100,6 +102,8 @@ Use the [self-hosting guide](../self-hosting.md) and [Helm chart](../../charts/d
 | `GOOGLE_APPLICATION_CREDENTIALS` | Optional ADC file; use Workload Identity on GKE. |
 
 Standard mode rejects Rapid bucket and archive settings. Storage mode and bucket identities are fixed for existing actor ownership records; changing them requires a planned data migration. See [Rapid configuration](../self-hosting.md#speed-up-writes-with-gcs-rapid) for bucket creation, IAM, and chart values.
+
+S3 Standard support currently uses the AWS SDK default credential chain. Per-actor scoped AWS credential issuance and live AWS lifecycle validation remain release blockers; see the [S3 storage status](../s3-storage.md).
 
 ## Modal data plane
 

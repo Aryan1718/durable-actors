@@ -411,7 +411,45 @@ fn standard_gcs_starts_with_one_bucket_and_no_rapid_configuration() -> Result<()
         config.storage.persistence,
         crate::bucket::SnapshotStoreConfig::Local
     );
+    assert_eq!(
+        config.storage.provider,
+        crate::control_plane::StorageProviderConfig::Gcs
+    );
     Ok(())
+}
+
+#[test]
+fn standard_s3_selects_aws_without_changing_the_code_bucket() -> Result<()> {
+    let mut values = process_environment();
+    values.insert("DURABLE_ACTORS_STORAGE_PROVIDER", "s3");
+    values.insert("DURABLE_ACTORS_AWS_REGION", "us-west-2");
+    values.insert("DURABLE_ACTORS_PERSISTENCE", "standard");
+    values.remove("DURABLE_ACTORS_ARCHIVE_BUCKET");
+    values.remove("DURABLE_ACTORS_RAPID_BUCKETS");
+    let config = ControlPlaneProcessConfig::from_lookup(|name| {
+        values.get(name).map(|value| (*value).into())
+    })?;
+    assert_eq!(
+        config.storage.provider,
+        crate::control_plane::StorageProviderConfig::S3 {
+            region: "us-west-2".into()
+        }
+    );
+    assert_eq!(config.storage.bucket, "actor-state-test");
+    assert_eq!(config.storage.artifact_bucket, "customer-code");
+    Ok(())
+}
+
+#[test]
+fn s3_rejects_rapid_and_missing_region() {
+    let parse = |values: &HashMap<&str, &str>| {
+        ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|value| (*value).into()))
+    };
+    let mut values = process_environment();
+    values.insert("DURABLE_ACTORS_STORAGE_PROVIDER", "s3");
+    assert!(parse(&values).is_err());
+    values.insert("DURABLE_ACTORS_AWS_REGION", "us-west-2");
+    assert!(parse(&values).is_err());
 }
 
 #[test]
