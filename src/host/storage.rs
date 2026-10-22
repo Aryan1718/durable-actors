@@ -274,14 +274,6 @@ impl ActorStorage for HostStorage {
         })
     }
 
-    async fn verify_actor_ownership(&self, epoch: u64) -> Result<()> {
-        let lease = self.current_lease()?;
-        self.runtime
-            .verify_actor_ownership(&self.actor, &lease, epoch)
-            .await?;
-        self.ensure_authority()
-    }
-
     async fn load_actor_state(&self, epoch: u64) -> Result<(u64, bytes::Bytes)> {
         self.ensure_authority()?;
         let lease = self

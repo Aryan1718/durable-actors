@@ -13,7 +13,7 @@ use serde_json::Value;
 use tracing::{info, warn};
 
 use crate::{
-    actor::{ActorExecutionResult, ActorInvocation, ActorKey},
+    actor::{ActorExecutionResult, ActorInvocation, ActorKey, ActorSocketPublisher},
     control_plane::{ActorJwtVerifier, ActorPrincipal},
     host::{ActorHost, HostId, sockets::HostSockets},
 };
@@ -107,7 +107,7 @@ impl ActorHostHttpService {
         let outcome = match result {
             Ok(ActorExecutionResult::Completed { result, effects }) => {
                 if !effects.is_empty()
-                    && let Err(error) = self.sockets.publish_authorized(owner_epoch, effects).await
+                    && let Err(error) = self.sockets.publish(effects).await
                 {
                     warn!(request_id, error = %format!("{error:#}"), "actor completed but socket delivery failed");
                     return InvocationReply::failed(

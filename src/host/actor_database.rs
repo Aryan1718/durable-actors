@@ -26,7 +26,6 @@ use session::DatabaseSession;
 #[async_trait]
 pub(crate) trait ActorStorage: Send + Sync {
     async fn acquire_actor(&self) -> Result<ActorActivation>;
-    async fn verify_actor_ownership(&self, epoch: u64) -> Result<()>;
     async fn load_actor_state(&self, epoch: u64) -> Result<(u64, bytes::Bytes)>;
     async fn read_sqlite(&self, bytes: &[u8]) -> Result<SqliteSnapshot>;
     async fn get_alarm(&self) -> Result<Option<i64>>;

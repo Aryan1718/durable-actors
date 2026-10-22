@@ -240,16 +240,6 @@ impl RuntimeStorage {
         self.load_actor(record).await
     }
 
-    pub(crate) async fn verify_actor_ownership(
-        &self,
-        actor: &ActorKey,
-        lease: &HostLease,
-        epoch: u64,
-    ) -> Result<()> {
-        self.owned_actor(actor, lease, epoch).await?;
-        Ok(())
-    }
-
     async fn owned_actor(
         &self,
         actor: &ActorKey,

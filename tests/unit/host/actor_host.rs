@@ -1421,11 +1421,6 @@ impl ActorStorage for FakeAuthority {
         anyhow::ensure!(!self.fenced.load(Ordering::SeqCst), "host lease expired");
         Ok(())
     }
-    async fn verify_actor_ownership(&self, epoch: u64) -> Result<()> {
-        self.ensure_authority()?;
-        anyhow::ensure!(epoch == 7, "actor ownership changed");
-        Ok(())
-    }
     async fn load_actor_state(&self, _: u64) -> Result<(u64, bytes::Bytes)> {
         self.loads.fetch_add(1, Ordering::SeqCst);
         if let Some(bytes) = self

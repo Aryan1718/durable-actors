@@ -424,7 +424,6 @@ impl ActorControlPlaneService for ControlPlaneService {
         let reply = match command {
             ControlPlaneCommand::SocketOperation { actor, operation } => {
                 self.authorize_socket_host(&principal, &actor)
-                    .await
                     .map_err(failed_precondition)?;
                 let gateway = self
                     .gateway
@@ -457,7 +456,6 @@ impl ControlPlaneService {
                 anyhow::bail!("socket operation requires authenticated routing")
             }
             ControlPlaneCommand::RequestTraces { traces, dropped } => {
-                self.require_active_host(principal).await?;
                 ensure!(
                     traces.len() <= crate::request_traces::TRACE_BATCH_SIZE,
                     "trace batch too large"
@@ -477,25 +475,14 @@ impl ControlPlaneService {
                 Ok(ControlPlaneCommandReply::Unit)
             }
             ControlPlaneCommand::GetAlarm => {
-                self.require_active_host(principal).await?;
                 let timestamp_ms = self.alarms.get(&principal.actor).await?;
                 Ok(ControlPlaneCommandReply::Alarm { timestamp_ms })
             }
             ControlPlaneCommand::UpdateAlarm { timestamp_ms } => {
-                self.require_active_host(principal).await?;
                 self.alarms.update(&principal.actor, timestamp_ms).await?;
                 Ok(ControlPlaneCommandReply::Unit)
             }
             ControlPlaneCommand::InventoryChanged => {
-                let owner = self
-                    .placements
-                    .get_owner(&principal.actor.storage_key())
-                    .await?;
-                ensure!(
-                    owner.is_some_and(|owner| owner.owner == principal.host_id
-                        && owner.lease.session_id == principal.session_id),
-                    "host session does not match"
-                );
                 self.changes.notify().await;
                 Ok(ControlPlaneCommandReply::Unit)
             }
@@ -537,14 +524,13 @@ impl ControlPlaneService {
         }
     }
 
-    pub(super) async fn authorize_socket_host(
+    pub(super) fn authorize_socket_host(
         &self,
         principal: &ActorPrincipal,
         actor: &ActorKey,
     ) -> Result<()> {
         actor.validate()?;
         ensure!(&principal.actor == actor, "host actor scope mismatch");
-        self.require_active_host(principal).await?;
         Ok(())
     }
 

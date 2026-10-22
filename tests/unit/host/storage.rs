@@ -287,7 +287,10 @@ async fn pending_write() -> Result<(Arc<MemoryBucket>, Arc<HostStorage>, WritePl
 }
 
 #[tokio::test]
-async fn socket_authorization_checks_persisted_ownership_without_reading_snapshots() -> Result<()> {
+async fn socket_publication_uses_the_local_lease_without_reading_ownership() -> Result<()> {
+    use crate::actor::{ActorSocketEffect, ActorSocketPublisher};
+    use std::sync::atomic::Ordering::SeqCst;
+
     let (bucket, storage, _, _) = pending_write().await?;
     let sockets = crate::host::sockets::HostSockets::new(
         storage.actor.clone(),
@@ -297,8 +300,12 @@ async fn socket_authorization_checks_persisted_ownership_without_reading_snapsho
     bucket
         .reject_snapshot_reads
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    sockets.publish_authorized(1, vec![]).await?;
-    assert!(sockets.publish_authorized(2, vec![]).await.is_err());
+    let reads = bucket.owner_reads.load(SeqCst);
+    let effects = vec![ActorSocketEffect::SetAutoResponse {
+        request: Some("ping".into()),
+        response: Some("pong".into()),
+    }];
+    sockets.publish(effects.clone()).await?;
     {
         let mut objects = bucket.objects.lock().unwrap();
         let owner = objects
@@ -311,9 +318,10 @@ async fn socket_authorization_checks_persisted_ownership_without_reading_snapsho
         owner.bytes = crate::payload::encode(&record)?;
         owner.generation += 1;
     }
-    assert!(sockets.publish_authorized(1, vec![]).await.is_err());
+    sockets.publish(effects.clone()).await?;
+    assert_eq!(bucket.owner_reads.load(SeqCst), reads);
     storage.stop.cancel();
-    assert!(sockets.publish_authorized(1, vec![]).await.is_err());
+    assert!(sockets.publish(effects).await.is_err());
     Ok(())
 }
 

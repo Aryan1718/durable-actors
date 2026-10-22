@@ -1739,8 +1739,8 @@ fn local_document(digest: &str) -> serde_json::Value {
     serde_json::json!({"workingDirectory": format!("/project/{digest}"), "actorEntrypoint":"src/actors.ts"})
 }
 
-#[tokio::test]
-async fn socket_authorization_accepts_a_host_renewing_its_lease() -> Result<()> {
+#[test]
+fn socket_authorization_uses_actor_scope_without_reading_ownership() -> Result<()> {
     struct RenewingPlacement(std::sync::atomic::AtomicU64, ObjectPlacement);
     #[async_trait]
     impl ObjectPlacementStore for RenewingPlacement {
@@ -1791,17 +1791,21 @@ async fn socket_authorization_accepts_a_host_renewing_its_lease() -> Result<()> 
         ActorTokenPurpose::ControlPlane,
         Duration::from_secs(60),
     )?;
+    let placement = Arc::new(RenewingPlacement(Default::default(), placement));
     let service = ControlPlaneService::new(
-        Arc::new(RenewingPlacement(Default::default(), placement)),
+        placement.clone(),
         auth,
         Arc::new(LocalAdminRegistry::default()),
         issuer,
         Arc::new(UnavailableProvisioner),
     );
-    service.authorize_socket_host(&principal, &actor).await?;
+    service.authorize_socket_host(&principal, &actor)?;
     let mut stale = principal.clone();
     stale.session_id = "other-session".into();
-    assert!(service.authorize_socket_host(&stale, &actor).await.is_err());
+    service.authorize_socket_host(&stale, &actor)?;
+    assert_eq!(placement.0.load(std::sync::atomic::Ordering::Relaxed), 0);
+    stale.actor.actor_id = "another-actor".into();
+    assert!(service.authorize_socket_host(&stale, &actor).is_err());
     Ok(())
 }
 

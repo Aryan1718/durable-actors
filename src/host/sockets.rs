@@ -28,16 +28,6 @@ impl HostSockets {
             gateway,
         }
     }
-
-    pub(crate) async fn publish_authorized(
-        &self,
-        epoch: u64,
-        effects: Vec<ActorSocketEffect>,
-    ) -> Result<()> {
-        self.storage.ensure_authority()?;
-        self.storage.verify_actor_ownership(epoch).await?;
-        self.publish(effects).await
-    }
 }
 
 #[async_trait]
