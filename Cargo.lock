@@ -1024,7 +1024,7 @@ checksum = "92773504d58c093f6de2459af4af33faa518c13451eb8f2b5698ed3d36e7c813"
 
 [[package]]
 name = "durable-actors"
-version = "0.8.1"
+version = "0.9.0"
 dependencies = [
  "anstream",
  "anstyle",
@@ -1048,7 +1048,6 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "memmap2",
- "modal-rs",
  "moka",
  "native-tls",
  "nix",
@@ -1069,6 +1068,7 @@ dependencies = [
  "tempfile",
  "terse-litestream",
  "terse-ltx",
+ "terse-modal",
  "tokio",
  "tokio-postgres",
  "tokio-stream",
@@ -2617,29 +2617,6 @@ dependencies = [
  "libc",
  "wasi 0.11.1+wasi-snapshot-preview1",
  "windows-sys 0.61.2",
-]
-
-[[package]]
-name = "modal-rs"
-version = "0.1.0"
-source = "git+https://github.com/TerseAI/modal-rs?rev=5062271f38909601ba6107bc17a29fc9d6e9838d#5062271f38909601ba6107bc17a29fc9d6e9838d"
-dependencies = [
- "base64 0.22.1",
- "bytes",
- "fastrand",
- "prost",
- "prost-types",
- "protoc-bin-vendored",
- "serde",
- "serde_json",
- "thiserror",
- "tokio",
- "toml 0.9.12+spec-1.1.0",
- "tonic",
- "tonic-prost",
- "tonic-prost-build",
- "tracing",
- "uuid",
 ]
 
 [[package]]
@@ -4519,6 +4496,29 @@ source = "git+https://github.com/TerseAI/terse-ltx?rev=fdc27e08f09a532b8f0b8d729
 dependencies = [
  "crc",
  "lz4_flex 0.13.1",
+]
+
+[[package]]
+name = "terse-modal"
+version = "0.1.0"
+source = "git+https://github.com/TerseAI/modal-rs?rev=2806e3136017f50c5404c85f01dcfd9bc0783be1#2806e3136017f50c5404c85f01dcfd9bc0783be1"
+dependencies = [
+ "base64 0.22.1",
+ "bytes",
+ "fastrand",
+ "prost",
+ "prost-types",
+ "protoc-bin-vendored",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

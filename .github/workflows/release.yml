@@ -26,6 +26,8 @@ jobs:
             ltx-version: ${{ steps.dependencies.outputs.ltx-version }}
             litestream-revision: ${{ steps.dependencies.outputs.litestream-revision }}
             litestream-version: ${{ steps.dependencies.outputs.litestream-version }}
+            modal-revision: ${{ steps.dependencies.outputs.modal-revision }}
+            modal-version: ${{ steps.dependencies.outputs.modal-version }}
         steps:
             - uses: oven-sh/setup-bun@v2
               with:
@@ -67,9 +69,9 @@ jobs:
 
                   dependencies = tomllib.loads(Path("Cargo.toml").read_text())["dependencies"]
                   with open(os.environ["GITHUB_OUTPUT"], "a") as output:
-                      for name in ("ltx", "litestream"):
+                      for name, repository in {"ltx": "terse-ltx", "litestream": "terse-litestream", "modal": "modal-rs"}.items():
                           dependency = dependencies[f"terse-{name}"]
-                          assert dependency["git"] == f"https://github.com/TerseAI/terse-{name}"
+                          assert dependency["git"] == f"https://github.com/TerseAI/{repository}"
                           assert re.fullmatch(r"[0-9a-f]{40}", dependency["rev"])
                           assert re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", dependency["version"])
                           print(f"{name}-revision={dependency['rev']}", file=output)
@@ -185,9 +187,57 @@ jobs:
                       exit 1
                   fi
 
+    modal:
+        name: Validate and publish Modal dependency
+        needs: preflight
+        runs-on: blacksmith-4vcpu-ubuntu-2404
+        timeout-minutes: 15
+        steps:
+            - name: Checkout the pinned Modal source
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  repository: TerseAI/modal-rs
+                  ref: ${{ needs.preflight.outputs.modal-revision }}
+                  persist-credentials: false
+            - name: Install Rust toolchain
+              run: rustup toolchain install 1.91.0 --profile minimal --component rustfmt && rustup default 1.91.0
+            - name: Validate the pinned crate
+              env:
+                  MODAL_VERSION: ${{ needs.preflight.outputs.modal-version }}
+              run: |
+                  python3 - <<'PYTHON'
+                  import os, tomllib
+                  from pathlib import Path
+
+                  package = tomllib.loads(Path("Cargo.toml").read_text())["package"]
+                  assert package["name"] == "terse-modal"
+                  assert package["version"] == os.environ["MODAL_VERSION"]
+                  PYTHON
+                  cargo fmt --all -- --check
+                  cargo test --locked
+                  cargo publish --locked --dry-run
+            - name: Publish terse-modal
+              env:
+                  CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+                  MODAL_VERSION: ${{ needs.preflight.outputs.modal-version }}
+              run: |
+                  status=$(curl -sS \
+                    --user-agent "durable-actors-release/1.0 (+https://github.com/TerseAI/durable-actors)" \
+                    -o /dev/null \
+                    -w "%{http_code}" \
+                    "https://crates.io/api/v1/crates/terse-modal/$MODAL_VERSION")
+                  if [ "$status" = "200" ]; then
+                      echo "terse-modal@$MODAL_VERSION already published"
+                  elif [ "$status" = "404" ]; then
+                      cargo publish --locked --no-verify
+                  else
+                      echo "::error::crates.io returned HTTP $status"
+                      exit 1
+                  fi
+
     rust:
         name: Test Rust runtime
-        needs: [preflight, litestream]
+        needs: [preflight, litestream, modal]
         runs-on: blacksmith-4vcpu-ubuntu-2404
         services:
             clickhouse:
