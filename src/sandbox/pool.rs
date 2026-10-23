@@ -11,6 +11,7 @@ use crate::{
 };
 
 mod cleanup;
+mod prewarming;
 mod replenishment;
 
 #[derive(Clone)]
@@ -128,6 +129,7 @@ impl SparePool {
     }
 
     pub fn start(self: &Arc<Self>, registry: Arc<dyn AdminRegistry>, stop: CancellationToken) {
+        tokio::spawn(self.clone().prewarm(stop.child_token()));
         tokio::spawn(self.clone().run(registry, stop));
     }
 
@@ -286,6 +288,9 @@ impl SparePool {
                 && !handle.control_token.is_empty(),
             "provider returned an invalid spare"
         );
+        self.provider
+            .prewarm_spares(std::slice::from_ref(&handle))
+            .await;
         Ok(handle)
     }
 

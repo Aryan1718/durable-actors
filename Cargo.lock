@@ -1043,6 +1043,7 @@ dependencies = [
  "futures-util",
  "google-cloud-auth",
  "google-cloud-storage",
+ "hickory-resolver",
  "http",
  "jsonwebtoken 10.4.0",
  "k8s-openapi",

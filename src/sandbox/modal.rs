@@ -30,6 +30,7 @@ pub(crate) async fn provider(
     config: ModalConfig,
     images: &[&str],
     secrets: Arc<dyn SecretResolver>,
+    connections: super::connections::HostConnections,
 ) -> Result<RemoteSandboxProvider> {
     let client = Client::from_env()?;
     let app = client
@@ -61,6 +62,7 @@ pub(crate) async fn provider(
             images: imported,
         }),
         secrets,
+        connections,
     )
 }
 

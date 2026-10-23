@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::host::HostId;
 
+pub(crate) mod connections;
 pub(crate) mod gke;
 mod local;
 mod local_store;
@@ -186,6 +187,8 @@ impl std::error::Error for HostNotReady {}
 
 #[async_trait]
 pub trait SandboxProvider: Send + Sync {
+    async fn prewarm_spares(&self, _spares: &[SpareHandle]) {}
+
     async fn wait_ready(&self, _host: &HostId) -> Result<()> {
         Ok(())
     }

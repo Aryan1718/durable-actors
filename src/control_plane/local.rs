@@ -361,6 +361,7 @@ async fn local_routes(
         super::socket_bus::MemorySocketHub::default().join(max_socket_connections),
         true,
         stop.child_token(),
+        crate::sandbox::connections::HostConnections::new()?.client,
     )?;
     let gateway = super::gateway::Gateway::new(&issuer, origin.to_owned(), socket_gateway)?;
     let mut service = ControlPlaneService::new(

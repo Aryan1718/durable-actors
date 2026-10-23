@@ -3,8 +3,8 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 
-use super::secrets::SecretResolver;
 use super::*;
+use super::{connections::HostConnections, secrets::SecretResolver};
 
 pub(crate) struct RemoteSandboxProvider {
     name: &'static str,
@@ -18,17 +18,13 @@ impl RemoteSandboxProvider {
         name: &'static str,
         cluster: Arc<dyn SandboxCluster>,
         secrets: Arc<dyn SecretResolver>,
+        connections: HostConnections,
     ) -> Result<Self> {
         Ok(Self {
             name,
             cluster,
             secrets,
-            assignment: Arc::new(HttpAssignment(
-                reqwest::Client::builder()
-                    .timeout(Duration::from_secs(120))
-                    .redirect(reqwest::redirect::Policy::none())
-                    .build()?,
-            )),
+            assignment: Arc::new(HttpAssignment(connections)),
         })
     }
 
@@ -65,6 +61,10 @@ impl RemoteSandboxProvider {
 
 #[async_trait]
 impl SandboxProvider for RemoteSandboxProvider {
+    async fn prewarm_spares(&self, spares: &[SpareHandle]) {
+        self.assignment.prewarm(spares).await;
+    }
+
     async fn create_spare(&self, request: &CreateSpareRequest) -> Result<SpareHandle> {
         validate_image(&request.image_ref)?;
         self.cluster.create_spare(request).await
@@ -240,6 +240,8 @@ pub(super) trait SandboxCluster: Send + Sync {
 
 #[async_trait]
 trait HostAssignment: Send + Sync {
+    async fn prewarm(&self, _spares: &[SpareHandle]) {}
+
     async fn assign(
         &self,
         spare: &SpareHandle,
@@ -247,20 +249,30 @@ trait HostAssignment: Send + Sync {
     ) -> Result<ActorHostHandle>;
 }
 
-struct HttpAssignment(reqwest::Client);
+struct HttpAssignment(HostConnections);
 #[async_trait]
 impl HostAssignment for HttpAssignment {
+    async fn prewarm(&self, spares: &[SpareHandle]) {
+        use futures_util::StreamExt;
+
+        futures_util::stream::iter(spares)
+            .for_each_concurrent(16, |spare| self.0.prewarm(spare))
+            .await;
+    }
+
     async fn assign(
         &self,
         spare: &SpareHandle,
         environment: HashMap<String, String>,
     ) -> Result<ActorHostHandle> {
         self.0
+            .client
             .post(format!(
                 "{}/assign",
                 spare.control_route.trim_end_matches('/')
             ))
             .bearer_auth(&spare.control_token)
+            .timeout(Duration::from_secs(120))
             .json(&environment)
             .send()
             .await?

@@ -12,6 +12,11 @@ async fn assignment_is_authenticated_single_use_and_waits_for_readiness() -> any
             .unwrap();
     });
     let client = reqwest::Client::new();
+    let health = client
+        .get(url.replace("/assign", "/healthz"))
+        .send()
+        .await?;
+    assert_eq!(health.status(), 200);
     let response = client
         .post(&url)
         .json(&serde_json::json!({}))

@@ -51,6 +51,7 @@ impl SocketGateway {
         bus: Arc<dyn SocketBus>,
         accepts_sockets: bool,
         stop: CancellationToken,
+        http: reqwest::Client,
     ) -> Result<Arc<Self>> {
         Ok(Arc::new(Self {
             registry: bus.registry().clone(),
@@ -61,11 +62,7 @@ impl SocketGateway {
                 .max_capacity(100_000)
                 .time_to_idle(Duration::from_secs(300))
                 .build(),
-            http: reqwest::Client::builder()
-                .http2_prior_knowledge()
-                .redirect(reqwest::redirect::Policy::none())
-                .connect_timeout(Duration::from_secs(5))
-                .build()?,
+            http,
         }))
     }
 

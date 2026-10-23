@@ -461,6 +461,7 @@ async fn serve_replica(
         hub.join(32768),
         true,
         tokio_util::sync::CancellationToken::new(),
+        crate::sandbox::connections::HostConnections::new()?.client,
     )?;
     let mut service = service.clone();
     service.gateway = Some(super::super::super::gateway::Gateway::new(

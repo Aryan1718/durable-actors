@@ -16,7 +16,8 @@ pub(crate) use kubernetes::GkeConfig;
 pub(crate) async fn provider(
     config: GkeConfig,
     secrets: Arc<dyn SecretResolver>,
+    connections: connections::HostConnections,
 ) -> Result<RemoteSandboxProvider> {
     let cluster = kubernetes::Kubernetes::new(kube::Client::try_default().await?, config);
-    RemoteSandboxProvider::new("gke", Arc::new(cluster), secrets)
+    RemoteSandboxProvider::new("gke", Arc::new(cluster), secrets, connections)
 }

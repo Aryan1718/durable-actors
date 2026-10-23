@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
-    routing::post,
+    routing::{get, post},
 };
 use subtle::ConstantTimeEq;
 use tokio::sync::{Mutex, oneshot};
@@ -23,6 +23,7 @@ struct AssignmentState {
 
 pub(super) fn router(token: String, pending: oneshot::Sender<Assignment>) -> Router {
     Router::new()
+        .route("/healthz", get(|| async { "ok" }))
         .route("/assign", post(assign))
         .layer(DefaultBodyLimit::disable())
         .with_state(Arc::new(AssignmentState {

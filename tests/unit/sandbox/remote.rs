@@ -202,6 +202,7 @@ async fn modal_assignment_delivers_resolved_project_secrets() -> Result<()> {
             retires: AtomicUsize::new(0),
         }),
         Arc::new(Secrets),
+        HostConnections::new()?,
     )?;
     provider.assignment = Arc::new(Assign);
     let request = request()?;
@@ -227,8 +228,12 @@ async fn secret_resolution_failure_retires_the_modal_spare_without_assignment() 
         creates: AtomicUsize::new(0),
         retires: AtomicUsize::new(0),
     });
-    let provider =
-        RemoteSandboxProvider::new("modal", cluster.clone(), Arc::new(UnavailableSecrets))?;
+    let provider = RemoteSandboxProvider::new(
+        "modal",
+        cluster.clone(),
+        Arc::new(UnavailableSecrets),
+        HostConnections::new()?,
+    )?;
     let error = provider.ensure_host(&request()?).await.unwrap_err();
     assert_eq!(error.to_string(), "secret unavailable");
     assert_eq!(cluster.retires.load(Ordering::SeqCst), 1);

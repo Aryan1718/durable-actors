@@ -567,6 +567,7 @@ impl Stack {
             hub.join(32768),
             true,
             tokio_util::sync::CancellationToken::new(),
+            crate::sandbox::connections::HostConnections::new()?.client,
         )?;
         service.gateway = Some(super::super::gateway::Gateway::new(
             &issuer,
@@ -579,6 +580,7 @@ impl Stack {
             hub.join(32768),
             true,
             tokio_util::sync::CancellationToken::new(),
+            crate::sandbox::connections::HostConnections::new()?.client,
         )?;
         let mut second_service = service.clone();
         second_service.gateway = Some(super::super::gateway::Gateway::new(

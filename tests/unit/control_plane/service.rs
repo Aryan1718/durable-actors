@@ -1816,6 +1816,7 @@ async fn with_socket_gateway(mut service: ControlPlaneService) -> Result<Control
             .join(crate::sockets::DEFAULT_MAX_CONNECTIONS),
         true,
         tokio_util::sync::CancellationToken::new(),
+        crate::sandbox::connections::HostConnections::new()?.client,
     )?;
     service.gateway = Some(super::super::gateway::Gateway::new(
         &service.host_token_issuer,

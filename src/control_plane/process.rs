@@ -196,6 +196,7 @@ async fn control_plane_routes(
         storage.persistence.clone(),
     )?);
     let placements = storage.clone();
+    let connections = crate::sandbox::connections::HostConnections::new()?;
     let socket_bus = match redis {
         Some(redis) => super::socket_bus::RedisSocketBus::start(
             redis,
@@ -210,6 +211,7 @@ async fn control_plane_routes(
         socket_bus,
         config.gateway_accept_connections,
         stop.child_token(),
+        connections.client.clone(),
     )?;
     let gateway = super::gateway::Gateway::new(
         &issuer,
@@ -223,6 +225,7 @@ async fn control_plane_routes(
         database.clone(),
         registry.clone(),
         stop.clone(),
+        connections,
     )
     .await?;
     let socket_events = config
@@ -318,12 +321,15 @@ async fn sandbox_provisioner(
     database: PostgresDatabase,
     registry: Arc<dyn super::admin::AdminRegistry>,
     stop: tokio_util::sync::CancellationToken,
+    connections: crate::sandbox::connections::HostConnections,
 ) -> Result<Arc<dyn super::service::HostProvisioner>> {
     let secrets = Arc::new(crate::sandbox::secrets::KubernetesSecrets::new(
         config.secret_namespace,
     ));
     let provider = Arc::new(match config.backend {
-        SandboxBackend::Gke(gke) => crate::sandbox::gke::provider(gke, secrets).await?,
+        SandboxBackend::Gke(gke) => {
+            crate::sandbox::gke::provider(gke, secrets, connections).await?
+        }
         SandboxBackend::Modal(modal) => {
             crate::sandbox::modal::provider(
                 modal,
@@ -332,6 +338,7 @@ async fn sandbox_provisioner(
                     &config.runtime_images.python,
                 ],
                 secrets,
+                connections,
             )
             .await?
         }

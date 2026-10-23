@@ -33,11 +33,17 @@ pub(super) fn router(invocations: ControlPlaneService, admin: AdminService) -> R
         .clone()
         .map(|gateway| gateway.router(invocations.clone()))
         .unwrap_or_default();
-    let hosts = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .connect_timeout(std::time::Duration::from_secs(5))
-        .build()
-        .expect("actor invocation HTTP client");
+    let hosts = invocations
+        .gateway
+        .as_ref()
+        .map(|gateway| gateway.connections.http.clone())
+        .unwrap_or_else(|| {
+            reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(std::time::Duration::from_secs(5))
+                .build()
+                .expect("actor invocation HTTP client")
+        });
     Router::new()
         .route("/openapi.yaml", get(openapi))
         .route("/healthz", get(health))
