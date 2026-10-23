@@ -1,5 +1,79 @@
 use super::*;
 use futures_util::stream;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+use std::time::Duration;
+
+#[tokio::test]
+async fn bundle_downloads_are_bounded_until_their_bodies_finish() -> Result<()> {
+    use axum::{Router, body::Body};
+    use google_cloud_auth::credentials::anonymous;
+    use tokio_util::task::AbortOnDropHandle;
+
+    let requests = Arc::new(AtomicUsize::new(0));
+    let bodies = Arc::new(tokio::sync::Semaphore::new(0));
+    let routes = Router::new().fallback({
+        let requests = requests.clone();
+        let bodies = bodies.clone();
+        move || {
+            requests.fetch_add(1, Ordering::SeqCst);
+            let bodies = bodies.clone();
+            async move {
+                let body = Body::from_stream(stream::once(async move {
+                    let _ = bodies.acquire().await;
+                    Ok::<_, std::io::Error>(Bytes::from_static(b"code"))
+                }));
+                (
+                    [("x-goog-generation", "123"), ("content-length", "4")],
+                    body,
+                )
+            }
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let storage = Storage::builder()
+        .with_endpoint(format!("http://{}", listener.local_addr()?))
+        .with_credentials(anonymous::Builder::new().build())
+        .build()
+        .await?;
+    let _server =
+        AbortOnDropHandle::new(tokio::spawn(async { axum::serve(listener, routes).await }));
+    let bundle = ActorBundle {
+        bucket: "code-bucket".into(),
+        files: std::iter::once(artifact("actors.mjs", b"code"))
+            .chain((1..12).map(|index| artifact(&format!("python/{index}.py"), b"code")))
+            .collect(),
+    };
+    let root = tempfile::tempdir()?;
+    let directory = root.path().to_owned();
+    let install = AbortOnDropHandle::new(tokio::spawn(async move {
+        bundle.install(&directory, &storage).await
+    }));
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while requests.load(Ordering::SeqCst) < MAX_CONCURRENT_DOWNLOADS {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(requests.load(Ordering::SeqCst), MAX_CONCURRENT_DOWNLOADS);
+    bodies.close();
+    tokio::time::timeout(Duration::from_secs(5), install).await???;
+    assert_eq!(requests.load(Ordering::SeqCst), 12);
+    assert_eq!(
+        tokio::fs::read(root.path().join("actors.mjs")).await?,
+        b"code"
+    );
+    for index in 1..12 {
+        assert_eq!(
+            tokio::fs::read(root.path().join(format!("python/{index}.py"))).await?,
+            b"code"
+        );
+    }
+    Ok(())
+}
 
 fn artifact(path: &str, bytes: &[u8]) -> BundleFile {
     BundleFile {
@@ -41,6 +115,33 @@ async fn streamed_code_is_published_only_after_its_digest_matches() -> Result<()
         tokio::fs::read(root.path().join("actors.mjs")).await?,
         b"new code"
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn interrupted_code_downloads_preserve_existing_files_and_remove_staging() -> Result<()> {
+    let root = tempfile::tempdir()?;
+    tokio::fs::write(root.path().join("actors.mjs"), b"old").await?;
+    let result = install_file(
+        root.path(),
+        &artifact("actors.mjs", b"new code"),
+        stream::iter([
+            Ok(Bytes::from_static(b"new ")),
+            Err(anyhow::anyhow!("download interrupted")),
+        ]),
+    )
+    .await;
+    assert!(
+        result
+            .unwrap_err()
+            .to_string()
+            .contains("download interrupted")
+    );
+    assert_eq!(
+        tokio::fs::read(root.path().join("actors.mjs")).await?,
+        b"old"
+    );
+    assert_eq!(std::fs::read_dir(root.path())?.count(), 1);
     Ok(())
 }
 

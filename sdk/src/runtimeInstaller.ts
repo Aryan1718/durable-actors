@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto"
-import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { createWriteStream } from "node:fs"
+import { chmod, lstat, mkdir, mkdtemp, readFile, rename, rm } from "node:fs/promises"
 import { homedir } from "node:os"
 import path from "node:path"
+import { pipeline } from "node:stream/promises"
 import { x } from "tar"
 
 import { actorEnvironment } from "./environment.js"
@@ -32,7 +34,7 @@ interface RuntimeOptions {
 export class RuntimeInstaller {
     constructor(
         private readonly options: RuntimeOptions,
-        private readonly download: (url: string) => Promise<Buffer> = downloadRelease
+        private readonly request: (url: string, init: RequestInit) => Promise<Response> = fetch
     ) {}
 
     async install(): Promise<string> {
@@ -61,13 +63,14 @@ export class RuntimeInstaller {
     private async unpack(directory: string): Promise<void> {
         const { version, platform, arch } = this.options
         const url = `https://github.com/TerseAI/durable-actors/releases/download/v${version}/durable-actors-${platform}-${arch}.tar.gz`
-        const [archive, checksum] = await Promise.all([this.download(url), this.download(`${url}.sha256`)])
-        const expected = checksum.toString("utf8").trim().split(/\s/u)[0]
-        if (!/^[a-f0-9]{64}$/u.test(expected) || createHash("sha256").update(archive).digest("hex") !== expected) {
+        const file = path.join(directory, "archive.tar.gz")
+        const checksum = `${file}.sha256`
+        const actual = await this.download(url, file, maximumBytes)
+        await this.download(`${url}.sha256`, checksum, 1024)
+        const expected = (await readFile(checksum, "utf8")).trim().split(/\s/u)[0]
+        if (!/^[a-f0-9]{64}$/u.test(expected) || actual !== expected) {
             throw new Error("Runtime archive checksum does not match; retry the download.")
         }
-        const file = path.join(directory, "archive.tar.gz")
-        await writeFile(file, archive)
         await x({
             file,
             cwd: directory,
@@ -75,10 +78,37 @@ export class RuntimeInstaller {
             filter: (name, entry) =>
                 bundleFiles.includes(name) && "type" in entry && entry.type === "File" && entry.size <= maximumBytes
         })
-        await rm(file)
+        await Promise.all([rm(file), rm(checksum)])
         if (!(await completeBundle(directory)))
             throw new Error("Runtime archive is missing a required runtime or license file.")
         await Promise.all(executables.map(name => chmod(path.join(directory, name), 0o755)))
+    }
+
+    private async download(url: string, file: string, limit: number): Promise<string> {
+        const signal = AbortSignal.timeout(120_000)
+        const response = await this.request(url, { signal })
+        if (!response.ok || !response.body) {
+            await response.body?.cancel()
+            throw new Error(
+                `Cannot download runtime (HTTP ${response.status}). Check your connection and that this package version has native release assets: ${url}`
+            )
+        }
+        const hash = createHash("sha256")
+        await pipeline(
+            response.body,
+            async function* (chunks) {
+                let size = 0
+                for await (const chunk of chunks) {
+                    size += chunk.byteLength
+                    if (size > limit) throw new Error("Runtime download exceeds the size limit.")
+                    hash.update(chunk)
+                    yield chunk
+                }
+            },
+            createWriteStream(file, { flags: "wx" }),
+            { signal }
+        )
+        return hash.digest("hex")
     }
 }
 
@@ -90,20 +120,4 @@ async function completeBundle(directory: string): Promise<boolean> {
                 .catch(() => false)
         )
     ).then(results => results.every(Boolean))
-}
-
-async function downloadRelease(url: string): Promise<Buffer> {
-    const response = await fetch(url, { signal: AbortSignal.timeout(120_000) })
-    if (!response.ok || !response.body)
-        throw new Error(
-            `Cannot download runtime (HTTP ${response.status}). Check your connection and that this package version has native release assets: ${url}`
-        )
-    const chunks: Uint8Array[] = []
-    let size = 0
-    for await (const chunk of response.body) {
-        size += chunk.byteLength
-        if (size > maximumBytes) throw new Error("Runtime download exceeds the size limit.")
-        chunks.push(chunk)
-    }
-    return Buffer.concat(chunks)
 }

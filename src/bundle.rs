@@ -12,6 +12,8 @@ use google_cloud_storage::client::Storage;
 use serde::{Deserialize, Serialize};
 use tokio::io::AsyncWriteExt;
 
+const MAX_CONCURRENT_DOWNLOADS: usize = 4;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ActorRuntime {
     Typescript,
@@ -70,22 +72,22 @@ impl ActorBundle {
     pub async fn install(&self, root: &Path, storage: &Storage) -> Result<()> {
         self.validate()?;
         let bucket = format!("projects/_/buckets/{}", self.bucket);
-        futures_util::future::try_join_all(self.files.iter().map(|file| async {
-            let response = storage
-                .read_object(&bucket, &file.object)
-                .set_generation(file.generation)
-                .send()
-                .await?;
-            let chunks = futures_util::stream::try_unfold(response, |mut response| async {
-                match response.next().await {
-                    Some(chunk) => Ok(Some((chunk?, response))),
-                    None => anyhow::Ok(None),
-                }
-            });
-            install_file(root, file, chunks).await
-        }))
-        .await?;
-        Ok(())
+        futures_util::stream::iter(self.files.iter().map(Ok))
+            .try_for_each_concurrent(MAX_CONCURRENT_DOWNLOADS, |file| async {
+                let response = storage
+                    .read_object(&bucket, &file.object)
+                    .set_generation(file.generation)
+                    .send()
+                    .await?;
+                let chunks = futures_util::stream::try_unfold(response, |mut response| async {
+                    match response.next().await {
+                        Some(chunk) => Ok(Some((chunk?, response))),
+                        None => anyhow::Ok(None),
+                    }
+                });
+                install_file(root, file, chunks).await
+            })
+            .await
     }
 
     pub fn entrypoint(&self) -> Result<&str> {

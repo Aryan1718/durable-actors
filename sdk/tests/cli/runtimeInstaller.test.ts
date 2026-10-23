@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { createHash } from "node:crypto"
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import path from "node:path"
 import test from "node:test"
@@ -15,7 +15,18 @@ test("installs the runtime from a verified release and reuses the cache offline"
     const requests: string[] = []
     const download = async (url: string) => {
         requests.push(url)
-        return url.endsWith(".sha256") ? Buffer.from(createHash("sha256").update(archive).digest("hex")) : archive
+        if (url.endsWith(".sha256")) return new Response(createHash("sha256").update(archive).digest("hex"))
+        let offset = 0
+        return new Response(
+            new ReadableStream({
+                pull(controller) {
+                    if (offset === archive.length) return controller.close()
+                    const end = Math.min(offset + 17, archive.length)
+                    controller.enqueue(archive.subarray(offset, end))
+                    offset = end
+                }
+            })
+        )
     }
     const options = {
         version: "1.2.3",
@@ -46,9 +57,74 @@ test("rejects a damaged archive before exposing executables", async t => {
     t.after(() => rm(directory, { recursive: true, force: true }))
     const installer = new RuntimeInstaller(
         { version: "1.2.3", platform: "linux", arch: "x64", cacheDirectory: directory },
-        async url => (url.endsWith(".sha256") ? Buffer.from("0".repeat(64)) : Buffer.from("corrupt"))
+        async url => new Response(url.endsWith(".sha256") ? "0".repeat(64) : "corrupt")
     )
     await assert.rejects(installer.install(), /checksum/i)
+    assert.deepEqual(await readdir(path.join(directory, "1.2.3")), [])
+})
+
+test("writes release chunks to disk before the download ends and cleans up interrupted downloads", async t => {
+    const directory = await mkdtemp(path.join(tmpdir(), "ldo-install-stream-"))
+    t.after(() => rm(directory, { recursive: true, force: true }))
+    const versionDirectory = path.join(directory, "1.2.3")
+    let chunks = 0
+    let written = 0
+    const installer = new RuntimeInstaller(
+        { version: "1.2.3", platform: "linux", arch: "x64", cacheDirectory: directory },
+        async () =>
+            new Response(
+                new ReadableStream({
+                    async pull(controller) {
+                        if (chunks++ < 16) {
+                            controller.enqueue(new Uint8Array(64 * 1024))
+                            return
+                        }
+                        const [staging] = await readdir(versionDirectory)
+                        written = (await stat(path.join(versionDirectory, staging, "archive.tar.gz"))).size
+                        controller.error(new Error("download interrupted"))
+                    }
+                })
+            )
+    )
+    await assert.rejects(installer.install(), /download interrupted/)
+    assert.ok(written > 0, "the archive must reach disk while the response is still streaming")
+    assert.deepEqual(await readdir(versionDirectory), [])
+})
+
+test("rejects oversized checksums, cancels the response, and removes staging files", async t => {
+    const directory = await mkdtemp(path.join(tmpdir(), "ldo-install-limit-"))
+    t.after(() => rm(directory, { recursive: true, force: true }))
+    let cancelled = false
+    const installer = new RuntimeInstaller(
+        { version: "1.2.3", platform: "linux", arch: "x64", cacheDirectory: directory },
+        async url => {
+            if (!url.endsWith(".sha256")) return new Response("archive")
+            return new Response(
+                new ReadableStream({
+                    pull(controller) {
+                        controller.enqueue(new Uint8Array(512))
+                    },
+                    cancel() {
+                        cancelled = true
+                    }
+                })
+            )
+        }
+    )
+    await assert.rejects(installer.install(), /size limit/)
+    assert.equal(cancelled, true)
+    assert.deepEqual(await readdir(path.join(directory, "1.2.3")), [])
+})
+
+test("HTTP failures do not expose an incomplete runtime", async t => {
+    const directory = await mkdtemp(path.join(tmpdir(), "ldo-install-http-"))
+    t.after(() => rm(directory, { recursive: true, force: true }))
+    const installer = new RuntimeInstaller(
+        { version: "1.2.3", platform: "linux", arch: "x64", cacheDirectory: directory },
+        async () => new Response("not found", { status: 404 })
+    )
+    await assert.rejects(installer.install(), /HTTP 404/)
+    assert.deepEqual(await readdir(path.join(directory, "1.2.3")), [])
 })
 
 test("unsupported systems get an actionable error without downloading", async () => {
