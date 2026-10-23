@@ -127,10 +127,19 @@ async fn conditional_writes_preserve_etags_and_reconcile_uncertain_responses() -
             .await?
     );
     assert!(
-        bucket
+        !bucket
             .compare_and_swap(
                 key,
                 Some(StorageRevision::ETag("\"conflict\"".into())),
+                Bytes::from_static(b"new")
+            )
+            .await?
+    );
+    assert!(
+        bucket
+            .compare_and_swap(
+                key,
+                Some(StorageRevision::ETag("\"other-conflict\"".into())),
                 Bytes::from_static(b"new")
             )
             .await
@@ -223,6 +232,41 @@ async fn large_writes_use_conditional_multipart_publication() -> Result<()> {
             .filter(|request| request.uri.contains("partNumber="))
             .all(|request| request.checksum.as_deref() == Some("CRC32C"))
     );
+    Ok(())
+}
+
+#[tokio::test]
+async fn multipart_completion_distinguishes_conditional_conflicts() -> Result<()> {
+    let server = TestServer::start().await?;
+    let bytes = Bytes::from(vec![7; 5 * 1024 * 1024 + 1]);
+
+    assert!(
+        !server
+            .bucket()?
+            .compare_and_swap("runtime/large-conflict", None, bytes.clone())
+            .await?
+    );
+    assert!(
+        !server
+            .bucket()?
+            .compare_and_swap("runtime/large-stale", None, bytes.clone())
+            .await?
+    );
+    assert!(
+        server
+            .bucket()?
+            .compare_and_swap("runtime/large-other-conflict", None, bytes)
+            .await
+            .is_err()
+    );
+    let requests = server.requests.lock().unwrap();
+    for key in ["runtime/large-conflict", "runtime/large-stale"] {
+        assert!(
+            requests
+                .iter()
+                .any(|request| request.method == "DELETE" && request.uri.contains(key))
+        );
+    }
     Ok(())
 }
 
@@ -444,6 +488,7 @@ async fn write(
     {
         Some("\"stale\"") => s3_error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed"),
         Some("\"conflict\"") => s3_error(StatusCode::CONFLICT, "ConditionalRequestConflict"),
+        Some("\"other-conflict\"") => s3_error(StatusCode::CONFLICT, "OperationAborted"),
         _ => (StatusCode::OK, [("etag", "\"etag-43\"")]).into_response(),
     }
 }
@@ -468,6 +513,15 @@ async fn multipart(
             .into_response();
     }
     if uri.query() == Some("uploadId=test-upload") {
+        if key == "runtime/large-conflict" {
+            return s3_error(StatusCode::CONFLICT, "ConditionalRequestConflict");
+        }
+        if key == "runtime/large-stale" {
+            return s3_error(StatusCode::PRECONDITION_FAILED, "PreconditionFailed");
+        }
+        if key == "runtime/large-other-conflict" {
+            return s3_error(StatusCode::CONFLICT, "OperationAborted");
+        }
         return (
             StatusCode::OK,
             [("content-type", "application/xml")],

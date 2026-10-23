@@ -101,10 +101,81 @@ fn s3_state_storage_issues_gcs_access_for_code_only() -> Result<()> {
             sha256: "unused".into(),
         }],
     };
-    let rules = code_rules("code", Some(&code))?;
+    let rules = code_rules("code", &code)?;
     assert_eq!(rules.len(), 1);
     assert_eq!(rules[0].bucket, "code");
     assert_eq!(rules[0].permissions, Permissions::OBJECT_VIEWER);
+    Ok(())
+}
+
+#[tokio::test]
+async fn s3_bootstrap_and_refresh_without_code_need_no_gcs_token() -> Result<()> {
+    let access = RuntimeAccess {
+        location: BucketLocation::S3 {
+            bucket: "state".into(),
+            region: "us-west-2".into(),
+            artifact_bucket: "code".into(),
+        },
+        token_source: None,
+        persistence: super::super::SnapshotStoreConfig::Local,
+    };
+    let config: HostStorageConfig =
+        serde_json::from_str(&access.bootstrap("us-west-2", &actor(), None).await?)?;
+
+    assert!(config.tokens.is_none());
+    assert!(access.issue(&actor(), None).await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn s3_bootstrap_with_code_keeps_scoped_artifact_access() -> Result<()> {
+    struct RecordingTokens(Arc<std::sync::Mutex<Vec<Vec<Rule>>>>);
+
+    #[async_trait]
+    impl StorageTokenSource for RecordingTokens {
+        async fn issue(&self, rules: &[Rule]) -> Result<StorageToken> {
+            self.0.lock().unwrap().push(rules.to_vec());
+            Ok(StorageToken {
+                access_token: "artifact-token".into(),
+                expires_at_ms: 1,
+            })
+        }
+    }
+
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let access = RuntimeAccess {
+        location: BucketLocation::S3 {
+            bucket: "state".into(),
+            region: "us-west-2".into(),
+            artifact_bucket: "code".into(),
+        },
+        token_source: Some(Box::new(RecordingTokens(requests.clone()))),
+        persistence: super::super::SnapshotStoreConfig::Local,
+    };
+    let code = serde_json::to_string(&crate::bundle::ActorBundle {
+        bucket: "code".into(),
+        files: vec![crate::bundle::BundleFile {
+            path: "actors.mjs".into(),
+            object: "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs"
+                .into(),
+            generation: 1,
+            sha256: "unused".into(),
+        }],
+    })?;
+
+    let config: HostStorageConfig =
+        serde_json::from_str(&access.bootstrap("us-west-2", &actor(), Some(&code)).await?)?;
+
+    let tokens = config.tokens.context("artifact token")?;
+    assert_eq!(tokens.ownership.access_token, "artifact-token");
+    assert_eq!(tokens.state.access_token, "artifact-token");
+    assert_eq!(
+        requests.lock().unwrap().as_slice(),
+        [code_rules(
+            "code",
+            &crate::bundle::ActorBundle::decode(&code)?
+        )?]
+    );
     Ok(())
 }
 

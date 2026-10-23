@@ -135,28 +135,28 @@ impl RuntimeAccess {
             BucketLocation::Gcs {
                 bucket,
                 artifact_bucket,
-            } => (Some(bucket.as_str()), artifact_bucket),
+            } => (bucket.as_str(), artifact_bucket),
             BucketLocation::S3 {
                 artifact_bucket, ..
-            } => (None, artifact_bucket),
+            } => {
+                let Some(code_snapshot) = code_snapshot else {
+                    return Ok(None);
+                };
+                let code = crate::bundle::ActorBundle::decode(code_snapshot)?;
+                let token = self
+                    .token_source()?
+                    .issue(&code_rules(artifact_bucket, &code)?)
+                    .await?;
+                return Ok(Some(StorageTokens {
+                    ownership: token.clone(),
+                    state: token,
+                }));
+            }
             BucketLocation::File { .. } => return Ok(None),
         };
         let code = code_snapshot
             .map(crate::bundle::ActorBundle::decode)
             .transpose()?;
-        let source = self
-            .token_source
-            .as_ref()
-            .context("storage token issuer missing")?;
-        let Some(bucket) = bucket else {
-            let token = source
-                .issue(&code_rules(artifact_bucket, code.as_ref())?)
-                .await?;
-            return Ok(Some(StorageTokens {
-                ownership: token.clone(),
-                state: token,
-            }));
-        };
         let scopes = scopes(
             bucket,
             &self.persistence,
@@ -164,9 +164,16 @@ impl RuntimeAccess {
             actor,
             code.as_ref(),
         )?;
+        let source = self.token_source()?;
         let (ownership, state) =
             tokio::try_join!(source.issue(&scopes.ownership), source.issue(&scopes.state))?;
         Ok(Some(StorageTokens { ownership, state }))
+    }
+
+    fn token_source(&self) -> Result<&dyn StorageTokenSource> {
+        self.token_source
+            .as_deref()
+            .context("storage token issuer missing")
     }
 }
 
@@ -175,11 +182,7 @@ trait StorageTokenSource: Send + Sync {
     async fn issue(&self, rules: &[Rule]) -> Result<StorageToken>;
 }
 
-fn code_rules(
-    artifact_bucket: &str,
-    code: Option<&crate::bundle::ActorBundle>,
-) -> Result<Vec<Rule>> {
-    let code = code.context("code snapshot required for S3 storage bootstrap")?;
+fn code_rules(artifact_bucket: &str, code: &crate::bundle::ActorBundle) -> Result<Vec<Rule>> {
     ensure!(
         code.bucket == artifact_bucket,
         "code artifact belongs to another bucket"

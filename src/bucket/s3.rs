@@ -2,7 +2,7 @@ use super::{Bucket, BucketObject, StorageRevision};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use aws_sdk_s3::{
-    error::SdkError,
+    error::{ProvideErrorMetadata, SdkError},
     operation::{
         complete_multipart_upload::CompleteMultipartUploadError, get_object::GetObjectError,
         put_object::PutObjectError,
@@ -82,7 +82,7 @@ impl Bucket for S3Bucket {
             .await;
         match result {
             Ok(_) => Ok(true),
-            Err(error) if put_status(&error) == Some(412) => Ok(false),
+            Err(error) if put_is_cas_miss(&error) => Ok(false),
             Err(error) => Err(error.into()),
         }
     }
@@ -164,7 +164,7 @@ impl S3Bucket {
             .await;
         match result {
             Ok(_) => Ok(true),
-            Err(error) if complete_status(&error) == Some(412) => {
+            Err(error) if complete_is_cas_miss(&error) => {
                 self.abort_upload(key, &upload_id).await;
                 Ok(false)
             }
@@ -278,10 +278,24 @@ fn put_status(error: &SdkError<PutObjectError>) -> Option<u16> {
         .map(|response| response.status().as_u16())
 }
 
+fn put_is_cas_miss(error: &SdkError<PutObjectError>) -> bool {
+    put_status(error) == Some(412)
+        || put_status(error) == Some(409)
+            && error.as_service_error().and_then(|error| error.code())
+                == Some("ConditionalRequestConflict")
+}
+
 fn complete_status(error: &SdkError<CompleteMultipartUploadError>) -> Option<u16> {
     error
         .raw_response()
         .map(|response| response.status().as_u16())
+}
+
+fn complete_is_cas_miss(error: &SdkError<CompleteMultipartUploadError>) -> bool {
+    complete_status(error) == Some(412)
+        || complete_status(error) == Some(409)
+            && error.as_service_error().and_then(|error| error.code())
+                == Some("ConditionalRequestConflict")
 }
 
 #[cfg(test)]
