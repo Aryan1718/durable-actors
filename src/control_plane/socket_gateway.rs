@@ -115,9 +115,21 @@ impl SocketGateway {
         let route = self.route(&ticket.actor).await;
         let mut cached = route.lock().await;
         let now = crate::clock::Clock::now_ms(&crate::clock::SystemClock)? as i64;
-        if let Some(target) = cached.as_ref().filter(|target| target.expires_at_ms > now) {
+        if let Some(target) = cached.as_ref().filter(|target| target.expires_at_ms > now)
+            && service
+                .lifecycle
+                .routing(
+                    &ticket.actor.storage_key(),
+                    target.host_id.as_str(),
+                    &target.session_id,
+                    target.owner_epoch,
+                )
+                .await
+                .is_none()
+        {
             return Ok(target.clone());
         }
+        *cached = None;
         let target = service
             .resolve_actor_route(&ticket.actor, ticket.home_region.as_deref(), None, None)
             .await?;

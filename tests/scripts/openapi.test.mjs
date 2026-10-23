@@ -83,8 +83,8 @@ test("deployment schemas describe both hosted and local registration and the com
         { bundle: { bucket: "code", files: [{ path: "actors.mjs", object: "bundle/actors.mjs", generation: 1, sha256: "A".repeat(43) }] } },
         { localSource: { workingDirectory: "/project", actorEntrypoint: "actors.ts" } }
     ]) {
-        const value = { ...source, secretRefs: [] }
-        assert.ok(register(source), ajv.errorsText(register.errors))
+        const value = { ...source, organizationId: "org-test", secretRefs: [] }
+        assert.ok(register({ ...source, organizationId: "org-test" }), ajv.errorsText(register.errors))
         assert.ok(read(value), ajv.errorsText(read.errors))
         for (const field of Object.keys(value)) {
             const incomplete = { ...value }
@@ -106,10 +106,10 @@ test("compiled deployments pin each artifact generation and checksum", async () 
     const ajv = new Ajv({ strict: false })
     const deploy = ajv.compile(spec.components.schemas.Deployment)
     const bundle = { bucket: "code", files: [{ path: "actors.mjs", object: "bundle/actors.mjs", generation: 42, sha256: "A".repeat(43) }] }
-    assert.ok(deploy({ bundle }), ajv.errorsText(deploy.errors))
-    assert.equal(deploy({ bundle, localSource: { workingDirectory: "/project" } }), false)
+    assert.ok(deploy({ organizationId: "org-test", bundle }), ajv.errorsText(deploy.errors))
+    assert.equal(deploy({ organizationId: "org-test", bundle, localSource: { workingDirectory: "/project" } }), false)
     for (const invalid of [{ generation: 0 }, { sha256: "bad" }, { object: "" }]) {
-        assert.equal(deploy({ bundle: { ...bundle, files: [{ ...bundle.files[0], ...invalid }] } }), false)
+        assert.equal(deploy({ organizationId: "org-test", bundle: { ...bundle, files: [{ ...bundle.files[0], ...invalid }] } }), false)
     }
 })
 

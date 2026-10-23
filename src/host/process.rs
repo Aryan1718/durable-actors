@@ -69,6 +69,7 @@ pub(super) async fn serve_assigned_host(
         }
     };
     let PreparedActorHostResources {
+        control_plane,
         invocation_auth,
         listener,
         route,
@@ -118,7 +119,13 @@ pub(super) async fn serve_assigned_host(
             return Err(error);
         }
     };
-    lease.observe(executor_connection.executor(), host.status());
+    let lifecycle = super::lifecycle::HostLifecycle::start(
+        control_plane,
+        ready.owner_epoch,
+        config.resources.clone(),
+        executor_connection.executor(),
+        host.status(),
+    )?;
     if let Some(readiness) = readiness {
         let _ = readiness.send(ready);
     }
@@ -156,11 +163,14 @@ pub(super) async fn serve_assigned_host(
     // Keep answering until the actor is released: calls routed here meanwhile get a refusal they
     // can retry, rather than a reset whose outcome is unknown.
     let unregister_result = serve_during(server.as_mut(), async {
+        lifecycle.draining();
         stop_executor(&host, &executor_stop, executor_task).await;
         drop(javascript);
-        storage
+        let result = storage
             .finish(shutdown_deadline - Duration::from_secs(2))
-            .await
+            .await;
+        lifecycle.stop().await;
+        result
     })
     .await;
     server_stop.cancel();
@@ -197,6 +207,7 @@ async fn initialize_executor(
 }
 
 struct PreparedActorHostResources {
+    control_plane: Arc<ControlPlaneClient>,
     storage: Arc<super::storage::HostStorage>,
     credentials: DropGuard,
     sockets: Arc<super::sockets::HostSockets>,
@@ -331,6 +342,7 @@ async fn prepare_actor_host(
     );
     timings.lease_registered_at_ms = Some(timings.elapsed_ms());
     Ok(PreparedActorHostResources {
+        control_plane,
         storage,
         credentials,
         sockets,

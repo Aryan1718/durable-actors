@@ -44,12 +44,13 @@ async fn bundle_registration_preserves_code_and_contract_during_secret_rotation(
     client
         .put(&url)
         .bearer_auth("api-key")
-        .json(&serde_json::json!({"bundle":bundle,"contract":document}))
+        .json(&serde_json::json!({"organizationId":"org-test","bundle":bundle,"contract":document}))
         .send()
         .await?
         .error_for_status()?;
     let active = admin.current_deployment("default").await?.unwrap();
     assert_eq!(active.image_ref, "im-runtime");
+    assert_eq!(active.organization_id.as_deref(), Some("org-test"));
     assert_eq!(active.actor_entrypoint.as_deref(), Some("actors.mjs"));
     assert_eq!(active.code_snapshot, Some(bundle.encode()?));
     assert!(active.sandboxes.contains_key("ChatRoom"));
@@ -72,6 +73,7 @@ async fn bundle_registration_preserves_code_and_contract_during_secret_rotation(
         .error_for_status()?;
     let rotated = admin.current_deployment("default").await?.unwrap();
     assert_eq!(rotated.code_snapshot, active.code_snapshot);
+    assert_eq!(rotated.organization_id, active.organization_id);
     assert_eq!(rotated.sandboxes, active.sandboxes);
     assert_ne!(rotated.host_config_key(), active.host_config_key());
     assert_eq!(
@@ -325,6 +327,7 @@ fn fixture_with_idle_timeout(
 
 fn source() -> HostLaunchSpec {
     HostLaunchSpec {
+        organization_id: Some("org-test".into()),
         sandboxes: Default::default(),
         project_id: "default".into(),
         source: None,

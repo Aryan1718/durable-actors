@@ -32,12 +32,6 @@ impl HostLeaseRequest {
     }
 }
 
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct ActivationInventory {
-    pub resident: Option<bool>,
-    pub waiting: Option<Vec<WaitingOperation>>,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ActorSocketInventory {
     pub actor: ActorKey,
@@ -52,10 +46,6 @@ pub struct WaitingOperation {
 
 #[async_trait]
 pub trait HostLeaseRegistry: Send + Sync {
-    async fn register(
-        &self,
-        request: &HostLeaseRequest,
-        inventory: ActivationInventory,
-    ) -> Result<HostLease>;
+    async fn register(&self, request: &HostLeaseRequest) -> Result<HostLease>;
     async fn unregister(&self, id: &HostId, session_id: &str) -> Result<()>;
 }

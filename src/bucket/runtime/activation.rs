@@ -55,7 +55,6 @@ impl RuntimeStorage {
             let mut record = Ownership {
                 persistence: self.persistence.clone(),
                 sealed: false,
-                inventory: ActivationInventory::default(),
                 actor: actor.clone(),
                 epoch: current
                     .as_ref()
@@ -106,7 +105,6 @@ impl RuntimeStorage {
         &self,
         actor: &ActorKey,
         request: &HostLeaseRequest,
-        inventory: ActivationInventory,
     ) -> Result<HostLease> {
         let (generation, mut record) = self
             .load(&actor.storage_key())
@@ -129,7 +127,6 @@ impl RuntimeStorage {
         );
         let lease = self.new_lease(request)?;
         record.lease = lease.clone();
-        record.inventory = inventory;
         self.save_activation(&mut record, Some(generation)).await?;
         if let Some(owned) = self
             .owned

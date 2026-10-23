@@ -80,11 +80,12 @@ Use the [self-hosting guide](../self-hosting.md) and [Helm chart](../../charts/d
 | `DURABLE_ACTORS_GATEWAY_ACCEPT_CONNECTIONS` | Whether this process accepts browser WebSockets; defaults to `true`. |
 | `DURABLE_ACTORS_PUBLIC_URL` | Public HTTPS origin for client invocation and socket routing. |
 | `DURABLE_ACTORS_POSTGRES_URL` | Registry, trace, and spare bookkeeping database; the user needs migration privileges. |
-| `DURABLE_ACTORS_ANALYTICS_BACKEND` | Request telemetry backend: `postgres` (default) or `clickhouse`. PostgreSQL remains required for control-plane bookkeeping. |
+| `DURABLE_ACTORS_ANALYTICS_BACKEND` | Telemetry backend: `postgres` (default) or `clickhouse`. ClickHouse supplies request analytics and actor inventory. PostgreSQL remains required for control-plane bookkeeping. |
 | `DURABLE_ACTORS_CLICKHOUSE_URL` | ClickHouse HTTP(S) endpoint, required for the ClickHouse backend. |
-| `DURABLE_ACTORS_CLICKHOUSE_DATABASE` | Existing ClickHouse database. The application user needs SELECT, INSERT, CREATE TABLE, and ALTER TABLE privileges in it. |
+| `DURABLE_ACTORS_CLICKHOUSE_DATABASE` | Existing ClickHouse database. The application user needs SELECT, INSERT, CREATE TABLE, CREATE VIEW, and ALTER TABLE privileges in it. |
 | `DURABLE_ACTORS_CLICKHOUSE_USER` | ClickHouse application user. |
 | `DURABLE_ACTORS_CLICKHOUSE_PASSWORD` | ClickHouse application password. Supply through a secret. |
+| `DURABLE_ACTORS_USAGE_TOPIC` | Optional Pub/Sub topic, `projects/<gcp-project>/topics/<topic>`, for actor activation usage. Unset disables publishing. The control plane uses Application Default Credentials with publisher access to this topic. |
 | `DURABLE_ACTORS_POSTGRES_MAX_CONNECTIONS` | PostgreSQL pool size per process, default `8`, range 1–1,000. The chart sets it from `postgres.maxConnections`. Invocation routing, trace writes, and alarm polling share the pool. Budget the database's connection limit for this pool size times the controller replica count, plus other database clients. |
 | `DURABLE_ACTORS_REDIS_URL` | Redis that carries socket messages between processes; required with more than one. `redis://host:6379`, or `rediss://:password@host:6378` for TLS. If the connection drops, the process closes its sockets with `1012` and browsers reconnect. Unset, a single process keeps everything in memory. The chart reads it from the key named by `redis.urlSecretKey`. |
 | `DURABLE_ACTORS_REDIS_CA_CERT` | PEM CA for a `rediss://` server with a private CA, such as Memorystore. The chart reads it from the key named by `redis.caSecretKey`. |
@@ -105,6 +106,56 @@ Use the [self-hosting guide](../self-hosting.md) and [Helm chart](../../charts/d
 | `GOOGLE_APPLICATION_CREDENTIALS` | Optional ADC file; use Workload Identity on GKE. |
 
 Standard mode rejects Rapid bucket and archive settings. Storage mode and bucket identities are fixed for existing actor ownership records; changing them requires a planned data migration. See [Rapid configuration](../self-hosting.md#speed-up-writes-with-gcs-rapid) for bucket creation, IAM, and chart values.
+
+### Host lifecycle reports
+
+Upgraded hosts report `started` after activation, `heartbeat` every 10 seconds, `draining` before executor shutdown, and `stopped` after the storage shutdown attempt. Reports contain the ownership epoch, a per-session sequence, activation/report timestamps, requested resources, residency, and waiting operations. The sandbox provider supplies resources through the internal `DURABLE_ACTORS_HOST_RESOURCES` JSON environment variable. Each report has a one-second timeout and is best effort.
+
+The control plane derives project, actor, host, session, and region from the authenticated host token without reading ownership. This allows a stop report after ownership release. All dashboard inventory comes from lifecycle reports. With the default PostgreSQL analytics backend or local development, inventory uses a bounded in-memory cache (10,000 actors, 24-hour idle expiry). This POC cache is local to each control-plane process, resets on restart, and contains only reports received by that replica. Use ClickHouse for shared, persistent inventory across replicas.
+
+With `DURABLE_ACTORS_ANALYTICS_BACKEND=clickhouse`, the existing bounded telemetry writer batches reports into `actor_lifecycle`. A materialized view maintains `actor_inventory`, ordered by ownership epoch and report sequence so late reports from an old activation cannot overwrite its replacement. Raw reports use the configured analytics retention period; latest inventory records have no TTL, keeping stopped actors visible.
+
+With ClickHouse enabled, dashboard inventory and request analytics come from ClickHouse, deployment metadata from PostgreSQL, and current sockets from the gateway/Redis. Inventory reads never fall back to GCS in any mode: an actor without a report is absent from lifecycle inventory, while a ClickHouse read error is returned to the dashboard. A report older than 35 seconds is shown as unknown unless it is a confirmed `stopped` report, which remains dormant. Explicit state inspection and authoritative ownership still use GCS.
+
+Hosts register ownership immediately and renew on the configured lease schedule. Ownership records no longer carry residency or waiting operations, and changes to either no longer trigger extra GCS renewals. Ownership expiry, self-fencing, and shutdown release are unchanged. The `InventoryChanged` command has been removed. The dashboard's existing 15-second inventory refresh picks up lifecycle reports without a PostgreSQL notification per host renewal.
+
+`draining` and `stopped` reports also record routing hints in the configured Redis, independently of analytics persistence. Hints identify the actor, host, session, and ownership epoch; late heartbeats cannot clear them, and a late draining report cannot undo a stop. All control-plane replicas must use the same Redis. Hints expire after the configured maximum JWT lifetime plus 60 seconds. Without Redis, hints use a process-local cache capped at 100,000 sessions; a Redis error logs a warning and uses the existing lease and host checks.
+
+Discovery and cached HTTP/socket routes check these hints. A cached HTTP invocation to a shutting-down session returns `not_executed` with `host_unavailable`; sockets discard the cached route and resolve again. Discovery waits for handoff for up to 30 seconds, watching the hint while draining and rechecking authoritative ownership after a stop report or the observed lease expiry. A stop report never releases ownership or permits replacement while its lease remains active. Missing shutdown reports retain the existing host-rejection/retry behavior.
+
+Deploy lifecycle-capable control planes before upgraded host images, then enable ClickHouse inventory once hosts can report. Existing ClickHouse installations switch inventory readers when upgrading to this version. Actors appear as their upgraded hosts report; there is no historical backfill. See the [chart configuration](../../charts/durable-actors/README.md#clickhouse-analytics) for credentials and rollout details.
+
+### Usage events
+
+Deployment registration requires `organizationId` from the upstream service. The control plane persists it with the deployment and binds it into host credentials. Lifecycle analytics and usage updates take it from the authenticated host, including refreshed credentials and estimated stops, without a per-event deployment lookup. Pub/Sub also includes it as an `organizationId` message attribute alongside `projectId`. Changing the organization changes the host configuration; existing activations retain their original attribution.
+
+Coordinate this API upgrade with the upstream deployment service: older control planes reject the new field, and the upgraded API rejects requests without it. Hold deployment registrations and secret rotations while upgrading the control plane and configured host images, then upgrade the upstream service and resume registrations. If that service pins the runtime version, update its pin to the published release before deploying it.
+
+Existing deployments have null organization attribution until re-registered; there is no inferred ownership or historical backfill. Consumers must exclude unattributed events from organization billing. Local development uses `local`.
+
+Setting `DURABLE_ACTORS_USAGE_TOPIC` publishes `started` and `stopped` reports to Pub/Sub, independently of the analytics backend. Heartbeats and draining reports are published as usage only when correcting an estimated stop. Both warm-spare and on-demand activations report through the same host lifecycle path. Usage covers activation through shutdown, including idle time while assigned; it excludes time spent waiting as an unassigned spare and measures allocated resources, not actual CPU utilization. Token grants and usage enforcement belong to the external consumer.
+
+Each message contains the lifecycle event with four additional fields:
+
+| Field | Meaning |
+| --- | --- |
+| `organizationId` | Owning organization supplied at deployment; null for legacy deployments. |
+| `usageId` | Stable `<hostId>:<sessionId>` activation ID, shared by its start and stop. |
+| `revision` | `2 * sequence` for a host report; `2 * sequence + 1` for an estimated stop based on that report. Higher revisions replace lower revisions for the same activation. |
+| `endedAtMs` | `null` for start or a correction from a live host; the real or estimated stop timestamp for stop. |
+| `estimated` | `true` when silence caused an estimated stop; `false` for host reports. |
+
+The event includes `eventId`, `actor` (`project_id`, `actor_name`, `actor_id`), `hostId`, `sessionId`, `ownerEpoch`, `region`, `kind`, `sequence`, `startedAtMs`, `occurredAtMs`, `receivedAtMs`, `resources`, `resident`, and `waiting`. Resources use `cpuMillis` and `memoryMib` for requests, plus optional `cpuLimitMillis` and `memoryLimitMib`. Pub/Sub attributes `projectId` and `eventId` support filtering and deduplication. The topic's Google Cloud project can differ from the actor's project.
+
+Consumers should upsert by actor project, actor identity, and `usageId`, accepting only a higher `revision`. Messages can be duplicated or arrive out of order; do not sum every message. A stop contains the complete interval even if its start was missed: duration is `endedAtMs - startedAtMs`. For example, 3,000 ms at 500 millicores is 1.5 allocated CPU-seconds; at 768 MiB it is 2,304 MiB-seconds. Sum completed activations to roll up usage by actor, project, and organization.
+
+Publishing runs in the background, waits up to five seconds for acknowledgment, and logs failures without blocking lifecycle recording or routing. This POC has no durable outbox or replay; a controller exit or failed publication can lose events. No history is backfilled.
+
+When usage publishing is enabled, controllers retain each session's latest report in shared Redis and check for missing stops every 10 seconds, claiming up to 128 overdue sessions per controller per pass. After 35 seconds without a report, an estimated stop uses the last report's `occurredAtMs` as its end time. It retains that report's sequence, appends `:estimated` to its event ID, and uses the reconciliation time as `receivedAtMs`. It does not count the silence window as usage.
+
+The next newer heartbeat or draining report reopens the usage interval (`endedAtMs: null`, `estimated: false`); a real stop replaces the estimate with the actual end time. Consumers must replace or retract the previous contribution when processing a higher revision, including reopening a previously closed interval. Duplicate and older reports do not extend the freshness window. Redis atomically coordinates reports and expiry across replicas; session records expire after 24 hours without an update. Enable Redis persistence to retain this state across Redis restarts. Without Redis, reconciliation uses a process-local cache capped at 100,000 sessions that resets on restart.
+
+Estimates affect only usage publications. ClickHouse retains the actual lifecycle reports, stale dashboard entries stay unknown, and estimated stops neither create routing hints nor release ownership. Reconciliation performs no GCS or PostgreSQL reads. Redis errors log warnings; start/stop publishing and the other lifecycle paths continue, but reconciliation and heartbeat corrections require the session state to be available.
 
 ## Modal data plane
 

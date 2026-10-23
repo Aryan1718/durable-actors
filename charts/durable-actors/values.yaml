@@ -31,6 +31,15 @@ actors:
     maxMemoryMiB: null
 alarms:
   pollIntervalMs: 100
+analytics:
+  backend: postgres
+  clickhouse:
+    url: ""
+    database: ""
+    user: ""
+    passwordSecretKey: ""
+usage:
+  topic: ""
 postgres:
   maxConnections: 8
 redis:

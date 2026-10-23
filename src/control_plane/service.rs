@@ -36,6 +36,7 @@ const FALLBACK_REGION: &str = "north-america-central";
 
 #[derive(Clone)]
 pub struct ControlPlaneService {
+    pub(super) lifecycle: crate::actor_lifecycle::LifecycleStore,
     pub(super) traces: crate::request_traces::TraceStore,
     pub(super) changes: crate::postgres::notifications::ChangeFeed,
     pub(super) region: Option<String>,
@@ -76,6 +77,7 @@ impl ControlPlaneService {
         provisioner: Arc<dyn HostProvisioner>,
     ) -> Self {
         Self {
+            lifecycle: Default::default(),
             traces: crate::request_traces::TraceStore::default(),
             changes: Default::default(),
             runtime_access: None,
@@ -321,7 +323,7 @@ impl ControlPlaneService {
     ) -> Result<ActorTarget> {
         actor.validate()?;
         let target = self
-            .route_actor(
+            .route_actor_when_ready(
                 actor,
                 self.default_region(),
                 home_region,
@@ -358,6 +360,8 @@ impl ControlPlaneService {
             timings.route_selected_at_ms = Some(timings.elapsed_ms());
         }
         Ok(ActorTarget {
+            host_id: target.lease.id,
+            session_id: target.lease.session_id,
             host_state: target.host_state,
             home_region: target.placement.home_region,
             route,
@@ -370,6 +374,8 @@ impl ControlPlaneService {
 
 #[derive(Clone)]
 pub(super) struct ActorTarget {
+    pub host_id: HostId,
+    pub session_id: String,
     pub host_state: HostState,
     pub home_region: String,
     pub route: String,
@@ -452,6 +458,22 @@ impl ControlPlaneService {
         command: ControlPlaneCommand,
     ) -> Result<ControlPlaneCommandReply> {
         match command {
+            ControlPlaneCommand::Lifecycle { report } => {
+                use crate::clock::Clock;
+                self.lifecycle
+                    .record(crate::actor_lifecycle::LifecycleEvent {
+                        organization_id: principal.organization_id.clone(),
+                        event_id: format!("{}:{}", principal.session_id, report.sequence),
+                        actor: principal.actor.clone(),
+                        host_id: principal.host_id.to_string(),
+                        session_id: principal.session_id.clone(),
+                        region: principal.region.clone(),
+                        received_at_ms: crate::clock::SystemClock.now_ms()?,
+                        report,
+                    })
+                    .await?;
+                Ok(ControlPlaneCommandReply::Unit)
+            }
             ControlPlaneCommand::SocketOperation { .. } => {
                 anyhow::bail!("socket operation requires authenticated routing")
             }
@@ -482,10 +504,6 @@ impl ControlPlaneService {
                 self.alarms.update(&principal.actor, timestamp_ms).await?;
                 Ok(ControlPlaneCommandReply::Unit)
             }
-            ControlPlaneCommand::InventoryChanged => {
-                self.changes.notify().await;
-                Ok(ControlPlaneCommandReply::Unit)
-            }
             ControlPlaneCommand::RefreshStorageAccess => {
                 self.require_active_host(principal).await?;
                 let spec = self
@@ -506,6 +524,7 @@ impl ControlPlaneService {
                 let replacement_token = self
                     .host_token_issuer
                     .issue_host(
+                        principal.organization_id.as_deref(),
                         &principal.host_id,
                         &principal.session_id,
                         principal
@@ -532,6 +551,52 @@ impl ControlPlaneService {
         actor.validate()?;
         ensure!(&principal.actor == actor, "host actor scope mismatch");
         Ok(())
+    }
+
+    async fn route_actor_when_ready(
+        &self,
+        actor: &ActorKey,
+        storage_region: &str,
+        home_region: Option<&str>,
+        mut timings: Option<&mut TargetResolutionTimings>,
+    ) -> Result<RoutedActor> {
+        let deadline = tokio::time::Instant::now() + super::CONTROL_PLANE_REQUEST_TIMEOUT;
+        loop {
+            match self
+                .route_actor(actor, storage_region, home_region, timings.as_deref_mut())
+                .await
+            {
+                Err(error) if error.is::<ShuttingDownHost>() => {
+                    tokio::time::timeout_at(
+                        deadline,
+                        self.wait_for_shutdown(actor, error.downcast_ref().unwrap()),
+                    )
+                    .await
+                    .context("actor host is still shutting down; retry discovery")??;
+                }
+                result => return result,
+            }
+        }
+    }
+
+    async fn wait_for_shutdown(&self, actor: &ActorKey, host: &ShuttingDownHost) -> Result<()> {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            if host.lease.expires_at_ms <= crate::clock::Clock::now_ms(&crate::clock::SystemClock)?
+                || self
+                    .lifecycle
+                    .routing(
+                        &actor.storage_key(),
+                        host.lease.id.as_str(),
+                        &host.lease.session_id,
+                        host.epoch,
+                    )
+                    .await
+                    != Some(crate::actor_lifecycle::LifecycleKind::Draining)
+            {
+                return Ok(());
+            }
+        }
     }
 
     async fn route_actor(
@@ -714,6 +779,23 @@ impl ControlPlaneService {
         {
             return Ok(None);
         }
+        if self
+            .lifecycle
+            .routing(
+                &placement.object,
+                lease.id.as_str(),
+                &lease.session_id,
+                placement.owner_epoch,
+            )
+            .await
+            .is_some()
+        {
+            return Err(ShuttingDownHost {
+                lease: lease.clone(),
+                epoch: placement.owner_epoch,
+            }
+            .into());
+        }
         self.provisioner.wait_ready(&placement.owner).await?;
         Ok(Some(RoutedActor {
             host_state: HostState::Warm,
@@ -723,6 +805,20 @@ impl ControlPlaneService {
         }))
     }
 }
+
+#[derive(Debug)]
+struct ShuttingDownHost {
+    lease: HostLease,
+    epoch: u64,
+}
+
+impl std::fmt::Display for ShuttingDownHost {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("actor host is shutting down")
+    }
+}
+
+impl std::error::Error for ShuttingDownHost {}
 
 fn select_target_region(current: Option<&ObjectPlacement>, requested: &str) -> Result<String> {
     if let Some(placement) = current {
@@ -1116,7 +1212,14 @@ impl SandboxHostProvisioner {
         let session_id = uuid::Uuid::new_v4().to_string();
         let host_token = self
             .issuer
-            .issue_host(&host_id, &session_id, &config_key, region, actor)?
+            .issue_host(
+                spec.organization_id.as_deref(),
+                &host_id,
+                &session_id,
+                &config_key,
+                region,
+                actor,
+            )?
             .token;
         Ok(EnsureHostRequest {
             actor_is_new: false,

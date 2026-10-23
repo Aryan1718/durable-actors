@@ -133,6 +133,8 @@ fn request() -> Result<EnsureHostRequest> {
 #[test]
 fn python_assignment_uses_its_manifest_entrypoint() -> Result<()> {
     let mut request = request()?;
+    request.resources.cpu_millis = 500;
+    request.resources.memory_mib = 512;
     let mut manifest = crate::bundle::ActorBundle::decode(request.code_snapshot.as_ref().unwrap())?;
     manifest.files[0].path = "actors.pyz".into();
     request.code_snapshot = Some(manifest.encode()?);
@@ -142,6 +144,12 @@ fn python_assignment_uses_its_manifest_entrypoint() -> Result<()> {
     assert_eq!(
         environment["DURABLE_ACTORS_ENTRYPOINT"],
         "/customer/actors.pyz"
+    );
+    assert_eq!(
+        serde_json::from_str::<crate::sandbox::ResourceLimits>(
+            &environment["DURABLE_ACTORS_HOST_RESOURCES"]
+        )?,
+        request.resources
     );
     Ok(())
 }

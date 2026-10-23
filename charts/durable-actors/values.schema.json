@@ -180,6 +180,16 @@
         "pollIntervalMs"
       ]
     },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "topic": {
+          "type": "string",
+          "pattern": "^$|^projects/[^/\\s]+/topics/[^/\\s]+$"
+        }
+      }
+    },
     "postgres": {
       "type": "object",
       "additionalProperties": false,
@@ -235,6 +245,23 @@
       "required": [
         "dnsCidrs"
       ]
+    },
+    "analytics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "backend": {"enum": ["postgres", "clickhouse"]},
+        "clickhouse": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "url": {"type": "string"},
+            "database": {"type": "string"},
+            "user": {"type": "string"},
+            "passwordSecretKey": {"type": "string"}
+          }
+        }
+      }
     },
     "images": {
       "type": "object",

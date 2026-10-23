@@ -1,4 +1,5 @@
 pub mod actor;
+mod actor_lifecycle;
 pub mod actor_state;
 pub mod bucket;
 pub mod clock;

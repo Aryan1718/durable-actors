@@ -53,10 +53,15 @@ impl Gateway {
         actor: &ActorKey,
         epoch: u64,
         authorization: &str,
-    ) -> Result<String> {
-        let capability = self.capability(actor, authorization)?;
+    ) -> Result<(String, crate::host::HostId, String)> {
+        let principal = self.invocations.authenticate_authorization(authorization)?;
+        let capability = validated_capability(actor, &principal)?;
         ensure!(capability.owner_epoch == epoch, "invalid owner epoch");
-        Ok(backend_origin(&capability.route)?.to_string())
+        Ok((
+            backend_origin(&capability.route)?.to_string(),
+            principal.host_id,
+            principal.session_id,
+        ))
     }
 
     pub fn authorize_publish(&self, actor: &ActorKey, authorization: &str) -> Result<u64> {
@@ -80,15 +85,23 @@ impl Gateway {
         authorization: &str,
     ) -> Result<ActorInvocationCapability> {
         let principal = self.invocations.authenticate_authorization(authorization)?;
-        let capability = principal
-            .invocation
-            .context("invocation capability missing")?;
-        ensure!(
-            principal.actor == *actor && capability.actor == *actor,
-            "invocation target mismatch"
-        );
-        Ok(capability)
+        Ok(validated_capability(actor, &principal)?.clone())
     }
+}
+
+fn validated_capability<'a>(
+    actor: &ActorKey,
+    principal: &'a super::auth::ActorPrincipal,
+) -> Result<&'a ActorInvocationCapability> {
+    let capability = principal
+        .invocation
+        .as_ref()
+        .context("invocation capability missing")?;
+    ensure!(
+        principal.actor == *actor && capability.actor == *actor,
+        "invocation target mismatch"
+    );
+    Ok(capability)
 }
 
 pub(super) fn backend_origin(route: &str) -> Result<reqwest::Url> {

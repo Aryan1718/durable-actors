@@ -18,7 +18,10 @@ pub(super) async fn run(
             batch.push(first);
             let deadline = tokio::time::sleep(FLUSH_INTERVAL);
             tokio::pin!(deadline);
-            while batch.events.len() < 1024 && batch.status.len() < 128 {
+            while batch.events.len() < 1024
+                && batch.status.len() < 128
+                && batch.lifecycle.len() < 1024
+            {
                 tokio::select! {
                     _ = &mut deadline => break,
                     report = receiver.recv() => match report {
@@ -79,15 +82,28 @@ where
 struct Batch {
     events: Vec<TraceEvent>,
     status: Vec<StatusRow>,
+    lifecycle: Vec<crate::actor_lifecycle::LifecycleEvent>,
 }
 
 impl Batch {
     fn push(&mut self, report: Report) {
         self.events.extend(report.events);
         self.status.extend(report.status);
+        self.lifecycle.extend(report.lifecycle);
     }
 
     async fn write(&self, client: &Client) -> Result<()> {
+        if !self.lifecycle.is_empty() {
+            let mut insert = client
+                .insert::<lifecycle::LifecycleRow>("actor_lifecycle")
+                .await?;
+            for event in &self.lifecycle {
+                insert
+                    .write(&lifecycle::LifecycleRow::from_event(event)?)
+                    .await?;
+            }
+            insert.end().await?;
+        }
         if !self.events.is_empty() {
             let mut insert = client.insert::<EventRow>("actor_traces").await?;
             for event in &self.events {

@@ -23,6 +23,7 @@ use crate::request_traces::{
 };
 
 mod ingestion;
+mod lifecycle;
 mod queries;
 
 #[derive(Clone)]
@@ -88,6 +89,7 @@ impl ClickHouseTracePersistence {
         let report = Report {
             events: events.to_vec(),
             status,
+            lifecycle: None,
         };
         self.sender.try_send(report).map_err(|error| {
             anyhow::anyhow!(
@@ -184,6 +186,7 @@ impl TracePersistence for ClickHouseTracePersistence {
 struct Report {
     events: Vec<TraceEvent>,
     status: Option<StatusRow>,
+    lifecycle: Option<crate::actor_lifecycle::LifecycleEvent>,
 }
 
 #[derive(Row, Serialize)]

@@ -135,7 +135,7 @@ export class Staging {
             await this.saveSetting(key, this.env[key])
         }
         await this.saveSetting("DURABLE_ACTORS_BINARY", this.env.DURABLE_ACTORS_BINARY)
-        return { bundle: await this.uploadBundle(), contract, secretRefs: Object.keys(this.secrets).length ? [this.secretName] : [] }
+        return { organizationId: this.env.DURABLE_ACTORS_ORGANIZATION_ID, bundle: await this.uploadBundle(), contract, secretRefs: Object.keys(this.secrets).length ? [this.secretName] : [] }
     }
 
     async buildRuntimeImage(runtime) {
@@ -312,6 +312,7 @@ export function stagingEnvironment(document, system = process.env) {
         "KUBECONFIG",
         "GOOGLE_APPLICATION_CREDENTIALS",
         "DURABLE_ACTORS_PROJECT_ID",
+        "DURABLE_ACTORS_ORGANIZATION_ID",
         "DURABLE_ACTORS_POSTGRES_URL",
         "DURABLE_ACTORS_JWT_SIGNING_KEY",
         "DURABLE_ACTORS_SECRET",
@@ -359,8 +360,7 @@ export function stagingEnvironment(document, system = process.env) {
     const postgres = new URL(configured.DURABLE_ACTORS_POSTGRES_URL)
     if (!["127.0.0.1", "localhost", "[::1]"].includes(postgres.hostname)) throw new Error("Staging script requires a local Postgres database")
     const publicUrl = `https://${configured.NGROK_DOMAIN}`
-    for (const key of ["DURABLE_ACTORS_CONTROL_PLANE_URL", "DURABLE_ACTORS_PUBLIC_URL"])
-        if (configured[key] !== publicUrl) throw new Error(`${key} must match NGROK_DOMAIN in .env.staging`)
+    for (const key of ["DURABLE_ACTORS_CONTROL_PLANE_URL", "DURABLE_ACTORS_PUBLIC_URL"]) if (configured[key] !== publicUrl) throw new Error(`${key} must match NGROK_DOMAIN in .env.staging`)
     const env = Object.fromEntries(["PATH", "HOME", "USER", "TMPDIR", "LANG", "LC_ALL", "TERM", "SHELL"].filter(key => system[key] !== undefined).map(key => [key, system[key]]))
     Object.assign(env, configured)
     env.CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE = configured.CLOUDSDK_AUTH_CREDENTIAL_FILE_OVERRIDE ?? configured.GOOGLE_APPLICATION_CREDENTIALS

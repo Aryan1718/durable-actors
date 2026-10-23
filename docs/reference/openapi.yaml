@@ -64,6 +64,7 @@ paths:
                         examples:
                             compiled:
                                 value:
+                                    organizationId: org-example
                                     bundle:
                                         bucket: actor-code
                                         files:
@@ -74,6 +75,7 @@ paths:
                                     contract: { version: 1, actors: [], typescript: { declarations: "export interface ActorTypes {}", dependencies: {} } }
                             local:
                                 value:
+                                    organizationId: local
                                     localSource: { workingDirectory: /project, actorEntrypoint: src/actors.ts }
             responses:
                 "200": { $ref: "#/components/responses/Changed" }
@@ -835,10 +837,15 @@ components:
         Deployment:
             type: object
             additionalProperties: false
+            required: [organizationId]
             oneOf:
                 - required: [bundle]
                 - required: [localSource]
             properties:
+                organizationId:
+                    type: string
+                    pattern: "^[A-Za-z0-9._-]{1,64}$"
+                    description: Owning organization supplied by the upstream deployment service for billing attribution.
                 bundle: { $ref: "#/components/schemas/ActorBundle" }
                 localSource: { $ref: "#/components/schemas/LocalSource" }
                 secretRefs:
@@ -856,11 +863,14 @@ components:
         CurrentDeployment:
             type: object
             additionalProperties: false
-            required: [secretRefs]
+            required: [organizationId, secretRefs]
             oneOf:
                 - required: [bundle]
                 - required: [localSource]
             properties:
+                organizationId:
+                    type: [string, "null"]
+                    description: Owning organization; null for deployments registered before organization attribution.
                 bundle: { $ref: "#/components/schemas/ActorBundle" }
                 localSource: { $ref: "#/components/schemas/LocalSource" }
                 secretRefs: { $ref: "#/components/schemas/Deployment/properties/secretRefs" }

@@ -7,29 +7,20 @@ use tracing::{debug, info, warn};
 
 use crate::{
     clock::Clock,
-    host_leases::{
-        ActivationInventory, HostLease, HostLeaseRegistry, HostLeaseRequest, WaitingOperation,
-    },
+    host_leases::{HostLease, HostLeaseRegistry, HostLeaseRequest},
 };
 
-use super::{HostEndpoint, actor_host::ActorStatus};
+use super::HostEndpoint;
 
 const LEASE_RENEWAL_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 
 pub(crate) struct HostLeaseMaintainer {
-    observation: watch::Sender<HostObservation>,
     endpoint: HostEndpoint,
     session_id: String,
     store: Arc<dyn HostLeaseRegistry>,
     clock: Arc<dyn Clock>,
     lease_duration_ms: u64,
     renew_every: Duration,
-}
-
-#[derive(Clone, Default)]
-struct HostObservation {
-    status: Option<watch::Receiver<ActorStatus>>,
-    executor: Option<Arc<dyn crate::actor::ActorExecutor>>,
 }
 
 impl HostLeaseMaintainer {
@@ -57,7 +48,6 @@ impl HostLeaseMaintainer {
         ensure!(!session_id.is_empty(), "host session ID must not be empty");
 
         Ok(Self {
-            observation: watch::channel(HostObservation::default()).0,
             endpoint,
             session_id,
             store,
@@ -67,25 +57,7 @@ impl HostLeaseMaintainer {
         })
     }
 
-    pub(crate) fn observe(
-        &self,
-        executor: Arc<dyn crate::actor::ActorExecutor>,
-        status: watch::Receiver<ActorStatus>,
-    ) {
-        self.observation.send_replace(HostObservation {
-            executor: Some(executor),
-            status: Some(status),
-        });
-    }
-
     pub(crate) async fn start(self: Arc<Self>) -> Result<LeaseRenewalTask> {
-        let observation_changes = self.observation.subscribe();
-        let observation = self.observation.borrow().clone();
-        let changes = observation
-            .executor
-            .as_ref()
-            .and_then(|executor| executor.residency_changes());
-        let waiting = observation.status.map(WaitingChanges::new);
         let initial = self.renew_once_with_deadline().await?;
         info!(
             host_id = %initial.lease.id,
@@ -101,9 +73,6 @@ impl HostLeaseMaintainer {
             initial.local_deadline,
             task_shutdown,
             lease_lost_tx,
-            changes,
-            waiting,
-            observation_changes,
         ));
 
         Ok(LeaseRenewalTask {
@@ -126,30 +95,14 @@ impl HostLeaseMaintainer {
         mut local_deadline: Instant,
         shutdown: CancellationToken,
         lease_lost: watch::Sender<bool>,
-        mut changes: Option<watch::Receiver<()>>,
-        mut waiting: Option<WaitingChanges>,
-        mut observation_changes: watch::Receiver<HostObservation>,
     ) {
         loop {
             if !self
-                .wait_until_renewal(
-                    local_deadline,
-                    &shutdown,
-                    &lease_lost,
-                    &mut changes,
-                    &mut waiting,
-                    &mut observation_changes,
-                )
+                .wait_until_renewal(local_deadline, &shutdown, &lease_lost)
                 .await
             {
                 return;
             }
-            let observation = self.observation.borrow().clone();
-            changes = observation
-                .executor
-                .as_ref()
-                .and_then(|executor| executor.residency_changes());
-            waiting = observation.status.map(WaitingChanges::new);
             let Some(deadline) = self
                 .renew_before_deadline(local_deadline, &shutdown, &lease_lost)
                 .await
@@ -165,14 +118,10 @@ impl HostLeaseMaintainer {
         local_deadline: Instant,
         shutdown: &CancellationToken,
         lease_lost: &watch::Sender<bool>,
-        changes: &mut Option<watch::Receiver<()>>,
-        waiting: &mut Option<WaitingChanges>,
-        observation_changes: &mut watch::Receiver<HostObservation>,
     ) -> bool {
         tokio::select! {
             biased;
             _ = shutdown.cancelled() => false,
-            _ = observation_changes.changed() => true,
             _ = tokio::time::sleep_until(local_deadline) => {
                 warn!(
                     host_id = %self.endpoint.id,
@@ -182,11 +131,6 @@ impl HostLeaseMaintainer {
                 false
             }
             _ = tokio::time::sleep(self.renew_every) => true,
-            _ = residency_changed(changes) => true,
-            _ = async {
-                waiting_changed(waiting).await;
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            } => true,
         }
     }
 
@@ -239,18 +183,7 @@ impl HostLeaseMaintainer {
             duration_ms: self.lease_duration_ms,
         };
 
-        let observation = self.observation.borrow().clone();
-        let inventory = ActivationInventory {
-            resident: observation
-                .executor
-                .as_ref()
-                .and_then(|executor| executor.resident()),
-            waiting: observation
-                .status
-                .as_ref()
-                .map(|status| status.borrow().waiting.clone()),
-        };
-        let lease = self.store.register(&request, inventory).await?;
+        let lease = self.store.register(&request).await?;
         debug!(
             host_id = %lease.id,
             route = %lease.route,
@@ -276,39 +209,6 @@ impl HostLeaseMaintainer {
             local_deadline,
         })
     }
-}
-
-async fn residency_changed<T>(changes: &mut Option<watch::Receiver<T>>) {
-    if let Some(receiver) = changes {
-        if receiver.changed().await.is_ok() {
-            return;
-        }
-    }
-    std::future::pending::<()>().await;
-}
-
-struct WaitingChanges {
-    status: watch::Receiver<ActorStatus>,
-    reported: Vec<WaitingOperation>,
-}
-
-impl WaitingChanges {
-    fn new(status: watch::Receiver<ActorStatus>) -> Self {
-        let reported = status.borrow().waiting.clone();
-        Self { status, reported }
-    }
-}
-
-async fn waiting_changed(changes: &mut Option<WaitingChanges>) {
-    if let Some(WaitingChanges { status, reported }) = changes
-        && status
-            .wait_for(|status| status.waiting != *reported)
-            .await
-            .is_ok()
-    {
-        return;
-    }
-    std::future::pending::<()>().await;
 }
 
 struct ConfirmedHostLease {

@@ -147,6 +147,10 @@ fn assignment_environment(
     let mut environment = HashMap::from([
         ("DURABLE_ACTORS_PROCESS_ROLE".into(), "host".into()),
         (
+            "DURABLE_ACTORS_HOST_RESOURCES".into(),
+            serde_json::to_string(&request.resources)?,
+        ),
+        (
             "DURABLE_ACTORS_HOST_TOKEN".into(),
             request.host_token.clone(),
         ),

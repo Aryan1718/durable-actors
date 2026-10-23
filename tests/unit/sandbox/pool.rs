@@ -186,6 +186,7 @@ async fn reconciliation_keeps_spares_for_every_project_runtime() -> Result<()> {
         for (project, image) in [("team-a", "im-a"), ("team-b", "im-b")] {
             registry
                 .register_test_deployment(&HostLaunchSpec {
+                    organization_id: Some("org-test".into()),
                     sandboxes: Default::default(),
                     project_id: project.into(),
                     source: None,

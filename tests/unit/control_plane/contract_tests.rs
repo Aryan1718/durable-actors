@@ -299,6 +299,7 @@ async fn registry_behavior(registry: Arc<dyn AdminRegistry>) -> Result<()> {
 
 fn spec() -> HostLaunchSpec {
     HostLaunchSpec {
+        organization_id: Some("org-test".into()),
         sandboxes: Default::default(),
         project_id: "default".into(),
         source: None,

@@ -3,9 +3,10 @@ import { spawnSync } from "node:child_process"
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import { fileURLToPath } from "node:url"
 import test from "node:test"
 
-const chart = new URL("../", import.meta.url).pathname
+const chart = fileURLToPath(new URL("../", import.meta.url))
 const helm = process.env.HELM ?? "helm"
 function render(overrides = {}) {
     const directory = mkdtempSync(join(tmpdir(), "actors-chart-"))
@@ -23,6 +24,24 @@ function manifests(overrides) {
     assert.equal(result.status, 0, result.stderr)
     return result.stdout
 }
+
+test("enables usage publishing only when a topic is configured", () => {
+    assert.doesNotMatch(manifests(), /DURABLE_ACTORS_USAGE_TOPIC/)
+    const output = manifests({ usage: { topic: "projects/example/topics/actor-usage" } })
+    assert.match(output, /DURABLE_ACTORS_USAGE_TOPIC, value: "projects\/example\/topics\/actor-usage"/)
+})
+
+test("configures ClickHouse analytics with a password from the credentials secret", () => {
+    const output = manifests({ analytics: { backend: "clickhouse", clickhouse: {
+        url: "https://clickhouse.example.com:8443", database: "actors", user: "writer",
+        passwordSecretKey: "clickhouse-password"
+    } } })
+    assert.match(output, /DURABLE_ACTORS_ANALYTICS_BACKEND, value: "clickhouse"/)
+    assert.match(output, /DURABLE_ACTORS_CLICKHOUSE_URL, value: "https:\/\/clickhouse.example.com:8443"/)
+    assert.match(output, /DURABLE_ACTORS_CLICKHOUSE_DATABASE, value: "actors"/)
+    assert.match(output, /DURABLE_ACTORS_CLICKHOUSE_USER, value: "writer"/)
+    assert.match(output, /name: DURABLE_ACTORS_CLICKHOUSE_PASSWORD\n\s+valueFrom:\n\s+secretKeyRef: \{name: "actors-credentials", key: "clickhouse-password"\}/)
+})
 
 test("starts one controller and creates actor pods on demand using one Standard bucket", () => {
     const output = manifests()

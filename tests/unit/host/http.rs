@@ -13,6 +13,7 @@ fn direct_capability_is_bound_to_the_actor_host_session_and_epoch() {
     };
     let host_id = HostId::new("host.v3.revision-1.host-1");
     let principal = ActorPrincipal {
+        organization_id: Some("org-test".into()),
         actor: actor.clone(),
         host_id: host_id.clone(),
         session_id: "00000000-0000-4000-8000-000000000001".into(),

@@ -22,7 +22,7 @@ use crate::{
     },
     clock::{Clock, SystemClock},
     control_plane::{ControlPlaneClient, LeaseFence},
-    host_leases::{ActivationInventory, HostLease, HostLeaseRegistry, HostLeaseRequest},
+    host_leases::{HostLease, HostLeaseRegistry, HostLeaseRequest},
     storage::WritePlan,
 };
 
@@ -206,9 +206,6 @@ impl HostStorage {
         .await
         .context("ownership release timed out")
         .and_then(|result| result);
-        if released.is_ok() {
-            self.notify_observer();
-        }
         tracing::info!(
             event = "host_storage_shutdown",
             sealed = sealed && released.is_ok(),
@@ -219,14 +216,6 @@ impl HostStorage {
             duration_ms = started.elapsed().as_secs_f64() * 1000.0
         );
         released
-    }
-
-    fn notify_observer(&self) {
-        let client = self.observer.clone();
-        tokio::spawn(async move {
-            let _ = tokio::time::timeout(Duration::from_secs(2), client.notify_inventory_changed())
-                .await;
-        });
     }
 }
 
@@ -330,11 +319,7 @@ impl ActorStorage for HostStorage {
 
 #[async_trait]
 impl HostLeaseRegistry for HostStorage {
-    async fn register(
-        &self,
-        request: &HostLeaseRequest,
-        inventory: ActivationInventory,
-    ) -> Result<HostLease> {
+    async fn register(&self, request: &HostLeaseRequest) -> Result<HostLease> {
         ensure!(
             request.id == self.host && request.session_id == self.session,
             "host lease scope mismatch"
@@ -363,9 +348,7 @@ impl HostLeaseRegistry for HostStorage {
             });
             lease
         } else {
-            self.runtime
-                .renew_activation(actor, request, inventory)
-                .await?
+            self.runtime.renew_activation(actor, request).await?
         };
         self.fence.lock().unwrap().confirm(
             started,
@@ -373,7 +356,6 @@ impl HostLeaseRegistry for HostStorage {
             Instant::now(),
         )?;
         self.lease.lock().unwrap().replace(lease.clone());
-        self.notify_observer();
         Ok(lease)
     }
     async fn unregister(&self, host: &HostId, session: &str) -> Result<()> {

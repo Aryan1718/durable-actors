@@ -144,9 +144,22 @@ async fn invoke_cached(
         .gateway
         .as_ref()
         .ok_or_else(|| ApiError::unauthorized("gateway is not configured"))?;
-    let route = gateway
+    let (route, host, session) = gateway
         .invocation_route(&actor, epoch, authorization)
         .map_err(|_| ApiError::unauthorized("actor invocation credential was rejected"))?;
+    if state
+        .invocations
+        .lifecycle
+        .routing(&actor.storage_key(), host.as_str(), &session, epoch)
+        .await
+        .is_some()
+    {
+        return Ok((
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(json!({"type":"not_executed", "reason":"host_unavailable"})),
+        )
+            .into_response());
+    }
     let token = authorization
         .strip_prefix("Bearer ")
         .ok_or_else(|| ApiError::unauthorized("bearer token required"))?;

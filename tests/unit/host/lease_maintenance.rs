@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     clock::{Clock, SystemClock},
     host::HostId,
-    host_leases::{ActivationInventory, HostLease},
+    host_leases::HostLease,
 };
 use async_trait::async_trait;
 use std::sync::{
@@ -32,7 +32,6 @@ impl Clock for ManualClock {
 struct FlakyLeaseStore {
     calls: AtomicUsize,
     lease: Mutex<Option<HostLease>>,
-    resident: Mutex<Option<bool>>,
     changed: Notify,
     clock: Arc<ManualClock>,
 }
@@ -44,11 +43,7 @@ struct HangingLeaseRenewalStore {
 
 #[async_trait]
 impl HostLeaseRegistry for HangingLeaseRenewalStore {
-    async fn register(
-        &self,
-        request: &HostLeaseRequest,
-        _: ActivationInventory,
-    ) -> Result<HostLease> {
+    async fn register(&self, request: &HostLeaseRequest) -> Result<HostLease> {
         if self.calls.fetch_add(1, Ordering::SeqCst) > 0 {
             return std::future::pending().await;
         }
@@ -69,12 +64,7 @@ impl HostLeaseRegistry for HangingLeaseRenewalStore {
 
 #[async_trait]
 impl HostLeaseRegistry for FlakyLeaseStore {
-    async fn register(
-        &self,
-        request: &HostLeaseRequest,
-        inventory: ActivationInventory,
-    ) -> Result<HostLease> {
-        *self.resident.lock().expect("test store lock") = inventory.resident;
+    async fn register(&self, request: &HostLeaseRequest) -> Result<HostLease> {
         let call = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
         self.changed.notify_one();
         if call == 2 {
@@ -114,133 +104,51 @@ impl FlakyLeaseStore {
     }
 }
 
-#[tokio::test]
-async fn residency_change_renews_before_the_heartbeat() -> Result<()> {
-    struct Executor(watch::Sender<()>);
-    #[async_trait::async_trait]
-    impl crate::actor::ActorExecutor for Executor {
-        fn supports(&self, _: &str) -> bool {
-            true
-        }
-        fn resident(&self) -> Option<bool> {
-            Some(true)
-        }
-        fn residency_changes(&self) -> Option<watch::Receiver<()>> {
-            Some(self.0.subscribe())
-        }
-        async fn invoke(
-            &self,
-            _: crate::actor::ActorMethodInvocation,
-            _: Arc<dyn crate::actor::ActorDatabase>,
-        ) -> Result<crate::actor::ActorMethodOutcome> {
-            anyhow::bail!("unused")
-        }
-    }
-    let clock = Arc::new(ManualClock::new(1_000));
-    let store = Arc::new(FlakyLeaseStore {
-        calls: AtomicUsize::new(0),
-        lease: Mutex::new(None),
-        resident: Mutex::new(None),
-        changed: Notify::new(),
-        clock: clock.clone(),
-    });
-    let (changed, _) = watch::channel(());
-    let manager = Arc::new(HostLeaseMaintainer::new(
-        HostEndpoint {
-            id: HostId::new("events"),
-            route: "http://host".into(),
-        },
-        "session".into(),
-        store.clone(),
-        clock,
-        Duration::from_secs(30),
-        Duration::from_secs(10),
-    )?);
-    let renewal = manager.clone().start().await?;
-    manager
-        .observation
-        .send_modify(|sources| sources.executor = Some(Arc::new(Executor(changed.clone()))));
-    changed.send_replace(());
-    tokio::time::timeout(Duration::from_millis(500), wait_for_calls(&store, 2)).await??;
-    assert_eq!(*store.resident.lock().unwrap(), Some(true));
-    renewal.shutdown().await?;
-    Ok(())
-}
+#[tokio::test(start_paused = true)]
+async fn registers_immediately_and_renews_on_schedule() -> Result<()> {
+    struct Store(watch::Sender<Option<HostLease>>);
 
-#[tokio::test]
-async fn waiting_changes_publish_before_the_heartbeat() -> Result<()> {
-    use crate::host_leases::WaitingOperation;
-    struct Store {
-        calls: AtomicUsize,
-        reports: watch::Sender<Option<Vec<WaitingOperation>>>,
-    }
     #[async_trait]
     impl HostLeaseRegistry for Store {
-        async fn register(
-            &self,
-            request: &HostLeaseRequest,
-            inventory: ActivationInventory,
-        ) -> Result<HostLease> {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            self.reports.send_replace(inventory.waiting);
-            Ok(HostLease {
+        async fn register(&self, request: &HostLeaseRequest) -> Result<HostLease> {
+            let lease = HostLease {
                 id: request.id.clone(),
                 session_id: request.session_id.clone(),
                 route: request.route.clone(),
                 expires_at_ms: SystemClock.now_ms()? + request.duration_ms,
-            })
+            };
+            self.0.send_replace(Some(lease.clone()));
+            Ok(lease)
         }
+
         async fn unregister(&self, _: &HostId, _: &str) -> Result<()> {
             Ok(())
         }
     }
+
     let (reports, mut reported) = watch::channel(None);
-    let store = Arc::new(Store {
-        calls: AtomicUsize::new(0),
-        reports,
-    });
-    let (status, observed) = watch::channel(ActorStatus::default());
     let manager = Arc::new(HostLeaseMaintainer::new(
         HostEndpoint {
-            id: HostId::new("queued"),
+            id: HostId::new("scheduled"),
             route: "http://host".into(),
         },
         "session".into(),
-        store.clone(),
+        Arc::new(Store(reports)),
         Arc::new(SystemClock),
         Duration::from_secs(30),
         Duration::from_secs(10),
     )?);
-    let renewal = manager.clone().start().await?;
-    manager
-        .observation
-        .send_modify(|sources| sources.status = Some(observed));
-    tokio::time::timeout(Duration::from_secs(2), reported.wait_for(Option::is_some)).await??;
-    status.send_modify(|status| {
-        status.waiting.push(WaitingOperation {
-            id: "queued-1".into(),
-            operation: "sendMessage".into(),
-        })
-    });
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        reported.wait_for(|report| report.as_ref().is_some_and(|waiting| waiting.len() == 1)),
-    )
-    .await??;
+    let renewal = manager.start().await?;
     assert_eq!(
-        reported.borrow().as_ref().unwrap()[0].operation,
-        "sendMessage"
+        reported.borrow_and_update().as_ref().unwrap().id,
+        HostId::new("scheduled")
     );
-    let calls = store.calls.load(Ordering::SeqCst);
-    status.send_modify(|status| status.idle_since = None);
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(store.calls.load(Ordering::SeqCst), calls);
-    status.send_modify(|status| status.waiting.clear());
-    tokio::time::timeout(
-        Duration::from_secs(2),
-        reported.wait_for(|report| report.as_ref().is_some_and(Vec::is_empty)),
-    )
-    .await??;
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_secs(9)).await;
+    tokio::task::yield_now().await;
+    assert!(!reported.has_changed()?);
+    tokio::time::advance(Duration::from_secs(1)).await;
+    tokio::time::timeout(Duration::from_secs(1), reported.changed()).await??;
     renewal.shutdown().await?;
     Ok(())
 }
@@ -266,7 +174,6 @@ async fn registers_immediately_retries_failure_and_stops_cleanly() -> Result<()>
     let store = Arc::new(FlakyLeaseStore {
         calls: AtomicUsize::new(0),
         lease: Mutex::new(None),
-        resident: Mutex::new(None),
         changed: Notify::new(),
         clock: clock.clone(),
     });

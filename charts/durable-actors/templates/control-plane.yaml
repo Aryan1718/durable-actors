@@ -67,6 +67,18 @@ spec:
             - {name: DURABLE_ACTORS_CONTROL_PLANE_BIND, value: "0.0.0.0:7100"}
             - {name: DURABLE_ACTORS_ALARM_POLL_INTERVAL_MS, value: {{ .Values.alarms.pollIntervalMs | quote }}}
             - {name: DURABLE_ACTORS_POSTGRES_MAX_CONNECTIONS, value: {{ .Values.postgres.maxConnections | quote }}}
+            - {name: DURABLE_ACTORS_ANALYTICS_BACKEND, value: {{ .Values.analytics.backend | quote }}}
+            {{- with .Values.usage.topic }}
+            - {name: DURABLE_ACTORS_USAGE_TOPIC, value: {{ . | quote }}}
+            {{- end }}
+            {{- if eq .Values.analytics.backend "clickhouse" }}
+            - {name: DURABLE_ACTORS_CLICKHOUSE_URL, value: {{ .Values.analytics.clickhouse.url | quote }}}
+            - {name: DURABLE_ACTORS_CLICKHOUSE_DATABASE, value: {{ .Values.analytics.clickhouse.database | quote }}}
+            - {name: DURABLE_ACTORS_CLICKHOUSE_USER, value: {{ .Values.analytics.clickhouse.user | quote }}}
+            - name: DURABLE_ACTORS_CLICKHOUSE_PASSWORD
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.credentialsSecret | quote }}, key: {{ .Values.analytics.clickhouse.passwordSecretKey | quote }}}
+            {{- end }}
             - name: DURABLE_ACTORS_CONTROL_PLANE_URL
               value: {{ printf "http://%s.%s.svc.cluster.local:7100" (include "actors.name" .) .Release.Namespace | quote }}
             - {name: DURABLE_ACTORS_PUBLIC_URL, value: {{ .Values.publicUrl | quote }}}

@@ -64,6 +64,9 @@ async fn postgres_registration_replaces_the_single_deployment_atomically() -> Re
             Some(deployment.clone())
         );
         assert!(!registry.register_test_deployment(&deployment).await?);
+        let previous_key = deployment.host_config_key();
+        deployment.organization_id = Some("org-next".into());
+        assert_ne!(previous_key, deployment.host_config_key());
         deployment.source = Some(DeploymentSource::Local(LocalSource {
             working_directory: "/project/b".into(),
             actor_entrypoint: Some("src/actors.ts".into()),
@@ -80,6 +83,7 @@ async fn postgres_registration_replaces_the_single_deployment_atomically() -> Re
 
 fn spec(image: &str) -> HostLaunchSpec {
     HostLaunchSpec {
+        organization_id: Some("org-test".into()),
         sandboxes: Default::default(),
         project_id: "default".into(),
         source: None,

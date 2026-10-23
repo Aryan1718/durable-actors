@@ -4,6 +4,7 @@ mod assignment;
 mod config;
 pub(crate) mod http;
 mod lease_maintenance;
+mod lifecycle;
 mod persistence;
 mod process;
 pub(crate) mod sockets;

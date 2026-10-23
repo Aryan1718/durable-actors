@@ -7,6 +7,24 @@ use super::*;
 use std::collections::HashMap;
 
 #[test]
+fn usage_publishing_is_opt_in() -> Result<()> {
+    let mut values = process_environment();
+    let parse = |values: &HashMap<&str, &str>| {
+        ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|value| (*value).into()))
+    };
+    assert!(parse(&values)?.usage_topic.is_none());
+    values.insert(
+        "DURABLE_ACTORS_USAGE_TOPIC",
+        "projects/example/topics/actor-usage",
+    );
+    assert_eq!(
+        parse(&values)?.usage_topic.as_deref(),
+        Some("projects/example/topics/actor-usage")
+    );
+    Ok(())
+}
+
+#[test]
 fn analytics_defaults_to_postgres_and_clickhouse_is_opt_in() -> Result<()> {
     let mut values = process_environment();
     let parse = |values: &HashMap<&str, &str>| {

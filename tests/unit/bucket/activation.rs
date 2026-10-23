@@ -400,10 +400,7 @@ async fn renewal_release_and_takeover_share_the_actor_record() -> Result<()> {
             .is_err()
     );
     f.clock.0.store(2000, Ordering::SeqCst);
-    let renewed = f
-        .runtime
-        .renew_activation(&f.actor, &first, Default::default())
-        .await?;
+    let renewed = f.runtime.renew_activation(&f.actor, &first).await?;
     assert_eq!(renewed.expires_at_ms, 12_000);
     assert_eq!(
         f.runtime
@@ -416,12 +413,7 @@ async fn renewal_release_and_takeover_share_the_actor_record() -> Result<()> {
     f.runtime
         .release_activation(&f.actor, &first.id, &first.session_id)
         .await?;
-    assert!(
-        f.runtime
-            .renew_activation(&f.actor, &first, Default::default())
-            .await
-            .is_err()
-    );
+    assert!(f.runtime.renew_activation(&f.actor, &first).await.is_err());
     let second = f
         .runtime
         .register_activation(&f.actor, &request("second"), "us-east", false, None)
@@ -434,12 +426,7 @@ async fn renewal_release_and_takeover_share_the_actor_record() -> Result<()> {
         f.runtime.get_owner(&f.actor.storage_key()).await?.unwrap(),
         second.placement
     );
-    assert!(
-        f.runtime
-            .renew_activation(&f.actor, &first, Default::default())
-            .await
-            .is_err()
-    );
+    assert!(f.runtime.renew_activation(&f.actor, &first).await.is_err());
     Ok(())
 }
 
@@ -451,12 +438,7 @@ async fn expired_activation_cannot_renew_or_reacquire_with_the_same_session() ->
         .register_activation(&f.actor, &first, "us-east", true, None)
         .await?;
     f.clock.0.store(11_000, Ordering::SeqCst);
-    assert!(
-        f.runtime
-            .renew_activation(&f.actor, &first, Default::default())
-            .await
-            .is_err()
-    );
+    assert!(f.runtime.renew_activation(&f.actor, &first).await.is_err());
     assert!(
         f.runtime
             .register_activation(&f.actor, &first, "us-east", false, None)
@@ -490,7 +472,7 @@ async fn ambiguous_claim_and_renewal_responses_reconcile_the_exact_record() -> R
     f.bucket.lose_reply.store(true, Ordering::SeqCst);
     assert_eq!(
         f.runtime
-            .renew_activation(&f.actor, &request("first"), Default::default())
+            .renew_activation(&f.actor, &request("first"))
             .await?
             .expires_at_ms,
         12_000
@@ -528,11 +510,7 @@ async fn delayed_renewal_cannot_overwrite_a_completed_takeover() -> Result<()> {
         result
     };
     let (renewed, claimed) = tokio::time::timeout(Duration::from_secs(5), async {
-        tokio::join!(
-            f.runtime
-                .renew_activation(&f.actor, &first, Default::default()),
-            takeover
-        )
+        tokio::join!(f.runtime.renew_activation(&f.actor, &first), takeover)
     })
     .await?;
     assert!(renewed.is_err());
@@ -549,69 +527,7 @@ async fn delayed_renewal_cannot_overwrite_a_completed_takeover() -> Result<()> {
 }
 
 #[tokio::test]
-async fn inventory_reads_ownership_records_only_for_the_requested_project() -> Result<()> {
-    let f = Fixture::new()?;
-    f.runtime
-        .register_activation(&f.actor, &request("first"), "us-east", true, None)
-        .await?;
-    let other = ActorKey {
-        project_id: "other-project".into(),
-        ..f.actor.clone()
-    };
-    f.runtime
-        .register_activation(&other, &request("other"), "us-east", true, None)
-        .await?;
-    f.bucket.reads.store(0, Ordering::SeqCst);
-    let inventory = f.runtime.actor_inventory(&f.actor.project_id).await?.actors;
-    assert_eq!(inventory.len(), 1);
-    assert_eq!(inventory[0].instances[0].actor_id, f.actor.actor_id);
-    assert_eq!(f.bucket.reads.load(Ordering::SeqCst), 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn inventory_follows_activation_lease_without_separate_host_records() -> Result<()> {
-    let f = Fixture::new()?;
-    let first = request("first");
-    f.runtime
-        .register_activation(&f.actor, &first, "us-east", true, None)
-        .await?;
-    let initial = f.runtime.actor_inventory(&f.actor.project_id).await?.actors;
-    assert!(matches!(
-        initial[0].instances[0].status,
-        ActorResidency::Unknown
-    ));
-    let inventory = crate::host_leases::ActivationInventory {
-        resident: Some(true),
-        waiting: Some(vec![crate::host_leases::WaitingOperation {
-            id: "queued".into(),
-            operation: "increment".into(),
-        }]),
-    };
-    f.runtime
-        .renew_activation(&f.actor, &first, inventory)
-        .await?;
-    let live = f.runtime.actor_inventory(&f.actor.project_id).await?.actors;
-    assert_eq!(live[0].live, 1);
-    assert_eq!(
-        live[0].instances[0].waiting.as_ref().unwrap()[0].operation,
-        "increment"
-    );
-    assert_eq!(
-        f.bucket.inner.list(crate::storage_paths::ROOT).await?.len(),
-        1
-    );
-    f.runtime
-        .release_activation(&f.actor, &first.id, &first.session_id)
-        .await?;
-    let dormant = f.runtime.actor_inventory(&f.actor.project_id).await?.actors;
-    assert_eq!(dormant[0].dormant, 1);
-    assert!(dormant[0].instances[0].waiting.as_ref().unwrap().is_empty());
-    Ok(())
-}
-
-#[tokio::test]
-async fn release_retries_a_concurrent_inventory_renewal() -> Result<()> {
+async fn release_retries_a_concurrent_lease_renewal() -> Result<()> {
     let f = Fixture::new()?;
     let first = request("first");
     f.runtime
@@ -625,9 +541,7 @@ async fn release_retries_a_concurrent_inventory_renewal() -> Result<()> {
         .release_activation(&f.actor, &first.id, &first.session_id);
     let renewal = async {
         entered.acquire().await?.forget();
-        f.runtime
-            .renew_activation(&f.actor, &first, Default::default())
-            .await?;
+        f.runtime.renew_activation(&f.actor, &first).await?;
         resume.add_permits(1);
         anyhow::Ok(())
     };
@@ -660,10 +574,7 @@ async fn expired_owner_hint_cannot_fence_a_renewed_session() -> Result<()> {
         .await?;
     let hint: OwnershipHint = serde_json::from_str(&serde_json::to_string(&hint.unwrap())?)?;
     f.clock.0.store(10_000, Ordering::SeqCst);
-    let renewed = f
-        .runtime
-        .renew_activation(&f.actor, &first, Default::default())
-        .await?;
+    let renewed = f.runtime.renew_activation(&f.actor, &first).await?;
     f.clock.0.store(11_000, Ordering::SeqCst);
     let error = f
         .runtime

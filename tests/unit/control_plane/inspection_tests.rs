@@ -9,7 +9,9 @@ use serde_json::{Value, json};
 
 use crate::{
     actor::ActorKey,
+    actor_lifecycle::{LifecycleEvent, LifecycleKind, LifecycleReport, LifecycleStore},
     bucket::{RuntimeStorage, testing::RuntimeFixture},
+    clock::{Clock, SystemClock},
     host::HostId,
     host_leases::HostLeaseRequest,
 };
@@ -25,19 +27,7 @@ async fn inventory_reads_and_streams_filter_projects_before_grouping() -> Result
             ..fixture.actor(id)
         };
         fixture
-            .store
-            .register_activation(
-                &actor,
-                &HostLeaseRequest {
-                    id: HostId::new(format!("host-{project}-{id}")),
-                    session_id: "session".into(),
-                    route: "http://localhost:7101".into(),
-                    duration_ms: 60_000,
-                },
-                "north-america-east",
-                true,
-                None,
-            )
+            .report_lifecycle(actor, LifecycleKind::Started, 1, vec![])
             .await?;
     }
     let page: Value = fixture
@@ -46,7 +36,7 @@ async fn inventory_reads_and_streams_filter_projects_before_grouping() -> Result
         .error_for_status()?
         .json()
         .await?;
-    assert_eq!(page["actors"][0]["unknown"], 1);
+    assert_eq!(page["actors"][0]["live"], 1);
     assert_eq!(page["actors"][0]["instances"].as_array().unwrap().len(), 1);
     let mut stream = fixture
         .get("/v1/projects/alpha/observe/events")
@@ -265,6 +255,7 @@ async fn observability_requires_admin_credentials() -> Result<()> {
     let token = fixture
         .issuer
         .issue_host(
+            Some("org-test"),
             &fixture.host,
             &uuid::Uuid::new_v4().to_string(),
             "r1",
@@ -295,6 +286,7 @@ async fn observability_requires_admin_credentials() -> Result<()> {
 }
 
 struct Fixture {
+    lifecycle: LifecycleStore,
     traces: crate::request_traces::TraceStore,
     changes: crate::postgres::notifications::ChangeFeed,
     admin: AdminService,
@@ -332,12 +324,15 @@ impl Fixture {
             issuer.clone(),
         )?;
         let changes = crate::postgres::notifications::ChangeFeed::default();
-        let inspector = ActorInspector::new(store.clone(), store.clone(), changes.clone())
-            .with_traces(traces.clone());
+        let lifecycle = LifecycleStore::default();
+        let inspector =
+            ActorInspector::new(Arc::new(lifecycle.clone()), store.clone(), changes.clone())
+                .with_traces(traces.clone());
         let routes = super::inspection::router(inspector, admin.clone());
         let server = tokio::spawn(async { axum::serve(listener, routes).await });
         let host = HostId::new("host.v3.test");
         Ok(Self {
+            lifecycle,
             traces,
             changes,
             admin,
@@ -359,6 +354,37 @@ impl Fixture {
         }
     }
 
+    async fn report_lifecycle(
+        &self,
+        actor: ActorKey,
+        kind: LifecycleKind,
+        sequence: u64,
+        waiting: Vec<crate::host_leases::WaitingOperation>,
+    ) -> Result<()> {
+        let now = SystemClock.now_ms()?;
+        self.lifecycle
+            .record(LifecycleEvent {
+                organization_id: Some("org-test".into()),
+                event_id: format!("session:{sequence}"),
+                actor,
+                host_id: self.host.to_string(),
+                session_id: "session".into(),
+                region: "north-america-east".into(),
+                received_at_ms: now,
+                report: LifecycleReport {
+                    kind,
+                    owner_epoch: 1,
+                    sequence,
+                    started_at_ms: 1,
+                    occurred_at_ms: now,
+                    resources: Default::default(),
+                    resident: Some(kind != LifecycleKind::Stopped),
+                    waiting,
+                },
+            })
+            .await
+    }
+
     async fn get(&self, path: &str) -> Result<reqwest::Response> {
         Ok(self
             .client
@@ -376,18 +402,11 @@ impl Drop for Fixture {
 }
 
 #[tokio::test]
-async fn inventory_stream_reports_host_queues_and_fences_expired_sessions() -> Result<()> {
+async fn inventory_stream_follows_lifecycle_reports_and_clears_stopped_queues() -> Result<()> {
     let fixture = Fixture::start().await?;
     let actor = fixture.actor("unsaved");
-    let request = HostLeaseRequest {
-        id: fixture.host.clone(),
-        session_id: "session".into(),
-        route: "http://localhost:7101".into(),
-        duration_ms: 60_000,
-    };
     fixture
-        .store
-        .register_activation(&actor, &request, "north-america-east", true, None)
+        .report_lifecycle(actor.clone(), LifecycleKind::Started, 1, vec![])
         .await?;
     let mut stream = fixture
         .get("/v1/projects/default/observe/events")
@@ -395,21 +414,13 @@ async fn inventory_stream_reports_host_queues_and_fences_expired_sessions() -> R
         .error_for_status()?;
     let first = stream_inventory(&mut stream).await?;
     assert!(first.get("namespaceId").is_none());
-    assert_eq!(first["actors"][0]["unknown"], 1);
+    assert_eq!(first["actors"][0]["live"], 1);
     let waiting = vec![crate::host_leases::WaitingOperation {
         id: "queued-1".into(),
         operation: "sendMessage".into(),
     }];
     fixture
-        .store
-        .renew_activation(
-            &actor,
-            &request,
-            crate::host_leases::ActivationInventory {
-                resident: Some(true),
-                waiting: Some(waiting),
-            },
-        )
+        .report_lifecycle(actor.clone(), LifecycleKind::Heartbeat, 2, waiting)
         .await?;
     fixture.changes.notify().await;
     let connected = stream_inventory(&mut stream).await?;
@@ -419,8 +430,7 @@ async fn inventory_stream_reports_host_queues_and_fences_expired_sessions() -> R
         "sendMessage"
     );
     fixture
-        .store
-        .release_activation(&actor, &fixture.host, "session")
+        .report_lifecycle(actor, LifecycleKind::Stopped, 3, vec![])
         .await?;
     fixture.changes.notify().await;
     let expired = stream_inventory(&mut stream).await?;
@@ -429,17 +439,6 @@ async fn inventory_stream_reports_host_queues_and_fences_expired_sessions() -> R
     assert_eq!(
         expired["actors"][0]["instances"][0]["connections"],
         json!([])
-    );
-    let replacement = HostLeaseRequest {
-        session_id: "replacement".into(),
-        ..request
-    };
-    assert!(
-        fixture
-            .store
-            .renew_activation(&actor, &replacement, Default::default())
-            .await
-            .is_err()
     );
     let inventory: Value = fixture
         .get("/v1/projects/default/observe/actors")
@@ -487,6 +486,7 @@ async fn inventory_includes_unused_deployed_types_without_loading_actors() -> Re
         .admin
         .register_deployment(
             &super::admin::HostLaunchSpec {
+                organization_id: Some("org-test".into()),
                 sandboxes: Default::default(),
                 project_id: "default".into(),
                 source: None,

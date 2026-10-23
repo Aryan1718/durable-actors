@@ -61,7 +61,14 @@ async fn run_activation(
     assert!(!actor_spool.exists());
     let session = uuid::Uuid::new_v4().to_string();
     let token = issuer
-        .issue_host(&host_id, &session, "test", "north-america-east", actor)?
+        .issue_host(
+            Some("org-test"),
+            &host_id,
+            &session,
+            "test",
+            "north-america-east",
+            actor,
+        )?
         .token;
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let route = format!("http://{}", listener.local_addr()?);

@@ -10,6 +10,11 @@
 {{- define "actors.validate" -}}
 {{- if eq (include "actors.sandboxNamespace" .) .Release.Namespace }}{{ fail "sandbox namespace must differ from the control-plane namespace" }}{{ end -}}
 {{- if and (gt (int .Values.replicaCount) 1) (not .Values.redis.urlSecretKey) }}{{ fail "replicaCount above 1 requires redis.urlSecretKey" }}{{ end -}}
+{{- if eq .Values.analytics.backend "clickhouse" -}}
+{{- range $key, $value := .Values.analytics.clickhouse -}}
+{{- if empty $value }}{{ fail (printf "analytics.clickhouse.%s is required" $key) }}{{ end -}}
+{{- end -}}
+{{- end -}}
 {{- if .Values.ingress.enabled -}}
 {{- if or (empty .Values.ingress.className) (empty .Values.ingress.tlsSecret) }}{{ fail "ingress requires className and tlsSecret" }}{{ end -}}
 {{- end -}}

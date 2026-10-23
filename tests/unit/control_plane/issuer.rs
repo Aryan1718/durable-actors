@@ -28,6 +28,7 @@ fn socket_tickets_bind_actor_metadata_with_short_admission() -> Result<()> {
     assert!(issuer.verify_socket_at(&token, now - 1_000).is_err());
     assert!(socket_issuer()?.verify_socket_at(&token, now).is_err());
     let host = issuer.issue_host(
+        Some("org-test"),
         &HostId::new("host.v3.r1.one"),
         &uuid::Uuid::new_v4().to_string(),
         "r1",
@@ -60,6 +61,7 @@ fn host_tokens_round_trip_with_a_bounded_lifetime() -> Result<()> {
     let before = unix_millis()?;
     let host = HostId::new("host.v3.r1.one");
     let issued = issuer.issue_host(
+        Some("org-test"),
         &host,
         &uuid::Uuid::new_v4().to_string(),
         "r1",
@@ -79,6 +81,7 @@ fn host_tokens_round_trip_with_a_bounded_lifetime() -> Result<()> {
     )?;
     let principal = verifier.authenticate_authorization(&format!("Bearer {}", issued.token))?;
     assert_eq!(principal.host_id, host);
+    assert_eq!(principal.organization_id.as_deref(), Some("org-test"));
     assert_eq!(principal.region, "us-east");
     assert!(issued.expires_at_ms <= before + 1_800_000);
     Ok(())

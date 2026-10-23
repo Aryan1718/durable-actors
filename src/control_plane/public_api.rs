@@ -192,7 +192,7 @@ async fn get_deployment(
     State(state): State<PublicApiState>,
     path: Path<ProjectPath>,
     headers: HeaderMap,
-) -> Result<Json<RegisterDeploymentRequest>, ApiError> {
+) -> Result<Json<CurrentDeployment>, ApiError> {
     authorized_admin(&state.admin, &headers)?;
     let project = project_id(path)?;
     let spec = state
@@ -210,10 +210,10 @@ async fn get_deployment(
     let local_source = spec
         .source
         .map(|super::admin::DeploymentSource::Local(local)| local);
-    Ok(Json(RegisterDeploymentRequest {
+    Ok(Json(CurrentDeployment {
+        organization_id: spec.organization_id,
         bundle,
         local_source,
-        contract: None,
         secret_refs: spec.secret_refs,
     }))
 }
@@ -280,6 +280,7 @@ async fn register_deployment(
         .transpose()
         .map_err(ApiError::bad_request)?;
     let spec = HostLaunchSpec {
+        organization_id: Some(request.organization_id),
         sandboxes: Default::default(),
         project_id: project_id(path)?,
         source,
@@ -491,6 +492,7 @@ pub(super) fn authorized_admin(admin: &AdminService, headers: &HeaderMap) -> Res
 #[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RegisterDeploymentRequest {
+    organization_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bundle: Option<crate::bundle::ActorBundle>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -498,6 +500,17 @@ struct RegisterDeploymentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     local_source: Option<super::admin::LocalSource>,
     #[serde(default)]
+    secret_refs: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CurrentDeployment {
+    organization_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    bundle: Option<crate::bundle::ActorBundle>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    local_source: Option<super::admin::LocalSource>,
     secret_refs: Vec<String>,
 }
 

@@ -333,6 +333,7 @@ async fn local_routes(
         Duration::from_secs(86_400),
     )?;
     let spec = HostLaunchSpec {
+        organization_id: Some("local".into()),
         sandboxes: Default::default(),
         project_id: options.project_id.clone(),
         source: None,
@@ -385,7 +386,7 @@ async fn local_routes(
     let admin = AdminService::new(options.api_key.clone(), registry, issuer)?;
     service.deploy_source(&admin, &spec, None).await?;
     let inventory = Arc::new(super::socket_inventory::GatewayInventoryReader::new(
-        storage.runtime.clone(),
+        Arc::new(service.lifecycle.clone()),
         service.gateway.as_ref().unwrap().connections.clone(),
     ));
     let inspector = super::inspection::ActorInspector::new(

@@ -20,6 +20,7 @@ pub(super) struct ActorHostConfig {
     pub network: HostNetwork,
     pub lease: LeaseTiming,
     pub idle_timeout: Duration,
+    pub resources: crate::sandbox::ResourceLimits,
     pub storage: HostStorageConfig,
     pub assignment: ActorAssignment,
     pub executor: ExecutorConfig,
@@ -46,6 +47,11 @@ impl ActorHostConfig {
             .context("parse host runtime configuration")?,
             assignment: ActorAssignment::from_lookup(&mut get)?,
             executor: ExecutorConfig::from_lookup(&mut get)?,
+            resources: get("DURABLE_ACTORS_HOST_RESOURCES")
+                .map(|value| serde_json::from_str(&value))
+                .transpose()
+                .context("parse host resource requests")?
+                .unwrap_or_default(),
             ready_file: get("DURABLE_ACTORS_HOST_READY_FILE").map(PathBuf::from),
         })
     }

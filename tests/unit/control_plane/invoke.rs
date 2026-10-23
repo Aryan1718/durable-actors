@@ -8,13 +8,16 @@ use axum::{
     response::IntoResponse,
     routing::post,
 };
-use futures_util::StreamExt;
+use futures_util::{SinkExt, StreamExt};
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
     sync::atomic::{AtomicUsize, Ordering},
 };
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
+
+#[path = "shutdown_routing.rs"]
+mod shutdown_routing;
 
 #[tokio::test]
 async fn combined_invocation_resolves_and_dispatches_with_a_scoped_host_token() -> Result<()> {
@@ -293,6 +296,8 @@ async fn backend_socket_effects_reach_clients_connected_to_another_replica() -> 
 }
 
 struct Fixture {
+    service: ControlPlaneService,
+    placements: Arc<LocalObjectPlacementStore>,
     origin: String,
     replica: String,
     admin: AdminService,
@@ -310,7 +315,16 @@ impl Fixture {
         replies: Vec<(StatusCode, Value)>,
         existing: bool,
     ) -> Result<Self> {
+        Self::start_with_routing(replies, existing, None).await
+    }
+
+    async fn start_with_routing(
+        replies: Vec<(StatusCode, Value)>,
+        existing: bool,
+        routing: Option<Arc<dyn crate::actor_lifecycle::routing::RoutingHints>>,
+    ) -> Result<Self> {
         let host = Arc::new(HostFixture {
+            socket_requests: Mutex::new(vec![]),
             replies: Mutex::new(replies.into()),
             calls: AtomicUsize::new(0),
             requests: Mutex::new(vec![]),
@@ -352,6 +366,7 @@ impl Fixture {
         admin
             .register_deployment(
                 &HostLaunchSpec {
+                    organization_id: Some("org-test".into()),
                     sandboxes: Default::default(),
                     project_id: "default".into(),
                     source: None,
@@ -384,20 +399,25 @@ impl Fixture {
                 "north-america-east",
             )?;
         }
-        let service = ControlPlaneService::new(
+        let mut service = ControlPlaneService::new(
             placements.clone(),
             auth,
             registry,
             issuer.clone(),
             Arc::new(InvocationProvisioner {
                 route: host_origin,
-                placements,
+                placements: placements.clone(),
             }),
         );
+        if let Some(routing) = routing {
+            service.lifecycle = service.lifecycle.with_routing(routing);
+        }
         let hub = super::super::super::socket_bus::MemorySocketHub::default();
         let (origin, server) = serve_replica(&service, &admin, &issuer, &hub).await?;
         let (replica, replica_server) = serve_replica(&service, &admin, &issuer, &hub).await?;
         Ok(Self {
+            service,
+            placements,
             origin,
             replica,
             admin,
@@ -502,6 +522,7 @@ async fn next_message(socket: &mut Socket) -> Result<Message> {
 }
 
 struct HostFixture {
+    socket_requests: Mutex<Vec<String>>,
     replies: Mutex<VecDeque<(StatusCode, Value)>>,
     calls: AtomicUsize,
     requests: Mutex<Vec<(String, Value)>>,
@@ -527,7 +548,16 @@ async fn host_invoke(
     (status, Json(reply)).into_response()
 }
 
-async fn host_socket_event(Json(request): Json<SocketEventRequest>) -> Json<SocketEventReply> {
+async fn host_socket_event(
+    State(state): State<Arc<HostFixture>>,
+    headers: HeaderMap,
+    Json(request): Json<SocketEventRequest>,
+) -> Json<SocketEventReply> {
+    state
+        .socket_requests
+        .lock()
+        .unwrap()
+        .push(headers["authorization"].to_str().unwrap().into());
     let effects = match request.invocation.event {
         ActorSocketEvent::Connect { connection } => vec![ActorSocketEffect::Send {
             connection_id: connection.id,
@@ -572,6 +602,7 @@ impl HostProvisioner for InvocationProvisioner {
         tokio::time::sleep(Duration::from_millis(25)).await;
         let lease = HostLease {
             route: self.route.clone(),
+            session_id: uuid::Uuid::new_v4().to_string(),
             ..test_lease(&HostId::new(format!(
                 "host.v3.{}.fixture",
                 spec.host_config_key()

@@ -37,6 +37,7 @@ pub struct ControlPlaneProcessConfig {
     pub storage: ControlPlaneStorageConfig,
     pub sandbox_provider: SandboxProviderConfig,
     pub socket_event_sink: Option<SocketEventSinkConfig>,
+    pub usage_topic: Option<String>,
     pub region: Option<String>,
     pub alarm_poll_interval: Duration,
     pub redis: Option<RedisConfig>,
@@ -166,7 +167,7 @@ async fn control_plane_routes(
         stop.clone(),
     )
     .await?;
-    let traces = trace_store(
+    let (traces, lifecycle) = telemetry_stores(
         &config.storage,
         database.clone(),
         changes.clone(),
@@ -174,6 +175,35 @@ async fn control_plane_routes(
         stop.clone(),
     )
     .await?;
+    let retention = config
+        .jwt_max_lifetime
+        .saturating_add(Duration::from_millis(
+            crate::host_leases::MAX_HOST_LEASE_DURATION_MS,
+        ));
+    let routing: Arc<dyn crate::actor_lifecycle::routing::RoutingHints> = match &redis {
+        Some(redis) => Arc::new(crate::actor_lifecycle::routing::RedisRoutingHints::new(
+            redis.clone(),
+            "durable-actors:v1:shutdown",
+            retention,
+        )),
+        None => Arc::new(crate::actor_lifecycle::routing::MemoryRoutingHints::new(
+            retention,
+        )),
+    };
+    let mut lifecycle = lifecycle
+        .with_routing(routing)
+        .with_usage_topic(config.usage_topic.as_deref())
+        .await?;
+    if config.usage_topic.is_some()
+        && let Some(redis) = &redis
+    {
+        lifecycle = lifecycle.with_usage_sessions(Arc::new(
+            crate::actor_lifecycle::reconciliation::RedisUsageSessions::new(
+                redis.clone(),
+                "durable-actors:{usage}:v1",
+            ),
+        ));
+    }
     let authority = Arc::new(GcsBucket::new(&config.storage.bucket).await?);
     let registry = Arc::new(super::PostgresAdminRegistry::from_database(
         database.clone(),
@@ -246,12 +276,14 @@ async fn control_plane_routes(
     .with_alarm_store(Arc::new(super::alarms::PostgresAlarmStore::new(database)))
     .with_traces(traces)
     .with_socket_event_sink(socket_events);
+    service.lifecycle = lifecycle;
     service.changes = changes;
     service.gateway = Some(gateway);
     service.region = config.region;
+    service.lifecycle.start_reconciliation(stop.clone());
     service.start_alarm_scheduler(config.alarm_poll_interval, stop);
     let inventory = Arc::new(super::socket_inventory::GatewayInventoryReader::new(
-        storage.clone(),
+        Arc::new(service.lifecycle.clone()),
         service.gateway.as_ref().unwrap().connections.clone(),
     ));
     let admin = super::admin::AdminService::new(config.api_key, registry, issuer)?;
@@ -281,13 +313,13 @@ async fn snapshot_store(
     )?))
 }
 
-async fn trace_store(
+async fn telemetry_stores(
     storage: &ControlPlaneStorageConfig,
     database: PostgresDatabase,
     changes: crate::postgres::notifications::ChangeFeed,
     redis: Option<Redis>,
     stop: tokio_util::sync::CancellationToken,
-) -> Result<TraceStore> {
+) -> Result<(TraceStore, crate::actor_lifecycle::LifecycleStore)> {
     match &storage.analytics {
         AnalyticsBackend::Postgres => {
             let persistence = Arc::new(PostgresTracePersistence::new(
@@ -297,19 +329,22 @@ async fn trace_store(
             let mut traces = TraceStore::open(persistence.clone()).await?;
             traces.changes = changes;
             persistence.start_retention(stop);
-            Ok(traces)
+            Ok((traces, Default::default()))
         }
         AnalyticsBackend::ClickHouse(config) => {
             let live = crate::request_traces::live::LiveTraceFeed::start(redis, stop.clone());
-            let mut traces = TraceStore::open(Arc::new(ClickHouseTracePersistence::start(
+            let persistence = Arc::new(ClickHouseTracePersistence::start(
                 config.clone(),
                 storage.trace_retention,
                 Arc::new(live.clone()),
                 stop,
-            )?))
-            .await?;
+            )?);
+            let mut traces = TraceStore::open(persistence.clone()).await?;
             traces.live = Some(live);
-            Ok(traces)
+            Ok((
+                traces,
+                crate::actor_lifecycle::LifecycleStore::new(persistence),
+            ))
         }
     }
 }
@@ -445,6 +480,7 @@ impl ControlPlaneProcessConfig {
             storage,
             sandbox_provider,
             socket_event_sink,
+            usage_topic: get("DURABLE_ACTORS_USAGE_TOPIC"),
             region,
             alarm_poll_interval,
             redis: redis_config(&mut get)?,
