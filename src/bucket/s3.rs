@@ -2,6 +2,7 @@ use super::{Bucket, BucketObject, StorageRevision};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use aws_sdk_s3::{
+    config::{retry::RetryConfig, timeout::TimeoutConfig},
     error::{ProvideErrorMetadata, SdkError},
     operation::{
         complete_multipart_upload::CompleteMultipartUploadError, get_object::GetObjectError,
@@ -10,9 +11,18 @@ use aws_sdk_s3::{
     primitives::ByteStream,
     types::{ChecksumAlgorithm, ChecksumMode, CompletedMultipartUpload, CompletedPart},
 };
+use std::{future::Future, time::Duration};
 
 const MULTIPART_PART_SIZE: usize = 5 * 1024 * 1024;
 const MAX_MULTIPART_PARTS: usize = 10_000;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
+const LIST_TIMEOUT: Duration = Duration::from_secs(30);
+
+enum ReadTarget {
+    Memory,
+    Download,
+}
 
 pub struct S3Bucket {
     bucket: String,
@@ -27,7 +37,7 @@ impl S3Bucket {
         );
         Ok(Self {
             bucket: bucket.into(),
-            client,
+            client: configured_client(client),
         })
     }
 }
@@ -35,7 +45,11 @@ impl S3Bucket {
 #[async_trait]
 impl Bucket for S3Bucket {
     async fn get(&self, key: &str) -> Result<Option<BucketObject>> {
-        self.read(key, None).await
+        bounded(REQUEST_TIMEOUT, self.read(key, None, ReadTarget::Memory)).await
+    }
+
+    async fn download(&self, key: &str) -> Result<Option<BucketObject>> {
+        bounded(TRANSFER_TIMEOUT, self.read(key, None, ReadTarget::Download)).await
     }
 
     async fn range(&self, key: &str, start: u64, length: u64) -> Result<Option<BucketObject>> {
@@ -43,7 +57,11 @@ impl Bucket for S3Bucket {
         let end = start
             .checked_add(length - 1)
             .context("object range overflow")?;
-        let object = self.read(key, Some((start, end))).await?;
+        let object = bounded(
+            REQUEST_TIMEOUT,
+            self.read(key, Some((start, end)), ReadTarget::Memory),
+        )
+        .await?;
         ensure!(
             object
                 .as_ref()
@@ -65,10 +83,28 @@ impl Bucket for S3Bucket {
             None => (None, Some("*".to_owned())),
         };
         if bytes.len() > MULTIPART_PART_SIZE {
-            return self
-                .multipart_compare_and_swap(key, if_match, if_none_match, bytes)
-                .await;
+            return bounded(
+                TRANSFER_TIMEOUT,
+                self.multipart_compare_and_swap(key, if_match, if_none_match, bytes),
+            )
+            .await;
         }
+        self.put(key, if_match, if_none_match, bytes).await
+    }
+
+    async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        bounded(LIST_TIMEOUT, self.list_pages(prefix)).await
+    }
+}
+
+impl S3Bucket {
+    async fn put(
+        &self,
+        key: &str,
+        if_match: Option<String>,
+        if_none_match: Option<String>,
+        bytes: bytes::Bytes,
+    ) -> Result<bool> {
         let result = self
             .client
             .put_object()
@@ -78,6 +114,8 @@ impl Bucket for S3Bucket {
             .checksum_algorithm(ChecksumAlgorithm::Crc32C)
             .set_if_match(if_match)
             .set_if_none_match(if_none_match)
+            .customize()
+            .config_override(single_attempt())
             .send()
             .await;
         match result {
@@ -87,7 +125,7 @@ impl Bucket for S3Bucket {
         }
     }
 
-    async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+    async fn list_pages(&self, prefix: &str) -> Result<Vec<String>> {
         let mut keys = Vec::new();
         let mut token = None;
         loop {
@@ -135,6 +173,8 @@ impl S3Bucket {
             .bucket(&self.bucket)
             .key(key)
             .checksum_algorithm(ChecksumAlgorithm::Crc32C)
+            .customize()
+            .config_override(single_attempt())
             .send()
             .await?
             .upload_id()
@@ -160,6 +200,8 @@ impl S3Bucket {
             .multipart_upload(upload)
             .set_if_match(if_match)
             .set_if_none_match(if_none_match)
+            .customize()
+            .config_override(single_attempt())
             .send()
             .await;
         match result {
@@ -221,7 +263,12 @@ impl S3Bucket {
             .await;
     }
 
-    async fn read(&self, key: &str, range: Option<(u64, u64)>) -> Result<Option<BucketObject>> {
+    async fn read(
+        &self,
+        key: &str,
+        range: Option<(u64, u64)>,
+        target: ReadTarget,
+    ) -> Result<Option<BucketObject>> {
         let response = self
             .client
             .get_object()
@@ -236,8 +283,12 @@ impl S3Bucket {
             Err(error) if get_status(&error) == Some(404) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        if let Some((start, end)) = range {
-            validate_content_range(response.content_range(), start, end)?;
+        match range {
+            Some((start, end)) => validate_content_range(response.content_range(), start, end)?,
+            None => ensure!(
+                response.content_range().is_none(),
+                "S3 returned a partial object for a full download"
+            ),
         }
         let revision = StorageRevision::ETag(
             response
@@ -245,9 +296,61 @@ impl S3Bucket {
                 .context("S3 object missing ETag")?
                 .to_owned(),
         );
-        let bytes = response.body.collect().await?.into_bytes();
+        let expected_length = response
+            .content_length()
+            .map(u64::try_from)
+            .transpose()
+            .context("S3 object has a negative content length")?;
+        let bytes = match target {
+            ReadTarget::Memory => response.body.collect().await?.into_bytes(),
+            ReadTarget::Download => download(response.body).await?,
+        };
+        ensure!(
+            expected_length.is_none_or(|length| length == bytes.len() as u64),
+            "incomplete S3 object download"
+        );
         Ok(Some(BucketObject { revision, bytes }))
     }
+}
+
+fn configured_client(client: aws_sdk_s3::Client) -> aws_sdk_s3::Client {
+    let timeout = TimeoutConfig::builder()
+        .connect_timeout(Duration::from_secs(2))
+        .read_timeout(Duration::from_secs(5))
+        .operation_attempt_timeout(Duration::from_secs(5))
+        .operation_timeout(REQUEST_TIMEOUT)
+        .build();
+    let retry = RetryConfig::standard()
+        .with_max_attempts(3)
+        .with_initial_backoff(Duration::from_millis(100))
+        .with_max_backoff(Duration::from_secs(1));
+    aws_sdk_s3::Client::from_conf(
+        client
+            .config()
+            .to_builder()
+            .timeout_config(timeout)
+            .retry_config(retry)
+            .build(),
+    )
+}
+
+async fn bounded<T>(timeout: Duration, operation: impl Future<Output = Result<T>>) -> Result<T> {
+    tokio::time::timeout(timeout, operation)
+        .await
+        .context("S3 operation timed out")?
+}
+
+fn single_attempt() -> aws_sdk_s3::config::Builder {
+    // Creation is not idempotent; publication retries require content reconciliation.
+    aws_sdk_s3::config::Builder::new().retry_config(RetryConfig::disabled())
+}
+
+async fn download(mut body: ByteStream) -> Result<bytes::Bytes> {
+    let mut download = crate::payload::Download::new();
+    while let Some(chunk) = body.next().await {
+        download = download.append(chunk?).await?;
+    }
+    download.finish().await
 }
 
 fn validate_content_range(value: Option<&str>, start: u64, end: u64) -> Result<()> {

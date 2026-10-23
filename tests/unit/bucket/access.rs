@@ -152,16 +152,17 @@ async fn s3_bootstrap_with_code_keeps_scoped_artifact_access() -> Result<()> {
         token_source: Some(Box::new(RecordingTokens(requests.clone()))),
         persistence: super::super::SnapshotStoreConfig::Local,
     };
-    let code = serde_json::to_string(&crate::bundle::ActorBundle {
+    let code = crate::bundle::ActorBundle {
         bucket: "code".into(),
         files: vec![crate::bundle::BundleFile {
             path: "actors.mjs".into(),
             object: "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs"
                 .into(),
             generation: 1,
-            sha256: "unused".into(),
+            sha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
         }],
-    })?;
+    }
+    .encode()?;
 
     let config: HostStorageConfig =
         serde_json::from_str(&access.bootstrap("us-west-2", &actor(), Some(&code)).await?)?;

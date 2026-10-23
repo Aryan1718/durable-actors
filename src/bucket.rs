@@ -53,6 +53,9 @@ impl StorageRevision {
 #[async_trait]
 pub trait Bucket: Send + Sync {
     async fn get(&self, key: &str) -> Result<Option<BucketObject>>;
+    async fn download(&self, key: &str) -> Result<Option<BucketObject>> {
+        self.get(key).await
+    }
     async fn range(&self, key: &str, start: u64, length: u64) -> Result<Option<BucketObject>>;
     async fn compare_and_swap(
         &self,

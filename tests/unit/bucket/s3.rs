@@ -15,6 +15,9 @@ use axum::{
 
 use super::*;
 
+#[path = "s3/retries.rs"]
+mod retries;
+
 #[tokio::test]
 async fn state_written_through_s3_restores_in_a_fresh_runtime() -> Result<()> {
     use crate::{
@@ -271,6 +274,29 @@ async fn multipart_completion_distinguishes_conditional_conflicts() -> Result<()
 }
 
 #[tokio::test]
+async fn snapshot_downloads_spool_large_objects_and_reject_incomplete_data() -> Result<()> {
+    use crate::bucket::{BucketSnapshots, SnapshotStore};
+
+    let server = TestServer::start().await?;
+    let bucket = server.bucket()?;
+    let expected = Bytes::from(vec![7; crate::payload::IO_BUFFER_BYTES + 17]);
+
+    let object = bucket.download("large-snapshot").await?.unwrap();
+    assert_eq!(
+        object.revision,
+        StorageRevision::ETag("\"etag-large\"".into())
+    );
+    assert_eq!(object.bytes, expected);
+    assert!(bucket.download("partial-snapshot").await.is_err());
+    assert!(bucket.download("truncated-snapshot").await.is_err());
+    assert!(bucket.download("corrupt").await.is_err());
+
+    let snapshots = BucketSnapshots(Arc::new(server.bucket()?));
+    assert_eq!(snapshots.get("large-snapshot").await?.unwrap(), expected);
+    Ok(())
+}
+
+#[tokio::test]
 async fn multipart_writes_require_part_checksums() -> Result<()> {
     let server = TestServer::start().await?;
     let result = server
@@ -389,6 +415,27 @@ async fn read(
     headers: HeaderMap,
 ) -> Response {
     record(&state, "GET", uri.to_string(), &headers);
+    if key == "retry-read" {
+        if request_count(&state, "GET", &uri.to_string()) < 3 {
+            return s3_error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown");
+        }
+        return ([("etag", "\"retry\"")], "recovered").into_response();
+    }
+    if key == "failed-read" {
+        return s3_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError");
+    }
+    if key == "stalled-headers" {
+        return std::future::pending().await;
+    }
+    if key == "stalled-body" {
+        let body = axum::body::Body::from_stream(futures_util::stream::pending::<
+            std::result::Result<Bytes, std::io::Error>,
+        >());
+        return ([("etag", "\"stalled\""), ("content-length", "10")], body).into_response();
+    }
+    if key == "runtime/large-uncertain" {
+        return ([("etag", "\"large\"")], vec![7; 5 * 1024 * 1024 + 1]).into_response();
+    }
     if let Some(object) = state.objects.lock().unwrap().get(&key).cloned() {
         return ([("etag", object.etag)], object.bytes).into_response();
     }
@@ -424,6 +471,27 @@ async fn read(
             "corrupt",
         )
             .into_response(),
+        "large-snapshot" => (
+            [("etag", "\"etag-large\"")],
+            vec![7; crate::payload::IO_BUFFER_BYTES + 17],
+        )
+            .into_response(),
+        "partial-snapshot" => (
+            StatusCode::PARTIAL_CONTENT,
+            [
+                ("etag", "\"etag-partial\""),
+                ("content-range", "bytes 0-2/10"),
+            ],
+            "abc",
+        )
+            .into_response(),
+        "truncated-snapshot" => (
+            [("etag", "\"etag-truncated\""), ("content-length", "10")],
+            axum::body::Body::from_stream(futures_util::stream::once(async {
+                Ok::<_, std::io::Error>(Bytes::from_static(b"short"))
+            })),
+        )
+            .into_response(),
         "uncertain" => ([("etag", "\"etag-stored\"")], "stored").into_response(),
         "missing" => s3_error(StatusCode::NOT_FOUND, "NoSuchKey"),
         _ => s3_error(StatusCode::FORBIDDEN, "AccessDenied"),
@@ -438,11 +506,24 @@ async fn write(
     body: Bytes,
 ) -> Response {
     record(&state, "PUT", uri.to_string(), &headers);
+    if key == "timed-put" {
+        state.objects.lock().unwrap().insert(
+            key,
+            StoredObject {
+                etag: "\"timed\"".into(),
+                bytes: body,
+            },
+        );
+        return std::future::pending().await;
+    }
     if uri
         .query()
         .is_some_and(|query| query.contains("partNumber="))
     {
         let checksum = header(&headers, "x-amz-checksum-crc32c").unwrap();
+        if key == "runtime/retry-parts" && request_count(&state, "PUT", &uri.to_string()) < 3 {
+            return s3_error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown");
+        }
         if key == "runtime/large-no-checksum" {
             return (StatusCode::OK, [("etag", "\"part-etag\"")]).into_response();
         }
@@ -505,6 +586,9 @@ async fn multipart(
         .query()
         .is_some_and(|query| query.trim_end_matches('=') == "uploads")
     {
+        if key == "runtime/failed-create" {
+            return s3_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError");
+        }
         return (
             StatusCode::OK,
             [("content-type", "application/xml")],
@@ -513,6 +597,19 @@ async fn multipart(
             .into_response();
     }
     if uri.query() == Some("uploadId=test-upload") {
+        if key == "runtime/large-timed" {
+            state.objects.lock().unwrap().insert(
+                key,
+                StoredObject {
+                    etag: "\"timed\"".into(),
+                    bytes: Bytes::from(vec![7; 5 * 1024 * 1024 + 1]),
+                },
+            );
+            return std::future::pending().await;
+        }
+        if key == "runtime/large-uncertain" {
+            return s3_error(StatusCode::INTERNAL_SERVER_ERROR, "InternalError");
+        }
         if key == "runtime/large-conflict" {
             return s3_error(StatusCode::CONFLICT, "ConditionalRequestConflict");
         }
@@ -552,6 +649,13 @@ async fn list(
         return s3_error(StatusCode::BAD_REQUEST, "InvalidArgument");
     }
     let prefix = query.get("prefix").map(String::as_str).unwrap_or_default();
+    if prefix == "retry-list" && request_count(&state, "GET", &uri.to_string()) < 3 {
+        return s3_error(StatusCode::SERVICE_UNAVAILABLE, "SlowDown");
+    }
+    if prefix == "endless-list" {
+        return ([("content-type", "application/xml")],
+            "<ListBucketResult><IsTruncated>true</IsTruncated><NextContinuationToken>again</NextContinuationToken></ListBucketResult>").into_response();
+    }
     if prefix != "runtime/" {
         let contents = state
             .objects
@@ -582,6 +686,16 @@ async fn list(
         [("content-type", "application/xml")],
         format!("<ListBucketResult><Name>test-bucket</Name><Prefix>runtime/</Prefix><KeyCount>1</KeyCount><MaxKeys>1000</MaxKeys><IsTruncated>{truncated}</IsTruncated><Contents><Key>{key}</Key><ETag>&quot;etag&quot;</ETag><Size>1</Size><StorageClass>STANDARD</StorageClass></Contents>{token}</ListBucketResult>"),
     ).into_response()
+}
+
+fn request_count(state: &ServerState, method: &str, uri: &str) -> usize {
+    state
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.method == method && request.uri == uri)
+        .count()
 }
 
 fn record(state: &ServerState, method: &str, uri: String, headers: &HeaderMap) {
