@@ -241,6 +241,7 @@ async fn gateways_keep_connections_and_metadata_when_the_actor_host_changes() ->
     let registry = Arc::new(LocalAdminRegistry::default());
     registry
         .register_test_deployment(&HostLaunchSpec {
+            image_policy: Default::default(),
             organization_id: Some("org-test".into()),
             project_id: "default".into(),
             sandboxes: [(

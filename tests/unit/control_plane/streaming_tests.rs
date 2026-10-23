@@ -529,6 +529,7 @@ impl Stack {
             actor_id: "counter-1".into(),
         };
         let spec = HostLaunchSpec {
+            image_policy: Default::default(),
             organization_id: Some("org-test".into()),
             sandboxes: Default::default(),
             source: None,

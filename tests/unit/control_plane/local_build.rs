@@ -67,6 +67,7 @@ async fn builds_preserve_the_current_code_until_successful_publication_and_keep_
 
 fn source(project: &Path) -> HostLaunchSpec {
     HostLaunchSpec {
+        image_policy: Default::default(),
         organization_id: Some("org-test".into()),
         sandboxes: Default::default(),
         project_id: "local".into(),

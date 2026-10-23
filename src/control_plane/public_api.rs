@@ -212,6 +212,8 @@ async fn get_deployment(
         .map(|super::admin::DeploymentSource::Local(local)| local);
     Ok(Json(CurrentDeployment {
         organization_id: spec.organization_id,
+        image_ref: (spec.image_policy == super::admin::ImagePolicy::Custom && bundle.is_some())
+            .then_some(spec.image_ref),
         bundle,
         local_source,
         secret_refs: spec.secret_refs,
@@ -241,6 +243,11 @@ async fn register_deployment(
 ) -> Result<Json<DeploymentReply>, ApiError> {
     authorized_admin(&state.admin, &headers)?;
     let Json(request) = request.map_err(ApiError::json)?;
+    let image_policy = if request.image_ref.is_some() {
+        super::admin::ImagePolicy::Custom
+    } else {
+        super::admin::ImagePolicy::Platform
+    };
     let (source, code_snapshot, image_ref, working_directory, actor_entrypoint) =
         match (request.bundle, request.local_source) {
             (Some(bundle), None) => {
@@ -252,12 +259,15 @@ async fn register_deployment(
                 (
                     None,
                     Some(snapshot),
-                    "bundle".into(),
+                    request.image_ref.unwrap_or_else(|| "bundle".into()),
                     "/customer".into(),
                     Some(entrypoint),
                 )
             }
             (None, Some(local)) => {
+                if request.image_ref.is_some() {
+                    return Err(ApiError::bad_request("imageRef requires a hosted bundle"));
+                }
                 let directory = local.working_directory.clone();
                 let entrypoint = local.actor_entrypoint.clone();
                 (
@@ -280,6 +290,7 @@ async fn register_deployment(
         .transpose()
         .map_err(ApiError::bad_request)?;
     let spec = HostLaunchSpec {
+        image_policy,
         organization_id: Some(request.organization_id),
         sandboxes: Default::default(),
         project_id: project_id(path)?,
@@ -496,6 +507,8 @@ struct RegisterDeploymentRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bundle: Option<crate::bundle::ActorBundle>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    image_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     contract: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     local_source: Option<super::admin::LocalSource>,
@@ -506,6 +519,8 @@ struct RegisterDeploymentRequest {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct CurrentDeployment {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    image_ref: Option<String>,
     organization_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     bundle: Option<crate::bundle::ActorBundle>,

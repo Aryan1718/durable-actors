@@ -30,18 +30,30 @@ pub(crate) struct SparePool {
     store: PoolStore,
     provider: Arc<dyn SandboxProvider>,
     pub config: PoolConfig,
+    runtime_images: Option<crate::control_plane::RuntimeImages>,
 }
 
 impl SparePool {
+    #[cfg(test)]
     pub fn new(
         database: PostgresDatabase,
         provider: Arc<dyn SandboxProvider>,
         config: PoolConfig,
     ) -> Arc<Self> {
+        Self::with_runtime_images(database, provider, config, None)
+    }
+
+    pub fn with_runtime_images(
+        database: PostgresDatabase,
+        provider: Arc<dyn SandboxProvider>,
+        config: PoolConfig,
+        runtime_images: Option<crate::control_plane::RuntimeImages>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             store: PoolStore(database, config.kind),
             provider,
             config,
+            runtime_images,
         })
     }
 
@@ -58,7 +70,7 @@ impl SparePool {
         let result = self
             .store
             .claim(
-                &self.key(&spec.image_ref, region),
+                &self.key(self.image(spec)?, region),
                 host,
                 &spec.host_config_key(),
             )
@@ -201,8 +213,8 @@ impl SparePool {
         let images: std::collections::BTreeSet<_> = deployments
             .iter()
             .filter(|spec| spec.code_snapshot.is_some())
-            .map(|spec| spec.image_ref.as_str())
-            .collect();
+            .map(|spec| self.image(spec))
+            .collect::<Result<_>>()?;
         let keys: Vec<String> = images
             .iter()
             .flat_map(|image| {
@@ -238,6 +250,13 @@ impl SparePool {
             }
         }
         Ok(builds)
+    }
+
+    fn image<'a>(&'a self, spec: &'a HostLaunchSpec) -> Result<&'a str> {
+        match &self.runtime_images {
+            Some(images) => images.for_deployment(spec),
+            None => Ok(&spec.image_ref),
+        }
     }
 
     async fn build(&self, key: &str, image: &str, region: &str, name: String) -> Result<()> {

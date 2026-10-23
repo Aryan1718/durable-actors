@@ -23,12 +23,31 @@ pub(crate) struct HostLaunchSpec {
     pub organization_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<DeploymentSource>,
+    #[serde(default)]
+    pub image_policy: ImagePolicy,
     pub image_ref: String,
     #[serde(default)]
     pub code_snapshot: Option<String>,
     pub working_directory: String,
     pub actor_entrypoint: Option<String>,
     pub secret_refs: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum ImagePolicy {
+    #[default]
+    Platform,
+    Custom,
+}
+
+impl ImagePolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Platform => "platform",
+            Self::Custom => "custom",
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -431,7 +450,7 @@ impl AdminRegistry for PostgresAdminRegistry {
 
     async fn launch_specs(&self) -> Result<Vec<HostLaunchSpec>> {
         self.database.connection().await?.query(
-            "SELECT image_ref, working_directory, actor_entrypoint, secret_refs, code_snapshot, source_json, project_id, sandbox_json, organization_id FROM durable_actors_deployment",
+            "SELECT image_ref, working_directory, actor_entrypoint, secret_refs, code_snapshot, source_json, project_id, sandbox_json, organization_id, image_policy FROM durable_actors_deployment",
             &[],
         ).await.context("load PostgreSQL host launch specs")?
             .iter().map(launch_spec_from_row).collect()
@@ -441,7 +460,7 @@ impl AdminRegistry for PostgresAdminRegistry {
         self
             .database
             .query_opt(
-                "SELECT image_ref, working_directory, actor_entrypoint, secret_refs, code_snapshot, source_json, project_id, sandbox_json, organization_id \
+                "SELECT image_ref, working_directory, actor_entrypoint, secret_refs, code_snapshot, source_json, project_id, sandbox_json, organization_id, image_policy \
                  FROM durable_actors_deployment WHERE project_id = $1",
                 &[&project_id],
             )
@@ -472,20 +491,20 @@ impl DeploymentUpdate for PostgresDeploymentUpdate {
         let transaction = self.client.transaction().await?;
         let changed = transaction.execute(
             "INSERT INTO durable_actors_deployment
-                (project_id, image_ref, working_directory, actor_entrypoint, secret_refs, code_snapshot, source_json, sandbox_json, organization_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                (project_id, image_ref, working_directory, actor_entrypoint, secret_refs, code_snapshot, source_json, sandbox_json, organization_id, image_policy)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              ON CONFLICT (project_id) DO UPDATE SET
                 image_ref = EXCLUDED.image_ref, working_directory = EXCLUDED.working_directory,
                 actor_entrypoint = EXCLUDED.actor_entrypoint, secret_refs = EXCLUDED.secret_refs,
                 code_snapshot = EXCLUDED.code_snapshot, source_json = EXCLUDED.source_json, sandbox_json = EXCLUDED.sandbox_json,
-                organization_id = EXCLUDED.organization_id, updated_at = clock_timestamp()
+                organization_id = EXCLUDED.organization_id, image_policy = EXCLUDED.image_policy, updated_at = clock_timestamp()
              WHERE (durable_actors_deployment.image_ref, durable_actors_deployment.working_directory,
                     durable_actors_deployment.actor_entrypoint, durable_actors_deployment.secret_refs,
-                    durable_actors_deployment.code_snapshot, durable_actors_deployment.source_json, durable_actors_deployment.sandbox_json, durable_actors_deployment.organization_id)
+                    durable_actors_deployment.code_snapshot, durable_actors_deployment.source_json, durable_actors_deployment.sandbox_json, durable_actors_deployment.organization_id, durable_actors_deployment.image_policy)
                 IS DISTINCT FROM (EXCLUDED.image_ref, EXCLUDED.working_directory, EXCLUDED.actor_entrypoint,
-                                  EXCLUDED.secret_refs, EXCLUDED.code_snapshot, EXCLUDED.source_json, EXCLUDED.sandbox_json, EXCLUDED.organization_id)",
+                                  EXCLUDED.secret_refs, EXCLUDED.code_snapshot, EXCLUDED.source_json, EXCLUDED.sandbox_json, EXCLUDED.organization_id, EXCLUDED.image_policy)",
             &[&spec.project_id, &spec.image_ref, &spec.working_directory, &spec.actor_entrypoint,
-              &spec.secret_refs, &spec.code_snapshot, &spec.source.as_ref().map(serde_json::to_string).transpose()?, &serde_json::to_string(&spec.sandboxes)?, &spec.organization_id]
+              &spec.secret_refs, &spec.code_snapshot, &spec.source.as_ref().map(serde_json::to_string).transpose()?, &serde_json::to_string(&spec.sandboxes)?, &spec.organization_id, &spec.image_policy.as_str()]
         ).await.context("register PostgreSQL deployment")? > 0;
         let published = publish_contract(&transaction, &spec.project_id, contract).await?;
         transaction.commit().await?;
@@ -522,6 +541,11 @@ async fn publish_contract(
 
 fn launch_spec_from_row(row: &tokio_postgres::Row) -> Result<HostLaunchSpec> {
     Ok(HostLaunchSpec {
+        image_policy: match row.get::<_, &str>(9) {
+            "platform" => ImagePolicy::Platform,
+            "custom" => ImagePolicy::Custom,
+            value => anyhow::bail!("invalid deployment image policy: {value}"),
+        },
         organization_id: row.get(8),
         sandboxes: serde_json::from_str(row.get::<_, &str>(7))?,
         project_id: row.get(6),

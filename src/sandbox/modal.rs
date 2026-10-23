@@ -9,15 +9,17 @@ use ::modal::{
 };
 use anyhow::{Context, Result};
 use async_trait::async_trait;
+use moka::future::Cache;
 
 use super::{
-    remote::{RemoteSandboxProvider, SandboxCluster},
+    remote::{RemoteSandboxProvider, SandboxCluster, validate_image},
     secrets::SecretResolver,
     *,
 };
 
 const READY_FILE: &str = "/tmp/durable-actors-spare-ready";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(90);
+const IMAGE_IMPORT_TIMEOUT: Duration = Duration::from_secs(600);
 
 #[derive(Clone, Debug)]
 pub(crate) struct ModalConfig {
@@ -42,16 +44,12 @@ pub(crate) async fn provider(
             },
         )
         .await?;
-    let mut imported = HashMap::new();
+    let imported = ImportedImages::new(Arc::new(ModalImageImporter {
+        client: client.clone(),
+        app: app.clone(),
+    }));
     for reference in images {
-        if imported.contains_key(*reference) {
-            continue;
-        }
-        let image = Image::from_registry(*reference).dockerfile_commands(["ENTRYPOINT []"]);
-        tokio::time::timeout(Duration::from_secs(600), image.build(&client, &app))
-            .await
-            .context("Modal image import timed out")??;
-        imported.insert((*reference).to_owned(), image);
+        imported.get(reference).await?;
     }
     RemoteSandboxProvider::new(
         "modal",
@@ -70,16 +68,13 @@ struct ModalCluster {
     client: Client,
     app: App,
     config: ModalConfig,
-    images: HashMap<String, Image>,
+    images: ImportedImages,
 }
 
 #[async_trait]
 impl SandboxCluster for ModalCluster {
     async fn create_spare(&self, request: &CreateSpareRequest) -> Result<SpareHandle> {
-        let image = self
-            .images
-            .get(&request.image_ref)
-            .context("Modal runtime image was not imported")?;
+        let image = self.images.get(&request.image_ref).await?;
         let token = format!(
             "{}{}",
             uuid::Uuid::new_v4().simple(),
@@ -88,7 +83,7 @@ impl SandboxCluster for ModalCluster {
         let params = spare_params(request, &self.config, &token)?;
         let sandbox = tokio::time::timeout(
             STARTUP_TIMEOUT,
-            self.client.create_sandbox(&self.app, image, params),
+            self.client.create_sandbox(&self.app, &image, params),
         )
         .await
         .context("Modal sandbox creation timed out")??;
@@ -137,6 +132,51 @@ impl SandboxCluster for ModalCluster {
             .filter(|spare| !running.contains(&spare.resource_id))
             .map(|spare| spare.resource_id.clone())
             .collect())
+    }
+}
+
+struct ImportedImages {
+    importer: Arc<dyn ImageImporter>,
+    cache: Cache<String, Image>,
+}
+
+impl ImportedImages {
+    fn new(importer: Arc<dyn ImageImporter>) -> Self {
+        Self {
+            importer,
+            cache: Cache::builder().build(),
+        }
+    }
+
+    async fn get(&self, reference: &str) -> Result<Image> {
+        validate_image(reference)?;
+        self.cache
+            .try_get_with_by_ref(reference, async {
+                tokio::time::timeout(IMAGE_IMPORT_TIMEOUT, self.importer.import(reference))
+                    .await
+                    .context("Modal image import timed out")?
+            })
+            .await
+            .map_err(|error| anyhow::anyhow!("import Modal runtime image {reference}: {error:#}"))
+    }
+}
+
+#[async_trait]
+trait ImageImporter: Send + Sync {
+    async fn import(&self, reference: &str) -> Result<Image>;
+}
+
+struct ModalImageImporter {
+    client: Client,
+    app: App,
+}
+
+#[async_trait]
+impl ImageImporter for ModalImageImporter {
+    async fn import(&self, reference: &str) -> Result<Image> {
+        let image = Image::from_registry(reference).dockerfile_commands(["ENTRYPOINT []"]);
+        image.build(&self.client, &self.app).await?;
+        Ok(image)
     }
 }
 

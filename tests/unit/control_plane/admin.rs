@@ -83,6 +83,7 @@ async fn postgres_registration_replaces_the_single_deployment_atomically() -> Re
 
 fn spec(image: &str) -> HostLaunchSpec {
     HostLaunchSpec {
+        image_policy: Default::default(),
         organization_id: Some("org-test".into()),
         sandboxes: Default::default(),
         project_id: "default".into(),

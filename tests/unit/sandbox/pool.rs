@@ -24,6 +24,83 @@ fn pool(database: PostgresDatabase) -> Arc<SparePool> {
 }
 
 #[tokio::test]
+async fn platform_spares_follow_current_images_while_custom_spares_remain_pinned() -> Result<()> {
+    use crate::control_plane::{
+        RuntimeImages,
+        admin::{ImagePolicy, LocalAdminRegistry},
+    };
+    with_postgres(async |fixture| {
+        let pool = SparePool::with_runtime_images(
+            PostgresDatabase::connect(&fixture.url).await?,
+            Arc::new(crate::sandbox::testing::UnusedSandboxProvider),
+            config(1),
+            Some(RuntimeImages {
+                typescript: "im-b".into(),
+                python: "im-python".into(),
+            }),
+        );
+        let registry = LocalAdminRegistry::default();
+        let platform: HostLaunchSpec = serde_json::from_value(serde_json::json!({
+            "projectId":"platform", "imagePolicy":"platform", "imageRef":"im-a",
+            "codeSnapshot":crate::sandbox::testing::code_artifact(1),
+            "workingDirectory":"/customer", "actorEntrypoint":"actors.mjs", "secretRefs":[]
+        }))?;
+        let mut custom = platform.clone();
+        custom.project_id = "custom".into();
+        custom.image_policy = ImagePolicy::Custom;
+        custom.image_ref = "im-custom".into();
+        registry.register_test_deployment(&platform).await?;
+        registry.register_test_deployment(&custom).await?;
+        let old_key = pool.key("im-a", "region");
+        let old_name = reserve(&pool.store, &old_key, 1).await?.unwrap();
+        let handle = SpareHandle {
+            name: old_name,
+            resource_id: "sb-old".into(),
+            route: "https://host.test".into(),
+            canonical_region: "region".into(),
+            control_route: String::new(),
+            control_token: String::new(),
+        };
+        pool.store.publish(&old_key, &handle, 600).await?;
+        let builds = pool.reconcile(&registry).await?;
+        let images: std::collections::BTreeSet<_> =
+            builds.iter().map(|build| build.image.as_str()).collect();
+        assert_eq!(images, ["im-b", "im-custom"].into_iter().collect());
+        assert_eq!(pool.store.retiring().await?, [handle.clone()]);
+        for build in builds {
+            pool.store
+                .publish(
+                    &build.key,
+                    &SpareHandle {
+                        name: build.name,
+                        resource_id: build.image,
+                        ..handle.clone()
+                    },
+                    600,
+                )
+                .await?;
+        }
+        assert_eq!(
+            pool.claim(&platform, "region", "platform-host", &pool.config.resources)
+                .await?
+                .unwrap()
+                .resource_id,
+            "im-b"
+        );
+        assert_eq!(
+            pool.claim(&custom, "region", "custom-host", &pool.config.resources)
+                .await?
+                .unwrap()
+                .resource_id,
+            "im-custom"
+        );
+        assert_eq!(registry.launch_spec("platform").await?, Some(platform));
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
 async fn custom_resources_cannot_claim_default_sized_spares() -> Result<()> {
     with_postgres(async |fixture| {
         let pool = pool(PostgresDatabase::connect(&fixture.url).await?);
@@ -186,6 +263,7 @@ async fn reconciliation_keeps_spares_for_every_project_runtime() -> Result<()> {
         for (project, image) in [("team-a", "im-a"), ("team-b", "im-b")] {
             registry
                 .register_test_deployment(&HostLaunchSpec {
+                    image_policy: Default::default(),
                     organization_id: Some("org-test".into()),
                     sandboxes: Default::default(),
                     project_id: project.into(),

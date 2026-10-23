@@ -17,6 +17,7 @@ mod local;
 mod local_build;
 mod local_watch;
 mod process;
+pub(crate) use process::RuntimeImages;
 mod protocol;
 mod public_api;
 mod regions;

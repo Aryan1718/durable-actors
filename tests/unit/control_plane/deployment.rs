@@ -7,6 +7,125 @@ use crate::{
 use std::sync::Mutex;
 
 #[tokio::test]
+async fn persisted_deployments_cold_start_on_the_current_runtime_without_redeployment() -> Result<()>
+{
+    use crate::control_plane::admin::{AdminRegistry, ImagePolicy, PostgresAdminRegistry};
+    crate::postgres::testing::with_postgres(async |fixture| {
+        let registry = PostgresAdminRegistry::from_database(
+            crate::postgres::PostgresDatabase::connect(&fixture.url).await?,
+        );
+        let mut deployed = source();
+        deployed.image_ref = format!("runtime/platform@sha256:{}", "a".repeat(64));
+        registry.register_test_deployment(&deployed).await?;
+        let client = fixture.pool.get().await?;
+        client
+            .batch_execute("ALTER TABLE durable_actors_deployment DROP COLUMN image_policy")
+            .await?;
+        client
+            .batch_execute(include_str!(
+                "../../../migrations/V22__deployment_image_policy.sql"
+            ))
+            .await?;
+        let identity = deployed.host_config_key();
+        let current = format!("runtime/platform@sha256:{}", "b".repeat(64));
+        let provisioner = SandboxHostProvisioner::new(
+            Arc::new(Provider::default()),
+            HostSandboxRuntimeConfig {
+                control_plane_url: "http://control".into(),
+                jwt_issuer: "issuer".into(),
+                invocation_jwt_audience: "invocation".into(),
+                host_idle_timeout_ms: 10_000,
+            },
+            super::tests::test_issuer()?,
+            Some(super::super::process::RuntimeImages {
+                typescript: current.clone(),
+                python: "unused".into(),
+            }),
+        );
+        let actor = ActorKey {
+            project_id: "default".into(),
+            actor_name: "Counter".into(),
+            actor_id: "one".into(),
+        };
+        let saved = registry.launch_spec("default").await?.unwrap();
+        let request = provisioner.request(&saved, "north-america-west", &actor)?;
+        assert_eq!(request.image_ref, current);
+        assert_eq!(request.code_snapshot, deployed.code_snapshot);
+        assert_eq!(request.host_config_key, identity);
+        assert_eq!(
+            registry.launch_spec("default").await?,
+            Some(deployed.clone())
+        );
+        deployed.image_policy = ImagePolicy::Custom;
+        registry.register_test_deployment(&deployed).await?;
+        let custom = registry.launch_spec("default").await?.unwrap();
+        assert_eq!(
+            provisioner
+                .request(&custom, "north-america-west", &actor)?
+                .image_ref,
+            deployed.image_ref
+        );
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn custom_image_registration_round_trips_without_adopting_the_platform_image() -> Result<()> {
+    let (service, admin, _) = fixture()?;
+    let routes = super::super::public_api::router(service, admin.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!(
+        "http://{}/v1/projects/default/deployment",
+        listener.local_addr()?
+    );
+    let server = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async {
+        axum::serve(listener, routes).await
+    }));
+    let client = reqwest::Client::new();
+    let image = format!("customer/runtime@sha256:{}", "a".repeat(64));
+    let bundle = crate::bundle::ActorBundle::decode(source().code_snapshot.as_ref().unwrap())?;
+    let body = serde_json::json!({"organizationId":"org-test", "imageRef":image, "bundle":bundle, "contract":contract()});
+    client
+        .put(&url)
+        .bearer_auth("api-key")
+        .json(&body)
+        .send()
+        .await?
+        .error_for_status()?;
+    let saved = admin.current_deployment("default").await?.unwrap();
+    assert_eq!(saved.image_policy, super::super::admin::ImagePolicy::Custom);
+    assert_eq!(saved.image_ref, image);
+    let mut current: serde_json::Value = client
+        .get(&url)
+        .bearer_auth("api-key")
+        .send()
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(current["imageRef"], image);
+    current["secretRefs"] = serde_json::json!(["rotated"]);
+    client
+        .put(&url)
+        .bearer_auth("api-key")
+        .json(&current)
+        .send()
+        .await?
+        .error_for_status()?;
+    assert_eq!(
+        admin
+            .current_deployment("default")
+            .await?
+            .unwrap()
+            .image_ref,
+        image
+    );
+    drop(server);
+    Ok(())
+}
+
+#[tokio::test]
 async fn openapi_is_available_without_credentials_or_a_deployment() -> Result<()> {
     let (service, admin, _) = fixture()?;
     let routes = super::super::public_api::router(service, admin);
@@ -327,6 +446,7 @@ fn fixture_with_idle_timeout(
 
 fn source() -> HostLaunchSpec {
     HostLaunchSpec {
+        image_policy: super::super::admin::ImagePolicy::Platform,
         organization_id: Some("org-test".into()),
         sandboxes: Default::default(),
         project_id: "default".into(),

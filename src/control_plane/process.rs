@@ -60,12 +60,28 @@ pub enum AnalyticsBackend {
     ClickHouse(super::ClickHouseConfig),
 }
 
+#[derive(Clone)]
 pub struct RuntimeImages {
     pub typescript: String,
     pub python: String,
 }
 
 impl RuntimeImages {
+    pub(crate) fn for_deployment<'a>(
+        &'a self,
+        spec: &'a super::admin::HostLaunchSpec,
+    ) -> Result<&'a str> {
+        if spec.image_policy == super::admin::ImagePolicy::Custom {
+            return Ok(&spec.image_ref);
+        }
+        let artifact = spec
+            .code_snapshot
+            .as_deref()
+            .context("platform image requires a code artifact")?;
+        let bundle = crate::bundle::ActorBundle::decode(artifact)?;
+        self.for_entrypoint(bundle.entrypoint()?)
+    }
+
     pub(crate) fn for_entrypoint(&self, entrypoint: &str) -> Result<&str> {
         Ok(
             match crate::bundle::ActorRuntime::from_entrypoint(entrypoint)? {
@@ -378,7 +394,12 @@ async fn sandbox_provisioner(
             .await?
         }
     });
-    let pool = crate::sandbox::pool::SparePool::new(database, provider.clone(), config.pool);
+    let pool = crate::sandbox::pool::SparePool::with_runtime_images(
+        database,
+        provider.clone(),
+        config.pool,
+        Some(config.runtime_images.clone()),
+    );
     pool.start(registry, stop);
     Ok(Arc::new(
         super::service::SandboxHostProvisioner::new(
