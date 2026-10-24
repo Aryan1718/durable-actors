@@ -40,6 +40,11 @@ analytics:
     passwordSecretKey: ""
 usage:
   topic: ""
+projectLimits:
+  enabled: true
+  maxActiveActors: 500
+  actorStartsPerSecond: 50
+  actorStartBurst: 100
 postgres:
   maxConnections: 8
 redis:

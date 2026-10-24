@@ -700,6 +700,9 @@ impl ControlPlaneService {
                 .await
             {
                 Ok(target) => return Ok(target),
+                Err(error) if error.is::<super::project_limits::AdmissionFailure>() => {
+                    return Err(error);
+                }
                 Err(error) => {
                     let current = self.placements.get_owner(&actor.storage_key()).await?;
                     if let Some(placement) = &current {
@@ -932,6 +935,7 @@ pub(crate) trait HostProvisioner: Send + Sync {
 }
 
 pub(crate) struct SandboxHostProvisioner {
+    admission: Option<Arc<super::project_limits::ActorAdmission>>,
     runtime_images: Option<super::process::RuntimeImages>,
     pool: Option<Arc<crate::sandbox::pool::SparePool>>,
     resource_bounds: Option<crate::sandbox::ResourceBounds>,
@@ -942,6 +946,14 @@ pub(crate) struct SandboxHostProvisioner {
 }
 
 impl SandboxHostProvisioner {
+    pub(super) fn with_actor_admission(
+        mut self,
+        admission: Arc<super::project_limits::ActorAdmission>,
+    ) -> Self {
+        self.admission = Some(admission);
+        self
+    }
+
     pub(crate) fn with_pool(mut self, pool: Arc<crate::sandbox::pool::SparePool>) -> Self {
         self.pool = Some(pool);
         self
@@ -967,6 +979,7 @@ impl SandboxHostProvisioner {
     ) -> Self {
         Self {
             runtime_images,
+            admission: None,
             pool: None,
             resource_bounds: None,
             runtime_access: None,
@@ -1074,6 +1087,11 @@ impl SandboxHostProvisioner {
     ) -> Result<(HostLease, u64)> {
         let started_at = Instant::now();
         let mut request = self.request(spec, region, actor)?;
+        if let Some(admission) = &self.admission {
+            admission
+                .reserve(actor, &request.host_id, &request.session_id)
+                .await?;
+        }
         request.actor_is_new = new_actor;
         request.owner_hint = owner_hint.map(serde_json::to_string).transpose()?;
         let token = async {

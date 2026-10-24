@@ -41,6 +41,7 @@ pub struct ControlPlaneProcessConfig {
     pub region: Option<String>,
     pub alarm_poll_interval: Duration,
     pub redis: Option<RedisConfig>,
+    pub project_limits: Option<super::ProjectLimits>,
 }
 
 pub struct ControlPlaneStorageConfig {
@@ -196,6 +197,21 @@ async fn control_plane_routes(
         .saturating_add(Duration::from_millis(
             crate::host_leases::MAX_HOST_LEASE_DURATION_MS,
         ));
+    let admission = config.project_limits.map(|limits| {
+        use super::project_limits::*;
+        let reservations: Arc<dyn ReservationStore> = match &redis {
+            Some(redis) => Arc::new(RedisReservations::new(
+                redis.clone(),
+                "durable-actors:admission:v1",
+                retention,
+            )),
+            None => Arc::new(MemoryReservations::new(
+                Arc::new(crate::clock::SystemClock),
+                retention,
+            )),
+        };
+        Arc::new(ActorAdmission::new(limits, reservations).with_database(database.clone()))
+    });
     let routing: Arc<dyn crate::actor_lifecycle::routing::RoutingHints> = match &redis {
         Some(redis) => Arc::new(crate::actor_lifecycle::routing::RedisRoutingHints::new(
             redis.clone(),
@@ -264,7 +280,7 @@ async fn control_plane_routes(
         config.sandbox_provider.public_origin.clone(),
         socket_gateway,
     )?;
-    let provisioner = sandbox_provisioner(
+    let mut provisioner = sandbox_provisioner(
         config.sandbox_provider,
         &issuer,
         runtime_access.clone(),
@@ -274,6 +290,10 @@ async fn control_plane_routes(
         connections,
     )
     .await?;
+    if let Some(admission) = admission {
+        provisioner = provisioner.with_actor_admission(admission.clone());
+        lifecycle = lifecycle.with_observer(admission);
+    }
     let socket_events = config
         .socket_event_sink
         .map(|sink| {
@@ -286,7 +306,7 @@ async fn control_plane_routes(
         auth,
         registry.clone(),
         issuer.clone(),
-        provisioner,
+        Arc::new(provisioner),
     )
     .with_runtime_access(runtime_access)
     .with_alarm_store(Arc::new(super::alarms::PostgresAlarmStore::new(database)))
@@ -374,7 +394,7 @@ async fn sandbox_provisioner(
     registry: Arc<dyn super::admin::AdminRegistry>,
     stop: tokio_util::sync::CancellationToken,
     connections: crate::sandbox::connections::HostConnections,
-) -> Result<Arc<dyn super::service::HostProvisioner>> {
+) -> Result<super::service::SandboxHostProvisioner> {
     let secrets = Arc::new(crate::sandbox::secrets::KubernetesSecrets::new(
         config.secret_namespace,
     ));
@@ -402,17 +422,15 @@ async fn sandbox_provisioner(
         Some(config.runtime_images.clone()),
     );
     pool.start(registry, stop);
-    Ok(Arc::new(
-        super::service::SandboxHostProvisioner::new(
-            provider,
-            config.runtime,
-            issuer.clone(),
-            Some(config.runtime_images),
-        )
-        .with_runtime_access(access)
-        .with_pool(pool)
-        .with_resource_bounds(config.resource_bounds),
-    ))
+    Ok(super::service::SandboxHostProvisioner::new(
+        provider,
+        config.runtime,
+        issuer.clone(),
+        Some(config.runtime_images),
+    )
+    .with_runtime_access(access)
+    .with_pool(pool)
+    .with_resource_bounds(config.resource_bounds))
 }
 
 impl ControlPlaneProcessConfig {
@@ -506,6 +524,7 @@ impl ControlPlaneProcessConfig {
             region,
             alarm_poll_interval,
             redis: redis_config(&mut get)?,
+            project_limits: super::ProjectLimits::from_lookup(&mut get, true)?,
         })
     }
 }

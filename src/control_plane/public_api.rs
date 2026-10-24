@@ -607,6 +607,7 @@ pub(super) struct ApiError {
     status: StatusCode,
     code: String,
     message: String,
+    retry_after_seconds: Option<u64>,
 }
 
 impl ApiError {
@@ -633,6 +634,19 @@ impl ApiError {
     pub(super) fn routing(error: anyhow::Error) -> Self {
         if error.is::<super::access::AccessDisabled>() {
             Self::access(error)
+        } else if let Some(rejected) =
+            error.downcast_ref::<super::project_limits::AdmissionRejected>()
+        {
+            use super::project_limits::AdmissionRejected;
+            let (code, retry_after_seconds) = match rejected {
+                AdmissionRejected::Quota { .. } => ("actor_quota_exceeded", None),
+                AdmissionRejected::Rate {
+                    retry_after_seconds,
+                } => ("actor_start_rate_limited", Some(*retry_after_seconds)),
+            };
+            let mut response = Self::new(StatusCode::TOO_MANY_REQUESTS, code, rejected.to_string());
+            response.retry_after_seconds = retry_after_seconds;
+            response
         } else if error.is::<super::service::RegionConflict>() {
             Self::conflict(error.to_string())
         } else {
@@ -685,13 +699,14 @@ impl ApiError {
             status,
             code: code.into(),
             message: message.into(),
+            retry_after_seconds: None,
         }
     }
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        (
+        let mut response = (
             self.status,
             Json(ErrorDocument {
                 error: ErrorBody {
@@ -700,7 +715,18 @@ impl IntoResponse for ApiError {
                 },
             }),
         )
-            .into_response()
+            .into_response();
+        if self.status == StatusCode::TOO_MANY_REQUESTS {
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, "no-store".parse().unwrap());
+        }
+        if let Some(seconds) = self.retry_after_seconds {
+            response
+                .headers_mut()
+                .insert(header::RETRY_AFTER, seconds.into());
+        }
+        response
     }
 }
 

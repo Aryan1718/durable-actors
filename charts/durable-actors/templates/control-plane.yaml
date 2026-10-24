@@ -79,6 +79,10 @@ spec:
               valueFrom:
                 secretKeyRef: {name: {{ .Values.credentialsSecret | quote }}, key: {{ .Values.analytics.clickhouse.passwordSecretKey | quote }}}
             {{- end }}
+            - {name: DURABLE_ACTORS_PROJECT_LIMITS_ENABLED, value: {{ .Values.projectLimits.enabled | quote }}}
+            - {name: DURABLE_ACTORS_PROJECT_MAX_ACTIVE_ACTORS, value: {{ .Values.projectLimits.maxActiveActors | quote }}}
+            - {name: DURABLE_ACTORS_PROJECT_ACTOR_STARTS_PER_SECOND, value: {{ .Values.projectLimits.actorStartsPerSecond | quote }}}
+            - {name: DURABLE_ACTORS_PROJECT_ACTOR_START_BURST, value: {{ .Values.projectLimits.actorStartBurst | quote }}}
             - name: DURABLE_ACTORS_CONTROL_PLANE_URL
               value: {{ printf "http://%s.%s.svc.cluster.local:7100" (include "actors.name" .) .Release.Namespace | quote }}
             - {name: DURABLE_ACTORS_PUBLIC_URL, value: {{ .Values.publicUrl | quote }}}

@@ -108,12 +108,18 @@ pub(crate) trait UsagePublisher: Send + Sync {
     async fn publish(&self, event: &UsageUpdate) -> Result<()>;
 }
 
+#[async_trait]
+pub(crate) trait LifecycleObserver: Send + Sync {
+    async fn observe(&self, event: &LifecycleEvent) -> Result<()>;
+}
+
 #[derive(Clone)]
 pub(crate) struct LifecycleStore {
     persistence: Arc<dyn LifecyclePersistence>,
     routing: Arc<dyn routing::RoutingHints>,
     usage: Option<Arc<dyn UsagePublisher>>,
     usage_sessions: Arc<dyn reconciliation::UsageSessions>,
+    observer: Option<Arc<dyn LifecycleObserver>>,
 }
 
 impl Default for LifecycleStore {
@@ -127,6 +133,7 @@ impl LifecycleStore {
         Self {
             persistence,
             usage: None,
+            observer: None,
             usage_sessions: Arc::new(reconciliation::MemoryUsageSessions::default()),
             routing: Arc::new(routing::MemoryRoutingHints::new(Duration::from_secs(
                 86_460,
@@ -136,6 +143,11 @@ impl LifecycleStore {
 
     pub(crate) fn with_routing(mut self, routing: Arc<dyn routing::RoutingHints>) -> Self {
         self.routing = routing;
+        self
+    }
+
+    pub(crate) fn with_observer(mut self, observer: Arc<dyn LifecycleObserver>) -> Self {
+        self.observer = Some(observer);
         self
     }
 
@@ -169,12 +181,18 @@ impl LifecycleStore {
             event.report.occurred_at_ms >= event.report.started_at_ms,
             "invalid lifecycle time range"
         );
-        let (persisted, (), ()) = tokio::join!(
+        let (persisted, (), (), observed) = tokio::join!(
             self.persistence.record(&event),
             self.record_routing(&event),
-            self.record_usage(&event)
+            self.record_usage(&event),
+            async {
+                match &self.observer {
+                    Some(observer) => observer.observe(&event).await,
+                    None => Ok(()),
+                }
+            }
         );
-        persisted
+        persisted.and(observed)
     }
 
     pub(crate) fn start_reconciliation(&self, stop: tokio_util::sync::CancellationToken) {

@@ -167,6 +167,17 @@
         "memoryMiB"
       ]
     },
+    "projectLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "maxActiveActors": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "actorStartsPerSecond": { "type": "integer", "minimum": 1, "maximum": 4294967295 },
+        "actorStartBurst": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      },
+      "required": ["enabled", "maxActiveActors", "actorStartsPerSecond", "actorStartBurst"]
+    },
     "alarms": {
       "type": "object",
       "additionalProperties": false,
@@ -294,6 +305,7 @@
     "replicaCount",
     "actors",
     "alarms",
+    "projectLimits",
     "postgres",
     "resources",
     "images",

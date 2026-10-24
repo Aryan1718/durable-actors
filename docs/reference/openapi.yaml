@@ -208,6 +208,7 @@ paths:
                             schema: { $ref: "#/components/schemas/Error" }
                 "404": { $ref: "#/components/responses/NotFound" }
                 "409": { $ref: "#/components/responses/Conflict" }
+                "429": { $ref: "#/components/responses/ActorLimit" }
                 "413": { $ref: "#/components/responses/PayloadTooLarge" }
                 "500": { $ref: "#/components/responses/Internal" }
                 "503": { $ref: "#/components/responses/Unavailable" }
@@ -285,6 +286,7 @@ paths:
                             schema: { $ref: "#/components/schemas/Error" }
                 "404": { $ref: "#/components/responses/NotFound" }
                 "409": { $ref: "#/components/responses/Conflict" }
+                "429": { $ref: "#/components/responses/ActorLimit" }
                 "502": { description: The invocation outcome is unknown. Do not replay automatically. }
                 "503": { $ref: "#/components/responses/Unavailable" }
                 "413": { $ref: "#/components/responses/PayloadTooLarge" }
@@ -785,6 +787,16 @@ components:
                     schema: { $ref: "#/components/schemas/Error" }
         Conflict:
             description: Deployment or region conflict (conflict).
+            content:
+                application/json:
+                    schema: { $ref: "#/components/schemas/Error" }
+        ActorLimit:
+            description: Actor activation rejected before provisioning or execution. The code is actor_quota_exceeded for concurrent activation capacity or actor_start_rate_limited for temporary throttling. Existing running hosts remain usable. SDKs surface these errors without automatic retries.
+            headers:
+                Cache-Control: { $ref: "#/components/headers/NoStore" }
+                Retry-After:
+                    description: Seconds until a start token is available. Present only for actor_start_rate_limited; concurrent requests may consume that token first.
+                    schema: { type: integer, minimum: 1 }
             content:
                 application/json:
                     schema: { $ref: "#/components/schemas/Error" }

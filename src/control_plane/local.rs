@@ -355,10 +355,12 @@ async fn local_routes(
     };
     let max_socket_connections =
         crate::sockets::max_connections(&mut |name| std::env::var(name).ok())?;
-    let provisioner = Arc::new(
-        SandboxHostProvisioner::new(provider, runtime, issuer.clone(), None)
-            .with_runtime_access(storage.access.clone()),
-    );
+    let admission = super::project_limits::local_admission(&mut |name| std::env::var(name).ok())?;
+    let mut provisioner = SandboxHostProvisioner::new(provider, runtime, issuer.clone(), None)
+        .with_runtime_access(storage.access.clone());
+    if let Some(admission) = &admission {
+        provisioner = provisioner.with_actor_admission(admission.clone());
+    }
     let socket_gateway = super::socket_gateway::SocketGateway::start(
         super::socket_bus::MemorySocketHub::default().join(max_socket_connections),
         true,
@@ -371,7 +373,7 @@ async fn local_routes(
         auth,
         registry.clone(),
         issuer.clone(),
-        provisioner,
+        Arc::new(provisioner),
     )
     .with_runtime_access(storage.access.clone())
     .with_local_builds(Arc::new(super::local_build::LocalBuilds::new(
@@ -382,6 +384,9 @@ async fn local_routes(
         )),
     )))
     .with_traces(storage.traces.clone());
+    if let Some(admission) = admission {
+        service.lifecycle = service.lifecycle.with_observer(admission);
+    }
     service.gateway = Some(gateway);
     service.start_access_reconciliation(stop.clone());
     service.start_alarm_scheduler(super::alarms::DEFAULT_POLL_INTERVAL, stop);
