@@ -10,9 +10,16 @@ impl SandboxCluster for Cluster {
     async fn stopped_spares(&self, _: &[crate::sandbox::SpareHandle]) -> Result<Vec<String>> {
         Ok(Vec::new())
     }
-    async fn create_spare(&self, _: &CreateSpareRequest) -> Result<SpareHandle> {
+    async fn create_spare(&self, request: &CreateSpareRequest) -> Result<SpareHandle> {
         self.creates.fetch_add(1, Ordering::SeqCst);
-        anyhow::bail!("unexpected pod creation")
+        Ok(SpareHandle {
+            name: request.name.clone(),
+            resource_id: "sandboxes/cold/uid".into(),
+            route: "http://10.0.0.2:7101".into(),
+            canonical_region: request.canonical_region.clone(),
+            control_route: "http://10.0.0.2:7102".into(),
+            control_token: "cold-token".into(),
+        })
     }
     async fn retire_spare(&self, _: &SpareHandle) -> Result<()> {
         self.retires.fetch_add(1, Ordering::SeqCst);
@@ -82,6 +89,64 @@ async fn prewarmed_assignment_uses_ready_host_without_creating_a_pod() -> Result
     assert!(result.provisioning.unwrap().reused);
     assert_eq!(cluster.creates.load(Ordering::SeqCst), 0);
     Ok(())
+}
+
+#[tokio::test]
+async fn s3_artifact_access_reaches_both_cold_and_prewarmed_compiled_hosts() -> Result<()> {
+    use crate::bucket::access::{BucketLocation, HostStorageConfig, StorageToken, StorageTokens};
+
+    let token = StorageToken {
+        access_token: "artifact-only-token".into(),
+        expires_at_ms: 9999999999999,
+    };
+    let runtime_config = serde_json::to_string(&HostStorageConfig {
+        bucket: BucketLocation::S3 {
+            bucket: "state".into(),
+            region: "us-west-2".into(),
+            artifact_bucket: "code-bucket".into(),
+        },
+        persistence: crate::bucket::SnapshotStoreConfig::Local,
+        region: "north-america-west".into(),
+        tokens: Some(StorageTokens {
+            ownership: token.clone(),
+            state: token,
+        }),
+    })?;
+    for warm in [false, true] {
+        let cluster = Arc::new(Cluster {
+            creates: AtomicUsize::new(0),
+            retires: AtomicUsize::new(0),
+        });
+        let provider = RemoteSandboxProvider {
+            name: "gke",
+            cluster: cluster.clone(),
+            assignment: Arc::new(StorageAssignment(runtime_config.clone())),
+        };
+        let mut request = request()?;
+        request.image_ref = format!("registry/runtime@sha256:{}", "a".repeat(64));
+        request.runtime_config = Some(runtime_config.clone());
+        if !warm {
+            request.spare = None;
+        }
+        let result = provider.ensure_host(&request).await?;
+        assert_eq!(result.provisioning.unwrap().reused, warm);
+        assert_eq!(cluster.creates.load(Ordering::SeqCst), usize::from(!warm));
+    }
+    Ok(())
+}
+
+struct StorageAssignment(String);
+
+#[async_trait]
+impl HostAssignment for StorageAssignment {
+    async fn assign(
+        &self,
+        spare: &SpareHandle,
+        environment: HashMap<String, String>,
+    ) -> Result<ActorHostHandle> {
+        assert_eq!(environment["DURABLE_ACTORS_RUNTIME_CONFIG"], self.0);
+        Assign.assign(spare, environment).await
+    }
 }
 
 fn request() -> Result<EnsureHostRequest> {

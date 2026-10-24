@@ -1,5 +1,61 @@
 use super::*;
 
+#[cfg(unix)]
+#[tokio::test]
+async fn executor_environment_excludes_cloud_credentials_and_host_tokens() -> Result<()> {
+    let mut command = Command::new("env");
+    let inherited = [
+        ("AWS_ACCESS_KEY_ID", "platform-key"),
+        ("AWS_SECRET_ACCESS_KEY", "platform-secret"),
+        ("AWS_SESSION_TOKEN", "platform-session"),
+        ("AWS_PROFILE", "platform-profile"),
+        ("AWS_CONFIG_FILE", "/platform/config"),
+        ("AWS_SHARED_CREDENTIALS_FILE", "/platform/credentials"),
+        ("AWS_WEB_IDENTITY_TOKEN_FILE", "/platform/identity"),
+        (
+            "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+            "http://platform/identity",
+        ),
+        (
+            "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+            "/platform/identity",
+        ),
+        ("AWS_CONTAINER_AUTHORIZATION_TOKEN", "platform-auth"),
+        ("AWS_CONTAINER_AUTHORIZATION_TOKEN_FILE", "/platform/auth"),
+        ("AWS_ROLE_ARN", "platform-role"),
+        ("aws_secret_access_key", "platform-lowercase-secret"),
+        ("AWS_FUTURE_CREDENTIAL_PROVIDER", "platform-future"),
+        ("BOTO_CONFIG", "/platform/boto"),
+        ("BOTO_PATH", "/platform/boto-path"),
+        ("GOOGLE_APPLICATION_CREDENTIALS", "/platform/google"),
+        ("DURABLE_ACTORS_HOST_TOKEN", "host-token"),
+        ("DURABLE_ACTORS_SPARE_TOKEN", "spare-token"),
+        ("DURABLE_ACTORS_RUNTIME_CONFIG", "storage-secret"),
+        ("PATH", "/usr/bin:/bin"),
+        ("CUSTOMER_SETTING", "customer-value"),
+    ]
+    .into_iter()
+    .map(|(name, value)| (name.into(), value.into()));
+    configure_executor_environment(&mut command, inherited);
+    let output = command.output().await?;
+    assert!(output.status.success());
+    let environment = String::from_utf8(output.stdout)?;
+    assert!(environment.contains("CUSTOMER_SETTING=customer-value\n"));
+    assert!(environment.contains("PATH=/usr/bin:/bin\n"));
+    for forbidden in [
+        "AWS_",
+        "aws_",
+        "BOTO_",
+        "GOOGLE_APPLICATION_CREDENTIALS=",
+        "DURABLE_ACTORS_HOST_TOKEN=",
+        "DURABLE_ACTORS_SPARE_TOKEN=",
+        "DURABLE_ACTORS_RUNTIME_CONFIG=",
+    ] {
+        assert!(!environment.lines().any(|line| line.starts_with(forbidden)));
+    }
+    Ok(())
+}
+
 fn busy() -> ActorStatus {
     ActorStatus {
         idle_since: None,

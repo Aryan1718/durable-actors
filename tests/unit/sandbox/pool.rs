@@ -101,6 +101,22 @@ async fn platform_spares_follow_current_images_while_custom_spares_remain_pinned
 }
 
 #[tokio::test]
+async fn image_deployments_without_code_do_not_claim_compiled_spares() -> Result<()> {
+    let pool = pool(PostgresDatabase::lazy(
+        "postgresql://localhost:1/unavailable",
+    )?);
+    let spec: HostLaunchSpec = serde_json::from_value(serde_json::json!({
+        "projectId":"default", "imageRef":"image", "workingDirectory":"/app", "secretRefs":[]
+    }))?;
+    assert!(
+        pool.claim(&spec, "canada", "host", &pool.config.resources)
+            .await?
+            .is_none()
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn custom_resources_cannot_claim_default_sized_spares() -> Result<()> {
     with_postgres(async |fixture| {
         let pool = pool(PostgresDatabase::connect(&fixture.url).await?);

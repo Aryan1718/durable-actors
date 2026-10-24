@@ -1519,6 +1519,7 @@ dependencies = [
  "aws-config",
  "aws-lc-rs",
  "aws-sdk-s3",
+ "aws-sdk-sts",
  "axum",
  "backon",
  "base64 0.22.1",

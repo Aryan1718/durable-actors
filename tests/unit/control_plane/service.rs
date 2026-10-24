@@ -11,6 +11,9 @@ mod delegated_access;
 #[path = "lifecycle.rs"]
 mod lifecycle;
 
+#[path = "s3_access.rs"]
+mod s3_access;
+
 struct FakeSocketEventSink {
     delivered: tokio::sync::mpsc::UnboundedSender<serde_json::Value>,
 }

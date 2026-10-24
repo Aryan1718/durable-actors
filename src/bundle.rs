@@ -1,3 +1,4 @@
+pub(crate) mod s3;
 #[cfg(test)]
 #[path = "../tests/unit/bundle.rs"]
 mod tests;
@@ -126,8 +127,17 @@ async fn install_file(
     artifact: &BundleFile,
     chunks: impl Stream<Item = Result<Bytes>>,
 ) -> Result<()> {
-    validate_path(&artifact.path)?;
-    let destination = root.join(&artifact.path);
+    install_verified_file(root, &artifact.path, &artifact.sha256, chunks).await
+}
+
+async fn install_verified_file(
+    root: &Path,
+    path: &str,
+    sha256: &str,
+    chunks: impl Stream<Item = Result<Bytes>>,
+) -> Result<()> {
+    validate_path(path)?;
+    let destination = root.join(path);
     let parent = destination.parent().context("artifact parent missing")?;
     tokio::fs::create_dir_all(parent).await?;
     let temporary = tempfile::NamedTempFile::new_in(parent)?;
@@ -140,7 +150,7 @@ async fn install_file(
     }
     file.flush().await?;
     ensure!(
-        URL_SAFE_NO_PAD.encode(hash.finish().as_ref()) == artifact.sha256,
+        URL_SAFE_NO_PAD.encode(hash.finish().as_ref()) == sha256,
         "artifact digest mismatch"
     );
     drop(file);

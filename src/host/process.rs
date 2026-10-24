@@ -607,6 +607,7 @@ fn executor_command(generic: bool, socket: &str, runtime: ActorRuntime) -> Comma
         ]);
         command
     };
+    configure_executor_environment(&mut command, std::env::vars_os());
     command
         .env(
             "DURABLE_ACTORS_GENERIC_EXECUTOR",
@@ -617,15 +618,32 @@ fn executor_command(generic: bool, socket: &str, runtime: ActorRuntime) -> Comma
             "DURABLE_ACTORS_HOST_STARTUP_MS",
             EXECUTOR_STARTUP_TIMEOUT.as_millis().to_string(),
         )
-        .env_remove("DURABLE_ACTORS_SPARE_TOKEN")
-        .env_remove("DURABLE_ACTORS_RUNTIME_CONFIG")
-        .env_remove("DURABLE_ACTORS_HOST_TOKEN")
-        .env_remove("GOOGLE_APPLICATION_CREDENTIALS")
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         .kill_on_drop(true);
     command
+}
+
+fn configure_executor_environment(
+    command: &mut Command,
+    inherited: impl IntoIterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) {
+    command
+        .env_clear()
+        .envs(inherited.into_iter().filter(|(name, _)| {
+            let name = name.to_string_lossy().to_ascii_uppercase();
+            !name.starts_with("AWS_")
+                && !matches!(
+                    name.as_str(),
+                    "BOTO_CONFIG"
+                        | "BOTO_PATH"
+                        | "GOOGLE_APPLICATION_CREDENTIALS"
+                        | "DURABLE_ACTORS_SPARE_TOKEN"
+                        | "DURABLE_ACTORS_RUNTIME_CONFIG"
+                        | "DURABLE_ACTORS_HOST_TOKEN"
+                )
+        }));
 }
 
 #[cfg(test)]

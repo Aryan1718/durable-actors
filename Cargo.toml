@@ -45,6 +45,7 @@ google-cloud-storage = "=1.20.0"
 google-cloud-auth = "1.15.0"
 google-cloud-pubsub = "1.6.0"
 aws-sdk-s3 = { version = "=1.109.0", default-features = false, features = ["default-https-client", "rt-tokio", "rustls"] }
+aws-sdk-sts = { version = "=1.99.0", default-features = false, features = ["default-https-client", "rt-tokio", "rustls"] }
 aws-config = { version = "=1.8.8", default-features = false, features = ["credentials-process", "default-https-client", "rt-tokio", "sso"] }
 anyhow = "1.0.104"
 async-trait = "0.1.92"

@@ -170,13 +170,15 @@ async fn s3_bootstrap_with_code_keeps_scoped_artifact_access() -> Result<()> {
     let tokens = config.tokens.context("artifact token")?;
     assert_eq!(tokens.ownership.access_token, "artifact-token");
     assert_eq!(tokens.state.access_token, "artifact-token");
-    assert_eq!(
-        requests.lock().unwrap().as_slice(),
-        [code_rules(
-            "code",
-            &crate::bundle::ActorBundle::decode(&code)?
-        )?]
-    );
+    let refreshed = access.issue(&actor(), Some(&code)).await?.unwrap();
+    assert_eq!(refreshed.ownership.access_token, "artifact-token");
+    assert_eq!(refreshed.state.access_token, "artifact-token");
+    let rules = vec![rule(
+        "code",
+        "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/".into(),
+        Permissions::OBJECT_VIEWER,
+    )];
+    assert_eq!(requests.lock().unwrap().as_slice(), [rules.clone(), rules]);
     Ok(())
 }
 

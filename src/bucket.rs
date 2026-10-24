@@ -1,4 +1,5 @@
 pub(crate) mod access;
+pub(crate) mod aws_access;
 mod file;
 mod gcs;
 mod rapid;
