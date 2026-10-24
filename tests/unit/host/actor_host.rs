@@ -1383,12 +1383,72 @@ async fn activation_reuses_recovered_bytes_and_publishes_readiness_without_a_wri
     Ok(())
 }
 
+#[tokio::test]
+async fn early_database_preparation_restores_once_without_hydrating_customer_code() -> Result<()> {
+    struct Executor(AtomicUsize);
+    #[async_trait]
+    impl ActorExecutor for Executor {
+        fn supports(&self, _: &str) -> bool {
+            true
+        }
+        async fn hydrate(&self, _: String, database: Arc<dyn ActorDatabase>) -> Result<()> {
+            assert_eq!(fields(&*database).await?, json!({"count": 41}));
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+        async fn invoke(
+            &self,
+            _: ActorMethodInvocation,
+            _: Arc<dyn ActorDatabase>,
+        ) -> Result<ActorMethodOutcome> {
+            unreachable!()
+        }
+    }
+    let sqlite = crate::test_sqlite::snapshot(json!({"count": 41}))?;
+    let snapshot = StateSnapshot::new(3, 6, "previous".into(), sqlite, json!(41))?.encode()?;
+    let authority = Arc::new(FakeAuthority {
+        activation_state: Some(snapshot),
+        ..Default::default()
+    });
+    let endpoint = HostEndpoint {
+        id: super::super::HostId::new("prepared-host"),
+        route: "http://host".into(),
+    };
+    let database = HostDatabase::new(
+        endpoint.clone(),
+        authority.clone(),
+        Arc::new(FakeStateTransport::default()),
+        replication().await,
+    );
+    let executor = Arc::new(Executor(AtomicUsize::new(0)));
+    for _ in 0..2 {
+        assert!(matches!(
+            database.activate().await?,
+            PreparedActivation::Hydrate { .. }
+        ));
+    }
+    assert_eq!(executor.0.load(Ordering::SeqCst), 0);
+    let host = ActorHost::new(
+        endpoint,
+        counter(),
+        executor.clone(),
+        database,
+        Arc::new(EmptySocketPublisher),
+    );
+    assert_eq!(host.activate().await?.state_version, 3);
+    host.activate().await?;
+    assert_eq!(executor.0.load(Ordering::SeqCst), 1);
+    assert_eq!(authority.sqlite_reads.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
 #[derive(Default)]
 struct FakeAuthority {
     persisted: Option<Arc<FakeStateTransport>>,
     history: std::collections::HashMap<String, bytes::Bytes>,
     fenced: std::sync::atomic::AtomicBool,
     loads: AtomicUsize,
+    sqlite_reads: AtomicUsize,
     initial_state: Option<(u64, bytes::Bytes)>,
     activation_state: Option<bytes::Bytes>,
     preparations: Mutex<Vec<u64>>,
@@ -1433,6 +1493,7 @@ impl ActorStorage for FakeAuthority {
         Ok(self.initial_state.clone().unwrap_or_default())
     }
     async fn read_sqlite(&self, bytes: &[u8]) -> Result<crate::state_log::SqliteSnapshot> {
+        self.sqlite_reads.fetch_add(1, Ordering::SeqCst);
         let snapshot = StateSnapshot::decode(bytes)?;
         let object = crate::storage::snapshot_object_name(
             &counter(),
@@ -1443,6 +1504,7 @@ impl ActorStorage for FakeAuthority {
             &mut FakeHistory(&self.history),
             &object,
             bytes::Bytes::copy_from_slice(bytes),
+            None,
         )
         .await?
         .sqlite)

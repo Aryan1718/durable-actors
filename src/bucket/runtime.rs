@@ -64,6 +64,7 @@ pub struct OwnershipHint {
 pub struct LoadedActor {
     pub placement: ObjectPlacement,
     pub state: Option<Bytes>,
+    pub(crate) checkpoint: Option<super::recovery::PrefetchedCheckpoint>,
 }
 
 #[derive(Default)]
@@ -145,7 +146,18 @@ impl RuntimeStorageReader {
         object: &str,
         bytes: Bytes,
     ) -> Result<crate::state_log::SqliteSnapshot> {
-        self.snapshots.restore(object, bytes).await
+        self.read_sqlite_prefetched(object, bytes, None).await
+    }
+
+    pub(crate) async fn read_sqlite_prefetched(
+        &self,
+        object: &str,
+        bytes: Bytes,
+        checkpoint: Option<super::recovery::PrefetchedCheckpoint>,
+    ) -> Result<crate::state_log::SqliteSnapshot> {
+        self.snapshots
+            .restore_prefetched(object, bytes, checkpoint)
+            .await
     }
 
     pub(crate) fn new(
@@ -294,6 +306,7 @@ impl RuntimeStorage {
         LoadedActor {
             placement,
             state: snapshot.map(|s| s.bytes),
+            checkpoint: None,
         }
     }
 

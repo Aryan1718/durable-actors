@@ -23,6 +23,7 @@ pub(super) struct DatabaseSession {
     state: Arc<dyn crate::state_transport::SnapshotWriter>,
     replication: Arc<dyn Replicator>,
     cached_state: Option<ResidentDatabase>,
+    prepared_activation: Option<ActorActivation>,
     activation: Option<ActorActivation>,
 }
 
@@ -39,6 +40,7 @@ impl DatabaseSession {
             state,
             replication,
             cached_state: None,
+            prepared_activation: None,
             activation: None,
         }
     }
@@ -185,9 +187,14 @@ impl DatabaseSession {
     }
 
     pub(super) async fn prepare_activation(&mut self) -> Result<PreparedActivation> {
+        let prepared = self.prepared_activation.take();
         self.storage.ensure_authority()?;
         if let Some(activation) = &self.activation {
             return Ok(PreparedActivation::Completed(activation.clone()));
+        }
+        if let Some(activation) = prepared {
+            self.prepared_activation = Some(activation.clone());
+            return Ok(PreparedActivation::Hydrate { activation });
         }
         let mut activation = self.storage.acquire_actor().await?;
         if self.cached_state.is_none() {
@@ -207,6 +214,8 @@ impl DatabaseSession {
             };
             self.cached_state = Some(cached);
         }
+        self.storage.ensure_authority()?;
+        self.prepared_activation = Some(activation.clone());
         Ok(PreparedActivation::Hydrate { activation })
     }
 
@@ -215,6 +224,7 @@ impl DatabaseSession {
         mut activation: ActorActivation,
         result: Result<()>,
     ) -> Result<ActorActivation> {
+        self.prepared_activation = None;
         result?;
         self.storage.ensure_authority()?;
         let cached = self
@@ -269,6 +279,7 @@ impl DatabaseSession {
 
     pub(super) fn reset(&mut self) {
         self.cached_state = None;
+        self.prepared_activation = None;
         self.activation = None;
     }
     async fn take_or_load_state(

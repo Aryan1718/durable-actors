@@ -8,6 +8,11 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
 
+pub(crate) struct PrefetchedCheckpoint {
+    pub source: SnapshotRef,
+    pub bytes: Option<Bytes>,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct Checkpoint {
     pub source: SnapshotRef,
@@ -31,18 +36,25 @@ pub(crate) async fn resolve(
     history: &mut dyn SnapshotHistory,
     object: &str,
     bytes: Bytes,
+    prefetched: Option<PrefetchedCheckpoint>,
 ) -> Result<ResolvedSqlite> {
     let mut current = StateSnapshot::decode(&bytes)?;
     current.validate_object(object)?;
     let txid = current.sqlite.txid;
     let mut reference = SnapshotRef::new(object.into(), &current, &bytes);
+    let mut prefetched = prefetched.filter(|checkpoint| checkpoint.source == reference);
     let mut segments = Vec::new();
     let mut checkpoint = false;
     let mut parents = 0;
     loop {
-        if current.sqlite.parent.is_some()
-            && let Some(bytes) = history.checkpoint(&reference.object).await?
-        {
+        let checkpoint_bytes = if current.sqlite.parent.is_none() {
+            None
+        } else if let Some(checkpoint) = prefetched.take() {
+            checkpoint.bytes
+        } else {
+            history.checkpoint(&reference.object).await?
+        };
+        if let Some(bytes) = checkpoint_bytes {
             let sqlite = Checkpoint::decode(&bytes, &reference, current.sqlite.txid)
                 .with_context(|| format!("validate checkpoint for {}", reference.object))?;
             checkpoint = true;

@@ -6,6 +6,8 @@ use crate::host_leases::HostLeaseRequest;
 #[derive(Default)]
 struct ActivationRecovery {
     snapshot: Option<LoadedSnapshot>,
+    checkpoint: Option<super::super::recovery::PrefetchedCheckpoint>,
+    checkpoint_ms: Option<f64>,
     session_ms: Option<f64>,
     snapshot_ms: Option<f64>,
 }
@@ -44,39 +46,59 @@ impl RuntimeStorage {
                 self.load(&actor.storage_key()).await?
             };
             let ownership_read_ms = read_started.elapsed().as_secs_f64() * 1_000.0;
-            let recovery = self
-                .recover_activation(
-                    actor,
-                    request,
-                    region,
-                    current.as_ref().map(|(_, record)| record),
-                )
-                .await?;
-            let mut record = Ownership {
-                persistence: self.persistence.clone(),
-                sealed: false,
-                actor: actor.clone(),
-                epoch: current
-                    .as_ref()
-                    .map_or(Some(1), |(_, record)| record.epoch.checked_add(1))
-                    .context("owner epoch overflow")?,
-                region: region.into(),
-                base: recovery
-                    .snapshot
-                    .as_ref()
-                    .map(|snapshot| snapshot.reference.clone()),
-                lease: self.new_lease(request)?,
-                mutation: String::new(),
-            };
-            let write_started = Instant::now();
-            if !self
-                .replace_activation(&mut record, current.map(|(generation, _)| generation))
-                .await?
-            {
+            let previous = current.as_ref().map(|(_, record)| record);
+            self.validate_activation(actor, request, region, previous)?;
+            let mut record = self.activation_record(actor, request, region, previous)?;
+            let (recovery, replaced, ownership_cas_ms) =
+                if previous.is_none_or(|record| record.sealed) {
+                    // A sealed base is immutable; only the CAS winner may adopt the downloaded state.
+                    let (recovery, replaced) = tokio::join!(
+                        self.recover_activation(previous),
+                        self.claim_activation(
+                            &mut record,
+                            current.as_ref().map(|(generation, _)| *generation)
+                        ),
+                    );
+                    let (replaced, elapsed) = replaced?;
+                    (recovery, replaced, elapsed)
+                } else {
+                    let recovery = self.recover_activation(previous).await?;
+                    record.base = recovery
+                        .snapshot
+                        .as_ref()
+                        .map(|snapshot| snapshot.reference.clone());
+                    let (replaced, elapsed) = self
+                        .claim_activation(
+                            &mut record,
+                            current.as_ref().map(|(generation, _)| *generation),
+                        )
+                        .await?;
+                    (Ok(recovery), replaced, elapsed)
+                };
+            if !replaced {
                 ensure!(hint.is_some(), "actor activation changed concurrently");
                 continue;
             }
-            let ownership_cas_ms = write_started.elapsed().as_secs_f64() * 1_000.0;
+            let recovery = match recovery {
+                Ok(recovery) => recovery,
+                Err(error) => {
+                    let checkpoint = SessionCheckpoint {
+                        snapshot: record.base.clone(),
+                    };
+                    if let Err(release) = self
+                        .release_with_checkpoint(
+                            actor,
+                            &request.id,
+                            &request.session_id,
+                            Some(checkpoint),
+                        )
+                        .await
+                    {
+                        tracing::warn!(%release, "failed activation lease release deferred to recovery");
+                    }
+                    return Err(error);
+                }
+            };
             let stream_started = Instant::now();
             self.snapshots.start(&record.stream()?).await?;
             let stream_open_ms = stream_started.elapsed().as_secs_f64() * 1_000.0;
@@ -93,10 +115,13 @@ impl RuntimeStorage {
                 stream_open_ms,
                 session_recovery_ms = recovery.session_ms,
                 snapshot_load_ms = recovery.snapshot_ms,
-                ownership_write_ms = write_started.elapsed().as_secs_f64() * 1_000.0,
+                checkpoint_prefetch_ms = recovery.checkpoint_ms,
+                ownership_write_ms = ownership_cas_ms + stream_open_ms,
                 duration_ms = started.elapsed().as_secs_f64() * 1_000.0,
             );
-            return Ok(self.remember(record, recovery.snapshot));
+            let mut loaded = self.remember(record, recovery.snapshot);
+            loaded.checkpoint = recovery.checkpoint;
+            return Ok(loaded);
         }
         anyhow::bail!("actor activation changed concurrently")
     }
@@ -182,15 +207,15 @@ impl RuntimeStorage {
         anyhow::bail!("actor activation kept changing during release")
     }
 
-    async fn recover_activation(
+    fn validate_activation(
         &self,
         actor: &ActorKey,
         request: &HostLeaseRequest,
         region: &str,
         current: Option<&Ownership>,
-    ) -> Result<ActivationRecovery> {
+    ) -> Result<()> {
         let Some(record) = current else {
-            return Ok(ActivationRecovery::default());
+            return Ok(());
         };
         ensure!(
             record.persistence.same_backend(&self.persistence),
@@ -208,13 +233,46 @@ impl RuntimeStorage {
             record.lease.expires_at_ms <= self.clock.now_ms()?,
             "previous owner lease is still active"
         );
+        Ok(())
+    }
+
+    fn activation_record(
+        &self,
+        actor: &ActorKey,
+        request: &HostLeaseRequest,
+        region: &str,
+        current: Option<&Ownership>,
+    ) -> Result<Ownership> {
+        Ok(Ownership {
+            persistence: self.persistence.clone(),
+            sealed: false,
+            actor: actor.clone(),
+            epoch: current
+                .map_or(Some(1), |record| record.epoch.checked_add(1))
+                .context("owner epoch overflow")?,
+            region: region.into(),
+            base: current.and_then(|record| record.base.clone()),
+            lease: self.new_lease(request)?,
+            mutation: String::new(),
+        })
+    }
+
+    async fn claim_activation(
+        &self,
+        record: &mut Ownership,
+        generation: Option<i64>,
+    ) -> Result<(bool, f64)> {
+        let started = Instant::now();
+        let replaced = self.replace_activation(record, generation).await?;
+        Ok((replaced, started.elapsed().as_secs_f64() * 1_000.0))
+    }
+
+    async fn recover_activation(&self, current: Option<&Ownership>) -> Result<ActivationRecovery> {
+        let Some(record) = current else {
+            return Ok(ActivationRecovery::default());
+        };
         if record.sealed {
-            let started = Instant::now();
-            return Ok(ActivationRecovery {
-                snapshot: self.load_latest(record, None).await?,
-                snapshot_ms: Some(started.elapsed().as_secs_f64() * 1_000.0),
-                session_ms: None,
-            });
+            return self.recover_sealed_activation(record).await;
         }
         let started = Instant::now();
         let recovered = self
@@ -227,8 +285,59 @@ impl RuntimeStorage {
         Ok(ActivationRecovery {
             snapshot,
             session_ms: Some(started.elapsed().as_secs_f64() * 1_000.0),
-            snapshot_ms: None,
+            ..ActivationRecovery::default()
         })
+    }
+
+    async fn recover_sealed_activation(&self, record: &Ownership) -> Result<ActivationRecovery> {
+        let snapshot = self.load_activation_snapshot(record);
+        let checkpoint = self.prefetch_activation_checkpoint(record);
+        tokio::pin!(snapshot, checkpoint);
+        let (mut recovery, (checkpoint, checkpoint_ms)) = tokio::select! {
+            result = &mut snapshot => {
+                let recovery = result?;
+                let needs_checkpoint = match &recovery.snapshot {
+                    Some(snapshot) => crate::state_log::StateSnapshot::decode(&snapshot.bytes)?.sqlite.parent.is_some(),
+                    None => false,
+                };
+                if !needs_checkpoint {
+                    return Ok(recovery);
+                }
+                (recovery, checkpoint.await)
+            }
+            checkpoint = &mut checkpoint => (snapshot.await?, checkpoint),
+        };
+        recovery.checkpoint = checkpoint;
+        recovery.checkpoint_ms = Some(checkpoint_ms);
+        Ok(recovery)
+    }
+
+    async fn load_activation_snapshot(&self, record: &Ownership) -> Result<ActivationRecovery> {
+        let started = Instant::now();
+        let snapshot = self.load_latest(record, None).await?;
+        Ok(ActivationRecovery {
+            snapshot,
+            snapshot_ms: Some(started.elapsed().as_secs_f64() * 1_000.0),
+            ..ActivationRecovery::default()
+        })
+    }
+
+    async fn prefetch_activation_checkpoint(
+        &self,
+        record: &Ownership,
+    ) -> (Option<super::super::recovery::PrefetchedCheckpoint>, f64) {
+        let started = Instant::now();
+        let checkpoint = match &record.base {
+            Some(base) => match self.snapshots.prefetch_checkpoint(base).await {
+                Ok(checkpoint) => checkpoint,
+                Err(error) => {
+                    tracing::warn!(%error, "checkpoint prefetch deferred to SQLite recovery");
+                    None
+                }
+            },
+            None => None,
+        };
+        (checkpoint, started.elapsed().as_secs_f64() * 1_000.0)
     }
 
     fn new_lease(&self, request: &HostLeaseRequest) -> Result<HostLease> {

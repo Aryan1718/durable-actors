@@ -270,6 +270,9 @@ async fn prepare_actor_host(
         .await?
         .with_activation(assignment.new_actor, assignment.owner_hint.clone()),
     );
+    let persistence = super::persistence::ActorPersistence::new(storage.clone());
+    let database =
+        super::HostDatabase::new(endpoint.clone(), storage.clone(), persistence, replication);
     let started = timings.started_at;
     let storage_ready = async {
         let result = prepare_storage(
@@ -280,6 +283,11 @@ async fn prepare_actor_host(
         )
         .await;
         timings.storage_ready_at_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
+        let (lease, renewal) = result?;
+        let result = prepare_database(&database, lease, renewal).await;
+        if result.is_ok() {
+            timings.database_ready_at_ms = Some(started.elapsed().as_secs_f64() * 1_000.0);
+        }
         result
     };
     let executor_ready = async {
@@ -324,9 +332,6 @@ async fn prepare_actor_host(
         storage.clone(),
         control_plane.clone(),
     ));
-    let persistence = super::persistence::ActorPersistence::new(storage.clone());
-    let database =
-        super::HostDatabase::new(endpoint.clone(), storage.clone(), persistence, replication);
     let host = Arc::new(
         ActorHost::new(
             endpoint,
@@ -375,6 +380,19 @@ async fn prepare_storage(
     Ok((lease, renewal))
 }
 
+async fn prepare_database(
+    database: &super::HostDatabase,
+    lease: Arc<HostLeaseMaintainer>,
+    renewal: LeaseRenewalTask,
+) -> Result<(Arc<HostLeaseMaintainer>, LeaseRenewalTask)> {
+    if let Err(error) = database.activate().await {
+        let _ = lease.unregister().await;
+        let _ = renewal.shutdown().await;
+        return Err(error);
+    }
+    Ok((lease, renewal))
+}
+
 async fn bind_host_listener(
     network: &HostNetwork,
     host_id: &HostId,
@@ -412,6 +430,7 @@ pub(super) struct HostStartupTimings {
     authentication_ready_at_ms: Option<f64>,
     control_plane_ready_at_ms: Option<f64>,
     storage_ready_at_ms: Option<f64>,
+    database_ready_at_ms: Option<f64>,
     executor_ready_at_ms: Option<f64>,
     replication_ready_at_ms: Option<f64>,
     javascript_spawned_at_ms: Option<f64>,
@@ -427,6 +446,7 @@ impl HostStartupTimings {
             authentication_ready_at_ms: None,
             control_plane_ready_at_ms: None,
             storage_ready_at_ms: None,
+            database_ready_at_ms: None,
             executor_ready_at_ms: None,
             replication_ready_at_ms: None,
             javascript_spawned_at_ms: None,
@@ -460,6 +480,7 @@ fn log_startup(
         authentication_ready_at_ms = timings.authentication_ready_at_ms,
         control_plane_ready_at_ms = timings.control_plane_ready_at_ms,
         storage_ready_at_ms = timings.storage_ready_at_ms,
+        database_ready_at_ms = timings.database_ready_at_ms,
         executor_ready_at_ms = timings.executor_ready_at_ms,
         replication_ready_at_ms = timings.replication_ready_at_ms,
         javascript_spawned_at_ms = timings.javascript_spawned_at_ms,

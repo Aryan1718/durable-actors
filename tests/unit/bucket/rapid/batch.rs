@@ -194,6 +194,26 @@ async fn checkpoints_compact_sqlite_history_for_cold_recovery() -> Result<()> {
         .restore(&f.stream.object(35), history[34].clone())
         .await?;
     assert_eq!(archive.read_requests.load(Ordering::SeqCst), 1);
+    let source = f.stream.snapshot(&history[34])?;
+    let prefetched = reader.prefetch_checkpoint(&source).await?;
+    let requests = archive.read_requests.load(Ordering::SeqCst);
+    let prepared = reader
+        .restore_prefetched(&source.object, history[34].clone(), prefetched)
+        .await?;
+    assert_eq!(archive.read_requests.load(Ordering::SeqCst), requests);
+    assert_eq!(prepared.txid, sqlite.txid);
+    assert_eq!(prepared.files.len(), 1);
+    let mut corrupt = reader.prefetch_checkpoint(&source).await?.unwrap();
+    let mut checkpoint: crate::bucket::recovery::Checkpoint =
+        serde_json::from_slice(corrupt.bytes.as_ref().unwrap())?;
+    checkpoint.source.digest = "incorrect".into();
+    corrupt.bytes = Some(crate::payload::encode(&checkpoint)?);
+    assert!(
+        reader
+            .restore_prefetched(&source.object, history[34].clone(), Some(corrupt))
+            .await
+            .is_err()
+    );
     assert!(sqlite.parent.is_none());
     assert_eq!(sqlite.files.len(), 1);
     let original_size: usize = history

@@ -38,6 +38,7 @@ pub(crate) struct HostStorage {
     new_actor: bool,
     owner_hint: Option<crate::bucket::OwnershipHint>,
     activation: Mutex<Option<ActorActivation>>,
+    checkpoint: Mutex<Option<crate::bucket::recovery::PrefetchedCheckpoint>>,
     fence: Mutex<LeaseFence>,
     lease: Mutex<Option<HostLease>>,
     renewal: tokio::sync::Mutex<()>,
@@ -87,6 +88,7 @@ impl HostStorage {
             new_actor: false,
             owner_hint: None,
             activation: Mutex::new(None),
+            checkpoint: Mutex::new(None),
             fence: Mutex::new(LeaseFence::default()),
             lease: Mutex::new(None),
             renewal: tokio::sync::Mutex::new(()),
@@ -290,8 +292,9 @@ impl ActorStorage for HostStorage {
             snapshot.state_version,
             &format!("{:032x}", snapshot.owner_epoch),
         )?;
+        let checkpoint = self.checkpoint.lock().unwrap().take();
         self.runtime
-            .read_sqlite(&object, bytes::Bytes::copy_from_slice(bytes))
+            .read_sqlite_prefetched(&object, bytes::Bytes::copy_from_slice(bytes), checkpoint)
             .await
     }
 
@@ -341,6 +344,7 @@ impl HostLeaseRegistry for HostStorage {
                 )
                 .await?;
             let lease = loaded.placement.lease;
+            *self.checkpoint.lock().unwrap() = loaded.checkpoint;
             *self.activation.lock().unwrap() = Some(ActorActivation {
                 owner_epoch: loaded.placement.owner_epoch,
                 state_version: loaded.placement.state_version,

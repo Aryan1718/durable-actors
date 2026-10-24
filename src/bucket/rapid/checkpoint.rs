@@ -6,7 +6,12 @@ use crate::storage::SnapshotRef;
 pub(super) const CHECKPOINT_INTERVAL: u64 = 32;
 
 impl LogStorage {
-    pub async fn restore(&self, object: &str, bytes: Bytes) -> Result<ResolvedSqlite> {
+    pub async fn restore(
+        &self,
+        object: &str,
+        bytes: Bytes,
+        checkpoint: Option<crate::bucket::recovery::PrefetchedCheckpoint>,
+    ) -> Result<ResolvedSqlite> {
         let started = std::time::Instant::now();
         tracing::info!(event = "sqlite_history_started", object);
         let mut history = LogHistory {
@@ -15,7 +20,7 @@ impl LogStorage {
             reads: 0,
             probes: 0,
         };
-        let resolved = resolve(&mut history, object, bytes).await?;
+        let resolved = resolve(&mut history, object, bytes, checkpoint).await?;
         tracing::info!(
             event = "sqlite_history_restored",
             object,
@@ -67,7 +72,7 @@ impl LogStorage {
             return Ok(());
         }
         let sqlite = self
-            .restore(object, bytes)
+            .restore(object, bytes, None)
             .await
             .context("resolve checkpoint inputs")?
             .sqlite;

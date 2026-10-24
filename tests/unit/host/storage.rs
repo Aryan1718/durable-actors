@@ -176,6 +176,7 @@ async fn host_storage(bucket: Arc<MemoryBucket>) -> Result<HostStorage> {
         new_actor: true,
         owner_hint: None,
         activation: Mutex::new(None),
+        checkpoint: Mutex::new(None),
         fence: Mutex::new(LeaseFence::default()),
         lease: Mutex::new(None),
         renewal: tokio::sync::Mutex::new(()),

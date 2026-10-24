@@ -913,3 +913,169 @@ impl crate::bucket::SnapshotStore for RejectingSnapshots {
         self.inner.put(object, bytes).await
     }
 }
+
+type SnapshotGate = (Arc<tokio::sync::Semaphore>, Arc<tokio::sync::Semaphore>);
+
+struct PausedSnapshots {
+    inner: crate::bucket::BucketSnapshots,
+    gates: [Mutex<Option<SnapshotGate>>; 2],
+    downloaded: tokio::sync::Semaphore,
+    starts: AtomicU64,
+    reject_head: AtomicBool,
+}
+
+async fn pause_snapshot(gate: &Mutex<Option<SnapshotGate>>) -> Result<()> {
+    let pending = gate.lock().unwrap().take();
+    if let Some((entered, resume)) = pending {
+        entered.add_permits(1);
+        resume.acquire().await?.forget();
+    }
+    Ok(())
+}
+
+#[async_trait]
+impl crate::bucket::SnapshotStore for PausedSnapshots {
+    async fn get(&self, object: &str) -> Result<Option<Bytes>> {
+        pause_snapshot(&self.gates[0]).await?;
+        ensure!(
+            !self.reject_head.load(Ordering::SeqCst),
+            "head download failed"
+        );
+        let bytes = self.inner.get(object).await?;
+        self.downloaded.add_permits(1);
+        Ok(bytes)
+    }
+    async fn prefetch_checkpoint(
+        &self,
+        source: &SnapshotRef,
+    ) -> Result<Option<crate::bucket::recovery::PrefetchedCheckpoint>> {
+        pause_snapshot(&self.gates[1]).await?;
+        Ok(Some(crate::bucket::recovery::PrefetchedCheckpoint {
+            source: source.clone(),
+            bytes: None,
+        }))
+    }
+    async fn list(&self, prefix: &str) -> Result<Vec<String>> {
+        self.inner.list(prefix).await
+    }
+    async fn latest(&self, prefix: &str) -> Result<Option<(String, Bytes)>> {
+        self.inner.latest(prefix).await
+    }
+    async fn put(&self, object: &str, bytes: Bytes) -> Result<()> {
+        self.inner.put(object, bytes).await
+    }
+    async fn start(&self, _: &StateStream) -> Result<()> {
+        self.starts.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+async fn sealed_activation() -> Result<(Fixture, Arc<PausedSnapshots>, OwnershipHint)> {
+    let mut f = Fixture::new()?;
+    let snapshots = Arc::new(PausedSnapshots {
+        inner: crate::bucket::BucketSnapshots(f.bucket.clone()),
+        gates: [Mutex::new(None), Mutex::new(None)],
+        downloaded: tokio::sync::Semaphore::new(0),
+        starts: AtomicU64::new(0),
+        reject_head: AtomicBool::new(false),
+    });
+    f.runtime = f
+        .runtime
+        .with_persistence(crate::bucket::SnapshotStoreConfig::Local, snapshots.clone())?;
+    let first = request("first");
+    f.runtime
+        .register_activation(&f.actor, &first, "us-east", true, None)
+        .await?;
+    let snapshot = crate::state_log::StateSnapshot::new(
+        1,
+        1,
+        "committed".into(),
+        crate::test_sqlite::snapshot(serde_json::json!({"count":42}))?,
+        serde_json::json!(42),
+    )?;
+    let bytes = snapshot.encode()?;
+    let object = snapshot_object_name(&f.actor, 1, &format!("{:032x}", 1))?;
+    crate::bucket::SnapshotStore::put(&snapshots.inner, &object, bytes.clone()).await?;
+    f.runtime
+        .release_with_checkpoint(
+            &f.actor,
+            &first.id,
+            &first.session_id,
+            Some(SessionCheckpoint {
+                snapshot: Some(SnapshotRef::new(object, &snapshot, &bytes)),
+            }),
+        )
+        .await?;
+    let (_, hint) = f
+        .runtime
+        .get_owner_with_hint(&f.actor.storage_key())
+        .await?;
+    snapshots.starts.store(0, Ordering::SeqCst);
+    Ok((f, snapshots, hint.unwrap()))
+}
+
+#[tokio::test]
+async fn sealed_activation_overlaps_ownership_head_and_checkpoint_but_waits_to_open_the_stream()
+-> Result<()> {
+    let (f, snapshots, hint) = sealed_activation().await?;
+    let gates: Vec<SnapshotGate> = (0..3)
+        .map(|_| {
+            (
+                Arc::new(tokio::sync::Semaphore::new(0)),
+                Arc::new(tokio::sync::Semaphore::new(0)),
+            )
+        })
+        .collect();
+    *f.bucket.delay_write.lock().unwrap() = Some(gates[0].clone());
+    *snapshots.gates[0].lock().unwrap() = Some(gates[1].clone());
+    *snapshots.gates[1].lock().unwrap() = Some(gates[2].clone());
+    let next = request("next");
+    let activated = tokio::time::timeout(Duration::from_secs(5), async {
+        let control = async {
+            for (entered, _) in &gates {
+                entered.acquire().await?.forget();
+            }
+            for (_, resume) in &gates[1..] {
+                resume.add_permits(1);
+            }
+            snapshots.downloaded.acquire().await?.forget();
+            assert_eq!(snapshots.starts.load(Ordering::SeqCst), 0);
+            gates[0].1.add_permits(1);
+            anyhow::Ok(())
+        };
+        let (loaded, controlled) = tokio::join!(
+            f.runtime
+                .register_activation(&f.actor, &next, "us-east", false, Some(&hint)),
+            control,
+        );
+        controlled?;
+        loaded
+    })
+    .await??;
+    assert_eq!(activated.placement.owner_epoch, 2);
+    assert_eq!(activated.placement.state_version, 1);
+    assert_eq!(snapshots.starts.load(Ordering::SeqCst), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_sealed_download_releases_its_claim_and_preserves_the_durable_base() -> Result<()> {
+    let (f, snapshots, hint) = sealed_activation().await?;
+    snapshots.reject_head.store(true, Ordering::SeqCst);
+    let failed = f
+        .runtime
+        .register_activation(&f.actor, &request("failed"), "us-east", false, Some(&hint))
+        .await;
+    assert_eq!(failed.err().unwrap().to_string(), "head download failed");
+    assert_eq!(snapshots.starts.load(Ordering::SeqCst), 0);
+    let (_, released) = f
+        .runtime
+        .get_owner_with_hint(&f.actor.storage_key())
+        .await?;
+    let released = released.unwrap();
+    assert_eq!(released.record.epoch, 2);
+    assert!(released.record.sealed);
+    assert_eq!(released.record.lease.expires_at_ms, 0);
+    assert_eq!(released.record.base, hint.record.base);
+    Ok(())
+}
