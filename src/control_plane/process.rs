@@ -297,6 +297,7 @@ async fn control_plane_routes(
     service.gateway = Some(gateway);
     service.region = config.region;
     service.lifecycle.start_reconciliation(stop.clone());
+    service.start_access_reconciliation(stop.clone());
     service.start_alarm_scheduler(config.alarm_poll_interval, stop);
     let inventory = Arc::new(super::socket_inventory::GatewayInventoryReader::new(
         Arc::new(service.lifecycle.clone()),

@@ -6,6 +6,9 @@ use crate::{
 };
 use std::sync::Mutex;
 
+#[path = "access.rs"]
+mod access_tests;
+
 #[tokio::test]
 async fn persisted_deployments_cold_start_on_the_current_runtime_without_redeployment() -> Result<()>
 {
@@ -466,6 +469,7 @@ fn contract() -> serde_json::Value {
 #[derive(Default)]
 struct Provider {
     retired: Mutex<Vec<String>>,
+    fail_termination: std::sync::atomic::AtomicBool,
 }
 
 #[async_trait]
@@ -481,6 +485,12 @@ impl SandboxProvider for Provider {
             .lock()
             .unwrap()
             .push(request.host_config_key.clone());
+        if self
+            .fail_termination
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            anyhow::bail!("temporary shutdown failure");
+        }
         Ok(HostTermination {
             provider: "test".into(),
             resource_ids: vec![],

@@ -112,6 +112,9 @@ impl SocketGateway {
         service: &ControlPlaneService,
         ticket: &SocketTicket,
     ) -> Result<ActorTarget> {
+        service
+            .ensure_project_access(&ticket.actor.project_id)
+            .await?;
         let route = self.route(&ticket.actor).await;
         let mut cached = route.lock().await;
         let now = crate::clock::Clock::now_ms(&crate::clock::SystemClock)? as i64;

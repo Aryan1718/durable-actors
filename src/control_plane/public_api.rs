@@ -47,6 +47,10 @@ pub(super) fn router(invocations: ControlPlaneService, admin: AdminService) -> R
     Router::new()
         .route("/openapi.yaml", get(openapi))
         .route("/healthz", get(health))
+        .route(
+            "/v1/organizations/{organization_id}/access",
+            put(set_organization_access),
+        )
         .route("/v1/projects/{project_id}/sessions", post(issue_session))
         .route(
             "/v1/projects/{project_id}/deployment",
@@ -99,6 +103,39 @@ async fn openapi() -> impl IntoResponse {
     )
 }
 
+async fn set_organization_access(
+    State(state): State<PublicApiState>,
+    Path(organization): Path<String>,
+    headers: HeaderMap,
+    request: Result<Json<AccessRequest>, JsonRejection>,
+) -> Result<(StatusCode, Json<AccessRequest>), ApiError> {
+    authorized_admin(&state.admin, &headers)?;
+    super::admin::validate_component("organization ID", &organization, 64)
+        .map_err(ApiError::bad_request)?;
+    let Json(request) = request.map_err(ApiError::json)?;
+    state
+        .admin
+        .set_organization_access(&organization, request.source, request.enabled)
+        .await
+        .map_err(ApiError::internal)?;
+    info!(
+        event = "access_updated",
+        organization_id = organization,
+        source = request.source.as_str(),
+        enabled = request.enabled,
+        "access setting updated"
+    );
+    Ok((StatusCode::ACCEPTED, Json(request)))
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AccessRequest {
+    enabled: bool,
+    #[serde(default)]
+    source: super::access::AccessSource,
+}
+
 async fn issue_session(
     State(state): State<PublicApiState>,
     path: Path<ProjectPath>,
@@ -115,6 +152,11 @@ async fn issue_session(
         )
         .map_err(|_| ApiError::unauthorized("administrative credential is required"))?;
     let project = project_id(path)?;
+    state
+        .invocations
+        .ensure_project_access(&project)
+        .await
+        .map_err(ApiError::access)?;
     let Json(request) = request.map_err(ApiError::json)?;
     let issued = state
         .admin
@@ -154,6 +196,11 @@ async fn find_websocket(
     request: Result<Json<FindWebSocketRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     authorized_admin(&state.admin, &headers)?;
+    state
+        .invocations
+        .ensure_project_access(&path.project_id)
+        .await
+        .map_err(ApiError::access)?;
     let Json(request) = request.map_err(ApiError::json)?;
     state
         .invocations
@@ -305,7 +352,13 @@ async fn register_deployment(
         .invocations
         .deploy_source(&state.admin, &spec, contract.as_ref())
         .await
-        .map_err(ApiError::bad_request)?;
+        .map_err(|error| {
+            if error.is::<super::access::AccessDisabled>() {
+                ApiError::access(error)
+            } else {
+                ApiError::bad_request(error)
+            }
+        })?;
     Ok(Json(DeploymentReply { changed }))
 }
 
@@ -578,10 +631,20 @@ impl ApiError {
     }
 
     pub(super) fn routing(error: anyhow::Error) -> Self {
-        if error.is::<super::service::RegionConflict>() {
+        if error.is::<super::access::AccessDisabled>() {
+            Self::access(error)
+        } else if error.is::<super::service::RegionConflict>() {
             Self::conflict(error.to_string())
         } else {
             Self::unavailable(format!("actor host is unavailable: {error:#}"))
+        }
+    }
+
+    pub(super) fn access(error: anyhow::Error) -> Self {
+        if error.is::<super::access::AccessDisabled>() {
+            Self::new(StatusCode::FORBIDDEN, "access_disabled", error.to_string())
+        } else {
+            Self::internal(error)
         }
     }
 

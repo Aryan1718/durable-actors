@@ -1,6 +1,7 @@
 use super::super::super::socket_gateway::{SocketEventReply, SocketEventRequest};
 use super::*;
 use crate::actor::{ActorSocketEffect, ActorSocketMessage};
+use crate::control_plane::access::AccessSource;
 use axum::{
     Json, Router,
     extract::State,
@@ -18,6 +19,70 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 
 #[path = "shutdown_routing.rs"]
 mod shutdown_routing;
+
+#[tokio::test]
+async fn suspension_rejects_cached_tickets_on_every_gateway_replica() -> Result<()> {
+    let fixture = Fixture::start(vec![]).await?;
+    let target: Value = fixture
+        .post("find-actor", "api-key", json!({}))
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let token = target["token"].as_str().unwrap();
+    let epoch = target["ownerEpoch"].as_u64().unwrap();
+    fixture
+        .admin
+        .set_organization_access("org-test", AccessSource::Admin, false)
+        .await?;
+    for origin in [&fixture.origin, &fixture.replica] {
+        for (endpoint, body) in [
+            (
+                "invoke",
+                json!({"requestId":"blocked","method":"clear","args":[],"ownerEpoch":epoch}),
+            ),
+            ("socket-effects", json!({"ownerEpoch":epoch,"effects":[]})),
+        ] {
+            assert_eq!(
+                post_actor(origin, endpoint, token, body).await?.status(),
+                StatusCode::FORBIDDEN
+            );
+        }
+    }
+    assert_eq!(fixture.host.calls.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn suspension_blocks_existing_websocket_routes_and_connection_tickets() -> Result<()> {
+    let fixture = Fixture::start(vec![]).await?;
+    let mut socket = fixture.connect().await?;
+    let grant: Value = fixture
+        .post("find-websocket", "api-key", json!({"metadata":{}}))
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    let before = fixture.host.socket_requests.lock().unwrap().len();
+    fixture
+        .admin
+        .set_organization_access("org-test", AccessSource::Admin, false)
+        .await?;
+    let error = tokio_tungstenite::connect_async(grant["websocketUrl"].as_str().unwrap())
+        .await
+        .unwrap_err();
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            assert_eq!(response.status(), StatusCode::FORBIDDEN)
+        }
+        error => panic!("unexpected handshake error: {error}"),
+    }
+    socket.send(Message::Text("{}".into())).await?;
+    let message = next_message(&mut socket).await?;
+    assert!(matches!(message, Message::Close(_)));
+    assert_eq!(fixture.host.socket_requests.lock().unwrap().len(), before);
+    Ok(())
+}
 
 #[tokio::test]
 async fn combined_invocation_resolves_and_dispatches_with_a_scoped_host_token() -> Result<()> {

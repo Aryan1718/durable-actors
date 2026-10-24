@@ -147,6 +147,11 @@ async fn invoke_cached(
     let (route, host, session) = gateway
         .invocation_route(&actor, epoch, authorization)
         .map_err(|_| ApiError::unauthorized("actor invocation credential was rejected"))?;
+    state
+        .invocations
+        .ensure_project_access(&actor.project_id)
+        .await
+        .map_err(ApiError::access)?;
     if state
         .invocations
         .lifecycle
@@ -212,6 +217,11 @@ pub(super) async fn publish(
             "actor invocation credential was rejected",
         ));
     }
+    state
+        .invocations
+        .ensure_project_access(&actor.project_id)
+        .await
+        .map_err(ApiError::access)?;
     crate::actor::validate_socket_effects(&request.effects).map_err(ApiError::bad_request)?;
 
     gateway

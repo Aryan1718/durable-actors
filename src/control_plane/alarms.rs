@@ -116,6 +116,9 @@ async fn claim_due(store: &dyn AlarmStore, limit: usize) -> Result<Vec<ClaimedAl
 async fn deliver(store: &dyn AlarmStore, delivery: &dyn AlarmDelivery, alarm: &ClaimedAlarm) {
     let actor = alarm.actor.storage_key();
     if let Err(error) = attempt_with_retries(delivery, alarm).await {
+        if error.is::<super::access::AccessDisabled>() {
+            return;
+        }
         tracing::warn!(error = %format!("{error:#}"), %actor, "alarm abandoned after retries");
     }
     if let Err(error) = store.finish(alarm).await {
@@ -131,6 +134,7 @@ async fn attempt_with_retries(delivery: &dyn AlarmDelivery, alarm: &ClaimedAlarm
                 .with_max_times(MAX_ATTEMPTS - 1)
                 .with_jitter(),
         )
+        .when(|error| !error.is::<super::access::AccessDisabled>())
         .await
 }
 
@@ -210,9 +214,13 @@ impl AlarmStore for PostgresAlarmStore {
             .prepare_cached(
                 "WITH due AS (
                     SELECT project_id, actor_name, actor_id
-                    FROM durable_actors_alarm
+                    FROM durable_actors_alarm a
                     WHERE timestamp_ms <= $1
                       AND (queued_at_ms IS NULL OR queued_at_ms <= $2)
+                      AND NOT EXISTS (
+                          SELECT 1 FROM durable_actors_organization_suspensions s
+                          WHERE s.organization_id = (
+                              SELECT organization_id FROM durable_actors_deployment WHERE project_id = a.project_id))
                     ORDER BY timestamp_ms
                     LIMIT $3
                     FOR UPDATE SKIP LOCKED

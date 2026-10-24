@@ -1,5 +1,60 @@
 use super::*;
 
+#[tokio::test]
+async fn organization_suspensions_persist_across_replicas_and_pause_alarms() -> Result<()> {
+    use crate::control_plane::alarms::{AlarmStore, PostgresAlarmStore};
+    use AccessSource::{Admin, Billing};
+    crate::postgres::testing::with_postgres(async |fixture| {
+        let database = PostgresDatabase::connect(&fixture.url).await?;
+        let registry = PostgresAdminRegistry::from_database(database.clone());
+        registry.register_test_deployment(&spec("image")).await?;
+        let alarms = PostgresAlarmStore::new(database);
+        let actor = crate::actor::ActorKey {
+            project_id: "default".into(),
+            actor_name: "Counter".into(),
+            actor_id: "one".into(),
+        };
+        alarms.update(&actor, Some(100)).await?;
+        for (held, cleared) in [(Admin, Billing), (Billing, Admin)] {
+            for _ in 0..2 {
+                registry
+                    .set_organization_access("org-test", held, false)
+                    .await?;
+                registry
+                    .set_organization_access("org-test", cleared, false)
+                    .await?;
+            }
+            let replica = PostgresAdminRegistry::from_database(
+                PostgresDatabase::connect(&fixture.url).await?,
+            );
+            for _ in 0..2 {
+                replica
+                    .set_organization_access("org-test", cleared, true)
+                    .await?;
+            }
+            assert!(!replica.project_access_enabled("default").await?);
+            assert!(
+                replica
+                    .organization_access_enabled(Some("other-org"))
+                    .await?
+            );
+            assert!(replica.organization_access_enabled(None).await?);
+            assert_eq!(replica.disabled_deployments().await?.len(), 1);
+            assert!(alarms.claim_due(100, 0, 100).await?.is_empty());
+            assert_eq!(alarms.get(&actor).await?, Some(100));
+            for _ in 0..2 {
+                replica
+                    .set_organization_access("org-test", held, true)
+                    .await?;
+            }
+            assert!(registry.project_access_enabled("default").await?);
+        }
+        assert_eq!(alarms.claim_due(100, 0, 100).await?.len(), 1);
+        Ok(())
+    })
+    .await
+}
+
 #[test]
 fn secret_changes_update_host_configuration() {
     let mut deployment = spec("image-1");

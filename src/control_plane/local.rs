@@ -383,6 +383,7 @@ async fn local_routes(
     )))
     .with_traces(storage.traces.clone());
     service.gateway = Some(gateway);
+    service.start_access_reconciliation(stop.clone());
     service.start_alarm_scheduler(super::alarms::DEFAULT_POLL_INTERVAL, stop);
     let admin = AdminService::new(options.api_key.clone(), registry, issuer)?;
     service.deploy_source(&admin, &spec, None).await?;

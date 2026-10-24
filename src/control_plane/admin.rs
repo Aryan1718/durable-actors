@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::Mutex,
 };
 
@@ -12,6 +12,7 @@ use subtle::ConstantTimeEq;
 use crate::postgres::PostgresDatabase;
 
 use super::ActorJwtIssuer;
+use super::access::AccessSource;
 use super::contracts::{PublicActorContract, PublishedContract, SandboxOptions};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -135,6 +136,30 @@ impl HostLaunchSpec {
 
 #[async_trait]
 pub(crate) trait AdminRegistry: Send + Sync {
+    async fn set_organization_access(
+        &self,
+        organization: &str,
+        source: AccessSource,
+        enabled: bool,
+    ) -> Result<()>;
+    async fn organization_access_enabled(&self, organization: Option<&str>) -> Result<bool>;
+    async fn project_access_enabled(&self, project: &str) -> Result<bool> {
+        let spec = self.launch_spec(project).await?;
+        self.organization_access_enabled(spec.as_ref().and_then(|s| s.organization_id.as_deref()))
+            .await
+    }
+    async fn disabled_deployments(&self) -> Result<Vec<HostLaunchSpec>> {
+        let mut disabled = Vec::new();
+        for spec in self.launch_specs().await? {
+            if !self
+                .organization_access_enabled(spec.organization_id.as_deref())
+                .await?
+            {
+                disabled.push(spec);
+            }
+        }
+        Ok(disabled)
+    }
     #[cfg(test)]
     async fn register_test_deployment(&self, spec: &HostLaunchSpec) -> Result<bool> {
         self.register_deployment(spec, None).await
@@ -269,6 +294,17 @@ impl AdminService {
         Ok(())
     }
 
+    pub(super) async fn set_organization_access(
+        &self,
+        organization: &str,
+        source: AccessSource,
+        enabled: bool,
+    ) -> Result<()> {
+        self.registry
+            .set_organization_access(organization, source, enabled)
+            .await
+    }
+
     #[cfg(test)]
     pub(crate) async fn register_test_deployment(&self, spec: &HostLaunchSpec) -> Result<bool> {
         self.registry.register_test_deployment(spec).await
@@ -308,6 +344,7 @@ impl AdminService {
 #[derive(Default)]
 pub(crate) struct LocalAdminRegistry {
     state: Mutex<HashMap<String, LocalAdminState>>,
+    suspensions: Mutex<HashSet<(String, AccessSource)>>,
     updates: tokio::sync::Mutex<()>,
 }
 
@@ -319,6 +356,37 @@ struct LocalAdminState {
 
 #[async_trait]
 impl AdminRegistry for LocalAdminRegistry {
+    async fn set_organization_access(
+        &self,
+        organization: &str,
+        source: AccessSource,
+        enabled: bool,
+    ) -> Result<()> {
+        let mut suspensions = self
+            .suspensions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("access registry lock poisoned"))?;
+        let hold = (organization.to_owned(), source);
+        if enabled {
+            suspensions.remove(&hold);
+        } else {
+            suspensions.insert(hold);
+        }
+        Ok(())
+    }
+
+    async fn organization_access_enabled(&self, organization: Option<&str>) -> Result<bool> {
+        let suspensions = self
+            .suspensions
+            .lock()
+            .map_err(|_| anyhow::anyhow!("access registry lock poisoned"))?;
+        Ok(organization.is_none_or(|id| {
+            !suspensions
+                .iter()
+                .any(|(organization, _)| organization == id)
+        }))
+    }
+
     async fn lock_deployment(&self, project_id: &str) -> Result<Box<dyn DeploymentUpdate + '_>> {
         Ok(Box::new(LocalDeploymentUpdate {
             registry: self,
@@ -420,6 +488,56 @@ impl PostgresAdminRegistry {
 
 #[async_trait]
 impl AdminRegistry for PostgresAdminRegistry {
+    async fn set_organization_access(
+        &self,
+        organization: &str,
+        source: AccessSource,
+        enabled: bool,
+    ) -> Result<()> {
+        let sql = if enabled {
+            "DELETE FROM durable_actors_organization_suspensions WHERE organization_id = $1 AND source = $2"
+        } else {
+            "INSERT INTO durable_actors_organization_suspensions (organization_id, source) VALUES ($1, $2) ON CONFLICT DO NOTHING"
+        };
+        self.database
+            .connection()
+            .await?
+            .execute(sql, &[&organization, &source.as_str()])
+            .await?;
+        Ok(())
+    }
+
+    async fn organization_access_enabled(&self, organization: Option<&str>) -> Result<bool> {
+        let row = self.database.connection().await?.query_one(
+            "SELECT NOT EXISTS (SELECT 1 FROM durable_actors_organization_suspensions WHERE organization_id = $1)",
+            &[&organization],
+        ).await?;
+        Ok(row.get(0))
+    }
+
+    async fn project_access_enabled(&self, project: &str) -> Result<bool> {
+        let row = self
+            .database
+            .connection()
+            .await?
+            .query_one(
+                "SELECT NOT EXISTS (SELECT 1 FROM durable_actors_organization_suspensions
+                 WHERE organization_id = (SELECT organization_id FROM durable_actors_deployment WHERE project_id = $1))",
+                &[&project],
+            )
+            .await?;
+        Ok(row.get(0))
+    }
+
+    async fn disabled_deployments(&self) -> Result<Vec<HostLaunchSpec>> {
+        self.database.connection().await?.query(
+            "SELECT image_ref, working_directory, actor_entrypoint, secret_refs, code_snapshot, source_json, project_id, sandbox_json, organization_id, image_policy
+             FROM durable_actors_deployment WHERE organization_id IN (
+                 SELECT organization_id FROM durable_actors_organization_suspensions)",
+            &[],
+        ).await?.iter().map(launch_spec_from_row).collect()
+    }
+
     async fn lock_deployment(&self, project_id: &str) -> Result<Box<dyn DeploymentUpdate + '_>> {
         let client = deadpool_postgres::Object::take(self.database.connection().await?);
         client

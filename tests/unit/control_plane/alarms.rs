@@ -132,6 +132,26 @@ async fn delivery_gives_up_and_finishes_after_max_attempts() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn suspended_deliveries_preserve_the_alarm_without_retries() -> Result<()> {
+    struct SuspendedDelivery(AtomicUsize);
+    #[async_trait]
+    impl AlarmDelivery for SuspendedDelivery {
+        async fn attempt(&self, _: &ClaimedAlarm) -> Result<()> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            Err(crate::control_plane::access::AccessDisabled.into())
+        }
+    }
+    let store = MemoryAlarmStore::default();
+    let alarm = due_alarm(&store).await?;
+    let delivery = SuspendedDelivery(AtomicUsize::new(0));
+    deliver(&store, &delivery, &alarm).await;
+    assert_eq!(delivery.0.load(Ordering::SeqCst), 1);
+    assert_eq!(store.get(&actor()).await?, Some(100));
+    assert_eq!(store.claim_due(400, 100, 1).await?, vec![alarm]);
+    Ok(())
+}
+
 async fn due_alarm(store: &MemoryAlarmStore) -> Result<ClaimedAlarm> {
     store.update(&actor(), Some(100)).await?;
     Ok(store.claim_due(100, 0, 1).await?.remove(0))

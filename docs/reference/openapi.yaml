@@ -23,6 +23,7 @@ tags:
     - name: Observability
     - name: WebSockets
     - name: Sessions
+    - name: Access
 paths:
     /openapi.yaml:
         get:
@@ -48,6 +49,23 @@ paths:
                     content:
                         text/plain:
                             schema: { type: string, const: ok }
+    /v1/organizations/{organization_id}/access:
+        parameters:
+            - name: organization_id
+              in: path
+              required: true
+              schema: { type: string, pattern: "^[A-Za-z0-9._-]{1,64}$" }
+        put:
+            operationId: setOrganizationAccess
+            tags: [Access]
+            summary: Suspend or restore organization access
+            description: Persists organization holds independently for admin and billing sources; source defaults to admin. Setting enabled to false adds that source's hold; true clears only that source's hold. Access is enabled only when neither source has a hold. Suspended organizations reject new work with access_disabled across all projects with this stored organizationId. A worker polls every five seconds to close sockets and terminate hosts, retrying failures after restarts. In-flight work may continue until termination. Saved state and pending alarms remain. An alarm claimed before suspension may wait for its five-minute claim to expire after restoration. Unknown organization IDs are accepted; deployments without organizationId are unaffected.
+            requestBody: { $ref: "#/components/requestBodies/Access" }
+            responses:
+                "202": { $ref: "#/components/responses/AccessAccepted" }
+                "400": { $ref: "#/components/responses/InvalidRequest" }
+                "401": { $ref: "#/components/responses/Unauthenticated" }
+                "500": { $ref: "#/components/responses/Internal" }
     /v1/projects/{project_id}/deployment:
         parameters:
             - { $ref: "#/components/parameters/ProjectId" }
@@ -81,6 +99,7 @@ paths:
                 "200": { $ref: "#/components/responses/Changed" }
                 "400": { $ref: "#/components/responses/InvalidRequest" }
                 "401": { $ref: "#/components/responses/Unauthenticated" }
+                "403": { $ref: "#/components/responses/AccessDisabled" }
                 "413": { $ref: "#/components/responses/PayloadTooLarge" }
         get:
             operationId: getDeployment
@@ -162,6 +181,7 @@ paths:
                                     expiresAtMs: { type: integer, format: int64 }
                 "400": { $ref: "#/components/responses/InvalidRequest" }
                 "401": { $ref: "#/components/responses/Unauthenticated" }
+                "403": { $ref: "#/components/responses/AccessDisabled" }
                 "404": { $ref: "#/components/responses/NotFound" }
                 "413": { $ref: "#/components/responses/PayloadTooLarge" }
                 "500": { $ref: "#/components/responses/Internal" }
@@ -181,7 +201,11 @@ paths:
                 "200": { $ref: "#/components/responses/ActorTarget" }
                 "400": { $ref: "#/components/responses/InvalidRequest" }
                 "401": { $ref: "#/components/responses/Unauthenticated" }
-                "403": { description: Actor has no published RPC methods. }
+                "403":
+                    description: Actor has no published RPC methods, or organization access is disabled (access_disabled).
+                    content:
+                        application/json:
+                            schema: { $ref: "#/components/schemas/Error" }
                 "404": { $ref: "#/components/responses/NotFound" }
                 "409": { $ref: "#/components/responses/Conflict" }
                 "413": { $ref: "#/components/responses/PayloadTooLarge" }
@@ -254,7 +278,11 @@ paths:
                                 notExecuted: { value: { type: not_executed, reason: host_unavailable } }
                 "400": { $ref: "#/components/responses/InvalidRequest" }
                 "401": { description: "API key, project session or host ticket rejected before dispatch." }
-                "403": { description: "Host ticket belongs to another actor, host session or ownership epoch." }
+                "403":
+                    description: Host ticket belongs to another actor, host session or ownership epoch, or organization access is disabled (access_disabled).
+                    content:
+                        application/json:
+                            schema: { $ref: "#/components/schemas/Error" }
                 "404": { $ref: "#/components/responses/NotFound" }
                 "409": { $ref: "#/components/responses/Conflict" }
                 "502": { description: The invocation outcome is unknown. Do not replay automatically. }
@@ -299,6 +327,7 @@ paths:
                 "204": { description: Effects delivered. }
                 "400": { $ref: "#/components/responses/InvalidRequest" }
                 "401": { description: Ticket rejected. }
+                "403": { $ref: "#/components/responses/AccessDisabled" }
                 "413": { $ref: "#/components/responses/PayloadTooLarge" }
                 "415": { description: Expected application/json. }
                 "422": { description: Invalid effects document. }
@@ -318,6 +347,7 @@ paths:
                 "200": { $ref: "#/components/responses/WebSocketGrant" }
                 "400": { $ref: "#/components/responses/InvalidRequest" }
                 "401": { $ref: "#/components/responses/Unauthenticated" }
+                "403": { $ref: "#/components/responses/AccessDisabled" }
                 "409": { $ref: "#/components/responses/Conflict" }
                 "413": { $ref: "#/components/responses/PayloadTooLarge" }
                 "500": { $ref: "#/components/responses/Internal" }
@@ -582,7 +612,7 @@ paths:
             operationId: openWebSocket
             tags: [WebSockets]
             summary: Open a WebSocket
-            description: Pass websocketUrl from the find-websocket response directly to new WebSocket() before connectByMs. Authorization is checked on connection; accepted sockets remain authorized until they close, including while the actor hibernates. Reconnects require a valid ticket.
+            description: Pass websocketUrl from the find-websocket response directly to new WebSocket() before connectByMs. Authorization is checked on connection; accepted sockets remain authorized until they close, including while the actor hibernates. Organization suspensions reject new connections and stop further actor events on existing sockets. Reconnects require a valid ticket.
             servers:
                 - url: https://{actorHost}
                   variables:
@@ -593,6 +623,7 @@ paths:
                 "101": { description: WebSocket upgrade accepted. }
                 "400": { $ref: "#/components/responses/UpgradeError" }
                 "401": { description: Socket authorization rejected. Request a fresh URL. No response body. }
+                "403": { description: Organization access is disabled. No response body. }
                 "426":
                     description: Connection cannot be upgraded to a WebSocket.
                     content:
@@ -671,6 +702,16 @@ components:
             required: true
             schema: { type: string, pattern: "^[A-Za-z0-9._-]{1,128}$" }
     requestBodies:
+        Access:
+            required: true
+            content:
+                application/json:
+                    schema: { $ref: "#/components/schemas/Access" }
+                    examples:
+                        suspend: { value: { enabled: false } }
+                        restore: { value: { enabled: true } }
+                        billingSuspend: { value: { enabled: false, source: billing } }
+                        billingRestore: { value: { enabled: true, source: billing } }
         FindActor:
             required: true
             content:
@@ -687,6 +728,16 @@ components:
                     examples:
                         socket: { value: { metadata: { userId: alice } } }
     responses:
+        AccessAccepted:
+            description: The echoed enabled setting is persisted for the returned source; it is not the aggregate organization access state. Host shutdown proceeds asynchronously while either source has a hold.
+            content:
+                application/json:
+                    schema: { $ref: "#/components/schemas/Access" }
+        AccessDisabled:
+            description: Organization access is disabled (access_disabled).
+            content:
+                application/json:
+                    schema: { $ref: "#/components/schemas/Error" }
         Changed:
             description: Whether the deployment changed.
             content:
@@ -758,6 +809,13 @@ components:
                 text/plain:
                     schema: { type: string }
     schemas:
+        Access:
+            type: object
+            additionalProperties: false
+            required: [enabled]
+            properties:
+                enabled: { type: boolean }
+                source: { type: string, enum: [admin, billing], default: admin }
         OverviewMetrics:
             type: object
             required: [total, classes]

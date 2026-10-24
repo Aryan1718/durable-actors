@@ -45,7 +45,7 @@ pub struct ControlPlaneService {
     placements: Arc<dyn ObjectPlacementStore>,
     pub(super) auth: ActorJwtVerifier,
     host_token_issuer: ActorJwtIssuer,
-    registry: Arc<dyn AdminRegistry>,
+    pub(super) registry: Arc<dyn AdminRegistry>,
     provisioner: Arc<dyn HostProvisioner>,
     alarms: Arc<dyn super::alarms::AlarmStore>,
     socket_events: Option<Arc<dyn super::event_sink::SocketMessageEventSink>>,
@@ -134,7 +134,10 @@ impl ControlPlaneService {
         &self,
         project_id: &str,
     ) -> Result<Option<HostLaunchSpec>> {
-        self.registry.launch_spec(project_id).await
+        let spec = self.registry.launch_spec(project_id).await?;
+        self.ensure_organization_access(spec.as_ref().and_then(|s| s.organization_id.as_deref()))
+            .await?;
+        Ok(spec)
     }
 
     pub(super) async fn register_deployment(
@@ -163,6 +166,9 @@ impl ControlPlaneService {
     ) -> Result<bool> {
         source.validate()?;
         let mut update = admin.lock_deployment(&source.project_id).await?;
+        self.ensure_project_access(&source.project_id).await?;
+        self.ensure_organization_access(source.organization_id.as_deref())
+            .await?;
         let previous = admin.current_deployment(&source.project_id).await?;
         let local_build = match &self.local_builds {
             Some(builds) => Some(builds.prepare(source).await?),
@@ -226,7 +232,7 @@ impl ControlPlaneService {
         Ok(true)
     }
 
-    async fn terminate_deployment_hosts(&self, spec: &HostLaunchSpec) -> Result<()> {
+    pub(super) async fn terminate_deployment_hosts(&self, spec: &HostLaunchSpec) -> Result<()> {
         let started_at = Instant::now();
         match self
             .provisioner
@@ -246,12 +252,12 @@ impl ControlPlaneService {
                 resource_count = termination.resource_ids.len(),
                 total_ms = elapsed_ms(started_at),
                 outcome = "terminated",
-                "replaced deployment hosts terminated"
+                "deployment hosts terminated"
             ),
             Err(error) => {
-                return Err(error.context(
-                    "previous actor hosts could not be terminated; retry the deployment update",
-                ));
+                return Err(
+                    error.context("actor hosts could not be terminated; retry the operation")
+                );
             }
         }
         Ok(())
@@ -427,6 +433,20 @@ impl ActorControlPlaneService for ControlPlaneService {
         let principal = self.auth.authenticate(&request).await?;
         let command = decode_command(request.into_inner())
             .map_err(|error| Status::invalid_argument(format!("invalid command: {error:#}")))?;
+        if !matches!(
+            command,
+            ControlPlaneCommand::Lifecycle { .. } | ControlPlaneCommand::RequestTraces { .. }
+        ) {
+            self.ensure_project_access(&principal.actor.project_id)
+                .await
+                .map_err(|error| {
+                    if error.is::<super::access::AccessDisabled>() {
+                        Status::permission_denied(error.to_string())
+                    } else {
+                        Status::unavailable(error.to_string())
+                    }
+                })?;
+        }
         let reply = match command {
             ControlPlaneCommand::SocketOperation { actor, operation } => {
                 self.authorize_socket_host(&principal, &actor)

@@ -1,3 +1,4 @@
+mod access;
 pub(crate) mod admin;
 mod alarms;
 mod auth;

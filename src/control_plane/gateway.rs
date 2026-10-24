@@ -134,6 +134,16 @@ async fn connect(
         .sockets
         .verify(&key)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
+    service
+        .ensure_project_access(&ticket.actor.project_id)
+        .await
+        .map_err(|error| {
+            if error.is::<super::access::AccessDisabled>() {
+                StatusCode::FORBIDDEN
+            } else {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
+        })?;
     let connections = gateway.connections.clone();
     if !connections.accepts_sockets {
         return Err(StatusCode::SERVICE_UNAVAILABLE);
