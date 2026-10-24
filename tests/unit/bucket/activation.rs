@@ -20,9 +20,7 @@ async fn etag_revisions_round_trip_and_reject_stale_ownership_updates() -> Resul
     let encoded = serde_json::to_value(hint)?;
     assert!(encoded["generation"].as_str().unwrap().starts_with('"'));
 
-    runtime
-        .renew_activation(&actor, &first, Default::default())
-        .await?;
+    runtime.renew_activation(&actor, &first).await?;
     assert!(
         !bucket
             .compare_and_swap(

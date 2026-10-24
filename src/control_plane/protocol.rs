@@ -31,7 +31,7 @@ pub(crate) enum ControlPlaneCommandReply {
         reply: super::socket_gateway::SocketOperationReply,
     },
     StorageAccess {
-        tokens: Option<crate::bucket::access::StorageTokens>,
+        access: crate::bucket::access::StorageAccess,
         replacement_token: String,
     },
     Alarm {

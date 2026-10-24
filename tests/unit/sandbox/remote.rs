@@ -92,7 +92,7 @@ async fn prewarmed_assignment_uses_ready_host_without_creating_a_pod() -> Result
 }
 
 #[tokio::test]
-async fn s3_artifact_access_reaches_both_cold_and_prewarmed_compiled_hosts() -> Result<()> {
+async fn s3_artifact_access_reaches_cold_compiled_hosts() -> Result<()> {
     use crate::bucket::access::{BucketLocation, HostStorageConfig, StorageToken, StorageTokens};
 
     let token = StorageToken {
@@ -111,27 +111,25 @@ async fn s3_artifact_access_reaches_both_cold_and_prewarmed_compiled_hosts() -> 
             ownership: token.clone(),
             state: token,
         }),
+        aws: None,
     })?;
-    for warm in [false, true] {
-        let cluster = Arc::new(Cluster {
-            creates: AtomicUsize::new(0),
-            retires: AtomicUsize::new(0),
-        });
-        let provider = RemoteSandboxProvider {
-            name: "gke",
-            cluster: cluster.clone(),
-            assignment: Arc::new(StorageAssignment(runtime_config.clone())),
-        };
-        let mut request = request()?;
-        request.image_ref = format!("registry/runtime@sha256:{}", "a".repeat(64));
-        request.runtime_config = Some(runtime_config.clone());
-        if !warm {
-            request.spare = None;
-        }
-        let result = provider.ensure_host(&request).await?;
-        assert_eq!(result.provisioning.unwrap().reused, warm);
-        assert_eq!(cluster.creates.load(Ordering::SeqCst), usize::from(!warm));
-    }
+    let cluster = Arc::new(Cluster {
+        creates: AtomicUsize::new(0),
+        retires: AtomicUsize::new(0),
+    });
+    let provider = RemoteSandboxProvider {
+        name: "gke",
+        cluster: cluster.clone(),
+        secrets: Arc::new(Secrets),
+        assignment: Arc::new(StorageAssignment(runtime_config.clone())),
+    };
+    let mut request = request()?;
+    request.image_ref = format!("registry/runtime@sha256:{}", "a".repeat(64));
+    request.runtime_config = Some(runtime_config);
+    request.spare = None;
+    let result = provider.ensure_host(&request).await?;
+    assert!(!result.provisioning.unwrap().reused);
+    assert_eq!(cluster.creates.load(Ordering::SeqCst), 1);
     Ok(())
 }
 

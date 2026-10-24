@@ -535,7 +535,7 @@ impl ControlPlaneService {
                     principal.host_config_key.as_deref() == Some(spec.host_config_key().as_str()),
                     "host deployment changed"
                 );
-                let tokens = self
+                let access = self
                     .runtime_access
                     .as_ref()
                     .context("direct storage is not configured")?
@@ -556,7 +556,7 @@ impl ControlPlaneService {
                     )?
                     .token;
                 Ok(ControlPlaneCommandReply::StorageAccess {
-                    tokens,
+                    access,
                     replacement_token,
                 })
             }
@@ -1009,7 +1009,7 @@ impl HostProvisioner for SandboxHostProvisioner {
             .code_snapshot
             .as_deref()
             .context("hosted deployments require a compiled bundle")?;
-        let manifest = crate::bundle::ActorBundle::decode(snapshot)?;
+        let manifest = crate::bundle::ArtifactBundle::decode(snapshot)?;
         self.runtime_access
             .as_ref()
             .context("hosted deployments require artifact storage access")?

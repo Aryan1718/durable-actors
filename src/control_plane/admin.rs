@@ -98,7 +98,7 @@ impl HostLaunchSpec {
             validate_component("organization ID", organization, 64)?;
         }
         if let Some(snapshot) = &self.code_snapshot {
-            let manifest = crate::bundle::ActorBundle::decode(snapshot)?;
+            let manifest = crate::bundle::ArtifactBundle::decode(snapshot)?;
             ensure!(
                 self.working_directory == "/customer",
                 "snapshot deployments must use /customer"

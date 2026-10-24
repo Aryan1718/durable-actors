@@ -42,9 +42,20 @@ async fn executor_environment_excludes_cloud_credentials_and_host_tokens() -> Re
     let environment = String::from_utf8(output.stdout)?;
     assert!(environment.contains("CUSTOMER_SETTING=customer-value\n"));
     assert!(environment.contains("PATH=/usr/bin:/bin\n"));
+    assert!(environment.contains("AWS_EC2_METADATA_DISABLED=true\n"));
     for forbidden in [
-        "AWS_",
-        "aws_",
+        "AWS_ACCESS_KEY_ID=",
+        "AWS_SECRET_ACCESS_KEY=",
+        "AWS_SESSION_TOKEN=",
+        "AWS_PROFILE=",
+        "AWS_CONFIG_FILE=",
+        "AWS_SHARED_CREDENTIALS_FILE=",
+        "AWS_WEB_IDENTITY_TOKEN_FILE=",
+        "AWS_CONTAINER_CREDENTIALS_",
+        "AWS_CONTAINER_AUTHORIZATION_",
+        "AWS_ROLE_ARN=",
+        "aws_secret_access_key=",
+        "AWS_FUTURE_CREDENTIAL_PROVIDER=",
         "BOTO_",
         "GOOGLE_APPLICATION_CREDENTIALS=",
         "DURABLE_ACTORS_HOST_TOKEN=",

@@ -89,27 +89,8 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn s3_state_storage_issues_gcs_access_for_code_only() -> Result<()> {
-    let code = crate::bundle::ActorBundle {
-        bucket: "code".into(),
-        files: vec![crate::bundle::BundleFile {
-            path: "actors.mjs".into(),
-            object: "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs"
-                .into(),
-            generation: 1,
-            sha256: "unused".into(),
-        }],
-    };
-    let rules = code_rules("code", &code)?;
-    assert_eq!(rules.len(), 1);
-    assert_eq!(rules[0].bucket, "code");
-    assert_eq!(rules[0].permissions, Permissions::OBJECT_VIEWER);
-    Ok(())
-}
-
 #[tokio::test]
-async fn s3_bootstrap_and_refresh_without_code_need_no_gcs_token() -> Result<()> {
+async fn s3_bootstrap_and_refresh_without_code_issue_state_credentials() -> Result<()> {
     let access = RuntimeAccess {
         location: BucketLocation::S3 {
             bucket: "state".into(),
@@ -118,47 +99,38 @@ async fn s3_bootstrap_and_refresh_without_code_need_no_gcs_token() -> Result<()>
         },
         token_source: None,
         persistence: super::super::SnapshotStoreConfig::Local,
+        aws_issuer: Some(test_aws_issuer()?),
     };
     let config: HostStorageConfig =
         serde_json::from_str(&access.bootstrap("us-west-2", &actor(), None).await?)?;
 
     assert!(config.tokens.is_none());
-    assert!(access.issue(&actor(), None).await?.is_none());
+    assert!(config.aws.as_ref().unwrap().artifacts.is_empty());
+    assert!(access.issue(&actor(), None).await?.aws.is_some());
+    assert!(!access.supports_spares());
     Ok(())
 }
 
 #[tokio::test]
-async fn s3_bootstrap_with_code_keeps_scoped_artifact_access() -> Result<()> {
-    struct RecordingTokens(Arc<std::sync::Mutex<Vec<Vec<Rule>>>>);
-
-    #[async_trait]
-    impl StorageTokenSource for RecordingTokens {
-        async fn issue(&self, rules: &[Rule]) -> Result<StorageToken> {
-            self.0.lock().unwrap().push(rules.to_vec());
-            Ok(StorageToken {
-                access_token: "artifact-token".into(),
-                expires_at_ms: 1,
-            })
-        }
-    }
-
-    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+async fn s3_bootstrap_with_code_issues_exact_artifact_access() -> Result<()> {
     let access = RuntimeAccess {
         location: BucketLocation::S3 {
             bucket: "state".into(),
             region: "us-west-2".into(),
             artifact_bucket: "code".into(),
         },
-        token_source: Some(Box::new(RecordingTokens(requests.clone()))),
+        token_source: None,
         persistence: super::super::SnapshotStoreConfig::Local,
+        aws_issuer: Some(test_aws_issuer()?),
     };
-    let code = crate::bundle::ActorBundle {
+    let key = "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs";
+    let code = crate::bundle::s3::S3Bundle {
         bucket: "code".into(),
-        files: vec![crate::bundle::BundleFile {
+        region: "us-west-2".into(),
+        files: vec![crate::bundle::s3::S3BundleFile {
             path: "actors.mjs".into(),
-            object: "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs"
-                .into(),
-            generation: 1,
+            object: key.into(),
+            etag: "etag".into(),
             sha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
         }],
     }
@@ -167,19 +139,42 @@ async fn s3_bootstrap_with_code_keeps_scoped_artifact_access() -> Result<()> {
     let config: HostStorageConfig =
         serde_json::from_str(&access.bootstrap("us-west-2", &actor(), Some(&code)).await?)?;
 
-    let tokens = config.tokens.context("artifact token")?;
-    assert_eq!(tokens.ownership.access_token, "artifact-token");
-    assert_eq!(tokens.state.access_token, "artifact-token");
-    let refreshed = access.issue(&actor(), Some(&code)).await?.unwrap();
-    assert_eq!(refreshed.ownership.access_token, "artifact-token");
-    assert_eq!(refreshed.state.access_token, "artifact-token");
-    let rules = vec![rule(
-        "code",
-        "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/".into(),
-        Permissions::OBJECT_VIEWER,
-    )];
-    assert_eq!(requests.lock().unwrap().as_slice(), [rules.clone(), rules]);
+    assert!(config.tokens.is_none());
+    let aws = config.aws.context("AWS credentials")?;
+    assert_eq!(aws.artifacts.len(), 1);
+    assert_eq!(aws.artifacts[0].keys, [key]);
     Ok(())
+}
+
+fn test_aws_issuer() -> Result<Arc<super::super::aws_access::AwsCredentialIssuer>> {
+    struct Sts;
+    #[async_trait]
+    impl super::super::aws_access::AssumeRole for Sts {
+        async fn assume_role(
+            &self,
+            _: super::super::aws_access::AssumeRoleRequest,
+        ) -> Result<super::super::aws_access::TemporaryCredentials> {
+            Ok(super::super::aws_access::TemporaryCredentials {
+                access_key_id: "key".into(),
+                secret_access_key: "secret".into(),
+                session_token: "token".into(),
+                expires_at_ms: 2_000_000,
+            })
+        }
+    }
+    struct FixedClock;
+    impl Clock for FixedClock {
+        fn now_ms(&self) -> Result<u64> {
+            Ok(1_000_000)
+        }
+    }
+    Ok(Arc::new(
+        super::super::aws_access::AwsCredentialIssuer::new(
+            "arn:aws:iam::123456789012:role/actor".into(),
+            Arc::new(Sts),
+            Arc::new(FixedClock),
+        )?,
+    ))
 }
 
 #[test]
@@ -238,9 +233,18 @@ async fn every_request_mints_its_own_token() -> Result<()> {
         },
         token_source: Some(Box::new(Numbered(Default::default()))),
         persistence: super::super::SnapshotStoreConfig::Local,
+        aws_issuer: None,
     };
-    let first = access.issue(&actor(), None).await?.context("token")?;
-    let second = access.issue(&actor(), None).await?.context("token")?;
+    let first = access
+        .issue(&actor(), None)
+        .await?
+        .tokens
+        .context("token")?;
+    let second = access
+        .issue(&actor(), None)
+        .await?
+        .tokens
+        .context("token")?;
     assert_ne!(first.ownership.access_token, first.state.access_token);
     assert_ne!(first.ownership.access_token, second.ownership.access_token);
     Ok(())

@@ -68,6 +68,26 @@ fn secret_changes_update_host_configuration() {
     assert_eq!(initial, deployment.host_config_key());
 }
 
+#[test]
+fn launch_spec_accepts_s3_artifact_references() -> Result<()> {
+    let bundle = crate::bundle::s3::S3Bundle {
+        bucket: "code-bucket".into(),
+        region: "us-west-2".into(),
+        files: vec![crate::bundle::s3::S3BundleFile {
+            path: "actors.mjs".into(),
+            object: "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs"
+                .into(),
+            etag: "etag".into(),
+            sha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+        }],
+    };
+    let mut deployment = spec("bundle");
+    deployment.code_snapshot = Some(bundle.encode()?);
+    deployment.working_directory = "/customer".into();
+    deployment.actor_entrypoint = Some("actors.mjs".into());
+    deployment.validate()
+}
+
 #[tokio::test]
 async fn deployment_retains_secret_references() -> Result<()> {
     let registry = LocalAdminRegistry::default();

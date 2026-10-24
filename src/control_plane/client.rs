@@ -104,17 +104,17 @@ impl ControlPlaneClient {
 
     pub(crate) async fn refresh_storage_access(
         &self,
-    ) -> Result<Option<crate::bucket::access::StorageTokens>> {
+    ) -> Result<crate::bucket::access::StorageAccess> {
         match self
             .execute(ControlPlaneCommand::RefreshStorageAccess)
             .await?
         {
             ControlPlaneCommandReply::StorageAccess {
-                tokens,
+                access,
                 replacement_token,
             } => {
                 self.replace_token(&replacement_token)?;
-                Ok(tokens)
+                Ok(access)
             }
             _ => anyhow::bail!("unexpected storage credentials response"),
         }

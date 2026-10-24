@@ -643,7 +643,8 @@ fn configure_executor_environment(
                         | "DURABLE_ACTORS_RUNTIME_CONFIG"
                         | "DURABLE_ACTORS_HOST_TOKEN"
                 )
-        }));
+        }))
+        .env("AWS_EC2_METADATA_DISABLED", "true");
 }
 
 #[cfg(test)]

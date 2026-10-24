@@ -251,7 +251,7 @@ async fn get_deployment(
     let bundle = spec
         .code_snapshot
         .as_deref()
-        .map(crate::bundle::ActorBundle::decode)
+        .map(crate::bundle::ArtifactBundle::decode)
         .transpose()
         .map_err(ApiError::internal)?;
     let local_source = spec
@@ -558,7 +558,7 @@ pub(super) fn authorized_admin(admin: &AdminService, headers: &HeaderMap) -> Res
 struct RegisterDeploymentRequest {
     organization_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    bundle: Option<crate::bundle::ActorBundle>,
+    bundle: Option<crate::bundle::ArtifactBundle>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     image_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -576,7 +576,7 @@ struct CurrentDeployment {
     image_ref: Option<String>,
     organization_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    bundle: Option<crate::bundle::ActorBundle>,
+    bundle: Option<crate::bundle::ArtifactBundle>,
     #[serde(skip_serializing_if = "Option::is_none")]
     local_source: Option<super::admin::LocalSource>,
     secret_refs: Vec<String>,

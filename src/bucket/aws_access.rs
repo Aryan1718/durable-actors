@@ -3,6 +3,7 @@ use std::{collections::BTreeSet, sync::Arc, time::Duration};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;
 use aws_sdk_sts::config::{retry::RetryConfig, timeout::TimeoutConfig};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{actor::ActorKey, clock::Clock};
@@ -65,7 +66,8 @@ pub(crate) struct AssumeRoleRequest {
     pub duration_seconds: i32,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct TemporaryCredentials {
     pub access_key_id: String,
     pub secret_access_key: String,
@@ -141,6 +143,7 @@ impl AssumeRole for SdkAssumeRole {
 pub(crate) struct SessionPolicy(String);
 
 impl SessionPolicy {
+    #[cfg(test)]
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }

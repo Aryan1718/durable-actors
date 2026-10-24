@@ -6,7 +6,7 @@ use super::HostId;
 use crate::{
     actor::ActorKey,
     bucket::{OwnershipHint, access::HostStorageConfig},
-    bundle::{ActorBundle, ActorRuntime},
+    bundle::{ActorRuntime, ArtifactBundle},
     host_leases::MAX_HOST_LEASE_DURATION_MS,
 };
 
@@ -192,7 +192,7 @@ pub(super) struct ExecutorConfig {
     pub socket: PathBuf,
     pub runtime: ActorRuntime,
     pub entrypoint: Option<String>,
-    pub bundle: Option<ActorBundle>,
+    pub bundle: Option<ArtifactBundle>,
     pub environment: HashMap<String, String>,
 }
 
@@ -210,7 +210,7 @@ impl ExecutorConfig {
             runtime,
             entrypoint,
             bundle: get("DURABLE_ACTORS_CODE_ARTIFACT")
-                .map(|value| ActorBundle::decode(&value))
+                .map(|value| ArtifactBundle::decode(&value))
                 .transpose()?,
             environment: get("DURABLE_ACTORS_CUSTOMER_ENV")
                 .map(|value| serde_json::from_str(&value))

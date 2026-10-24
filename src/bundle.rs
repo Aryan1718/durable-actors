@@ -21,6 +21,36 @@ pub(crate) enum ActorRuntime {
     Python,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub(crate) enum ArtifactBundle {
+    Gcs(ActorBundle),
+    S3(s3::S3Bundle),
+}
+
+impl ArtifactBundle {
+    pub fn encode(&self) -> Result<String> {
+        match self {
+            Self::Gcs(bundle) => bundle.encode(),
+            Self::S3(bundle) => bundle.encode(),
+        }
+    }
+
+    pub fn decode(encoded: &str) -> Result<Self> {
+        if encoded.starts_with("gcs:") {
+            return Ok(Self::Gcs(ActorBundle::decode(encoded)?));
+        }
+        Ok(Self::S3(s3::S3Bundle::decode(encoded)?))
+    }
+
+    pub fn entrypoint(&self) -> Result<&str> {
+        match self {
+            Self::Gcs(bundle) => bundle.entrypoint(),
+            Self::S3(bundle) => bundle.entrypoint(),
+        }
+    }
+}
+
 impl ActorRuntime {
     pub(crate) fn from_entrypoint(entrypoint: &str) -> Result<Self> {
         if entrypoint.ends_with(".mjs") {

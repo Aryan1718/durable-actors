@@ -58,7 +58,7 @@ pub struct ControlPlaneStorageConfig {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StorageProviderConfig {
     Gcs,
-    S3 { region: String },
+    S3 { region: String, role_arn: String },
 }
 
 #[derive(Default)]
@@ -86,7 +86,7 @@ impl RuntimeImages {
             .code_snapshot
             .as_deref()
             .context("platform image requires a code artifact")?;
-        let bundle = crate::bundle::ActorBundle::decode(artifact)?;
+        let bundle = crate::bundle::ArtifactBundle::decode(artifact)?;
         self.for_entrypoint(bundle.entrypoint()?)
     }
 
@@ -249,7 +249,7 @@ async fn control_plane_routes(
             let bucket = Arc::new(GcsBucket::new(&config.storage.bucket).await?);
             (bucket.clone(), Some(bucket))
         }
-        StorageProviderConfig::S3 { region } => {
+        StorageProviderConfig::S3 { region, .. } => {
             let sdk = aws_config::defaults(aws_config::BehaviorVersion::latest())
                 .region(aws_config::Region::new(region.clone()))
                 .load()
@@ -281,20 +281,36 @@ async fn control_plane_routes(
         )?
         .with_persistence(config.storage.persistence, snapshots)?,
     );
-    let runtime_access = Arc::new(crate::bucket::access::RuntimeAccess::new(
+    let mut runtime_access = crate::bucket::access::RuntimeAccess::new(
         match &config.storage.provider {
             StorageProviderConfig::Gcs => crate::bucket::access::BucketLocation::Gcs {
                 artifact_bucket: config.storage.artifact_bucket.clone(),
                 bucket: config.storage.bucket.clone(),
             },
-            StorageProviderConfig::S3 { region } => crate::bucket::access::BucketLocation::S3 {
+            StorageProviderConfig::S3 { region, .. } => crate::bucket::access::BucketLocation::S3 {
                 artifact_bucket: config.storage.artifact_bucket.clone(),
                 bucket: config.storage.bucket.clone(),
                 region: region.clone(),
             },
         },
         storage.persistence.clone(),
-    )?);
+    )?;
+    if let StorageProviderConfig::S3 { region, role_arn } = &config.storage.provider {
+        let sdk = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new(region.clone()))
+            .load()
+            .await;
+        runtime_access = runtime_access.with_aws_issuer(Arc::new(
+            crate::bucket::aws_access::AwsCredentialIssuer::new(
+                role_arn.clone(),
+                Arc::new(crate::bucket::aws_access::SdkAssumeRole::new(
+                    aws_sdk_sts::Client::new(&sdk),
+                )),
+                Arc::new(crate::clock::SystemClock),
+            )?,
+        ));
+    }
+    let runtime_access = Arc::new(runtime_access);
     let placements = storage.clone();
     let connections = crate::sandbox::connections::HostConnections::new()?;
     let socket_bus = match redis {
@@ -455,22 +471,27 @@ async fn sandbox_provisioner(
             .await?
         }
     });
-    let pool = crate::sandbox::pool::SparePool::with_runtime_images(
-        database,
+    let supports_spares = access.supports_spares();
+    let runtime_images = config.runtime_images;
+    let mut provisioner = super::service::SandboxHostProvisioner::new(
         provider.clone(),
-        config.pool,
-        Some(config.runtime_images.clone()),
-    );
-    pool.start(registry, stop);
-    Ok(super::service::SandboxHostProvisioner::new(
-        provider,
         config.runtime,
         issuer.clone(),
-        Some(config.runtime_images),
+        Some(runtime_images.clone()),
     )
     .with_runtime_access(access)
-    .with_pool(pool)
-    .with_resource_bounds(config.resource_bounds))
+    .with_resource_bounds(config.resource_bounds);
+    if supports_spares {
+        let pool = crate::sandbox::pool::SparePool::with_runtime_images(
+            database,
+            provider,
+            config.pool,
+            Some(runtime_images),
+        );
+        pool.start(registry, stop);
+        provisioner = provisioner.with_pool(pool);
+    }
+    Ok(provisioner)
 }
 
 impl ControlPlaneProcessConfig {
@@ -590,7 +611,10 @@ fn storage_provider_config(
                 !region.is_empty() && region.trim() == region,
                 "DURABLE_ACTORS_AWS_REGION must not be empty or contain surrounding whitespace"
             );
-            Ok(StorageProviderConfig::S3 { region })
+            Ok(StorageProviderConfig::S3 {
+                region,
+                role_arn: required(get, "DURABLE_ACTORS_AWS_ACTOR_ROLE_ARN")?,
+            })
         }
         _ => anyhow::bail!("DURABLE_ACTORS_STORAGE_PROVIDER must be gcs or s3"),
     }

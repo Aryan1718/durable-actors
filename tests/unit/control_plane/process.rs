@@ -471,6 +471,10 @@ fn standard_s3_selects_aws_without_changing_the_code_bucket() -> Result<()> {
     let mut values = process_environment();
     values.insert("DURABLE_ACTORS_STORAGE_PROVIDER", "s3");
     values.insert("DURABLE_ACTORS_AWS_REGION", "us-west-2");
+    values.insert(
+        "DURABLE_ACTORS_AWS_ACTOR_ROLE_ARN",
+        "arn:aws:iam::123456789012:role/actor",
+    );
     values.insert("DURABLE_ACTORS_PERSISTENCE", "standard");
     values.remove("DURABLE_ACTORS_ARCHIVE_BUCKET");
     values.remove("DURABLE_ACTORS_RAPID_BUCKETS");
@@ -480,7 +484,8 @@ fn standard_s3_selects_aws_without_changing_the_code_bucket() -> Result<()> {
     assert_eq!(
         config.storage.provider,
         crate::control_plane::StorageProviderConfig::S3 {
-            region: "us-west-2".into()
+            region: "us-west-2".into(),
+            role_arn: "arn:aws:iam::123456789012:role/actor".into(),
         }
     );
     assert_eq!(config.storage.bucket, "actor-state-test");
@@ -498,6 +503,10 @@ fn s3_rejects_rapid_and_missing_region() {
     assert!(parse(&values).is_err());
     values.insert("DURABLE_ACTORS_AWS_REGION", "us-west-2");
     assert!(parse(&values).is_err());
+    values.insert(
+        "DURABLE_ACTORS_AWS_ACTOR_ROLE_ARN",
+        "arn:aws:iam::123456789012:role/actor",
+    );
 }
 
 #[test]

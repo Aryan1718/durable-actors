@@ -631,6 +631,7 @@ impl Stack {
                     },
                     region: "us-east".into(),
                     tokens: None,
+                    aws: None,
                 },
                 host_id.clone(),
                 "00000000-0000-4000-8000-000000000001".into(),

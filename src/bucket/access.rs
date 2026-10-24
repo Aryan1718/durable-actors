@@ -26,6 +26,8 @@ pub(crate) struct HostStorageConfig {
     pub persistence: super::SnapshotStoreConfig,
     pub region: String,
     pub tokens: Option<StorageTokens>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws: Option<AwsStorageCredentials>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -61,6 +63,30 @@ pub(crate) struct StorageTokens {
     pub state: StorageToken,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AwsStorageCredentials {
+    pub ownership: super::aws_access::TemporaryCredentials,
+    pub state: super::aws_access::TemporaryCredentials,
+    pub artifacts: Vec<AwsArtifactCredentials>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AwsArtifactCredentials {
+    pub keys: Vec<String>,
+    pub credentials: super::aws_access::TemporaryCredentials,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StorageAccess {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tokens: Option<StorageTokens>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aws: Option<AwsStorageCredentials>,
+}
+
 impl std::fmt::Debug for StorageToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("StorageToken")
@@ -76,40 +102,68 @@ pub(crate) struct RuntimeAccess {
     location: BucketLocation,
     token_source: Option<Box<dyn StorageTokenSource>>,
     persistence: super::SnapshotStoreConfig,
+    aws_issuer: Option<std::sync::Arc<super::aws_access::AwsCredentialIssuer>>,
 }
 
 impl RuntimeAccess {
     pub fn new(location: BucketLocation, persistence: super::SnapshotStoreConfig) -> Result<Self> {
         Ok(Self {
             token_source: match &location {
-                BucketLocation::Gcs { .. } | BucketLocation::S3 { .. } => {
-                    Some(Box::new(ClientSideTokens::from_environment()?))
-                }
-                BucketLocation::File { .. } => None,
+                BucketLocation::Gcs { .. } => Some(Box::new(ClientSideTokens::from_environment()?)),
+                BucketLocation::S3 { .. } | BucketLocation::File { .. } => None,
             },
             location,
             persistence,
+            aws_issuer: None,
         })
     }
 
-    pub(crate) fn validate_code(&self, code: &crate::bundle::ActorBundle) -> Result<()> {
-        let artifact_bucket = match &self.location {
-            BucketLocation::Gcs {
-                artifact_bucket, ..
+    pub(crate) fn with_aws_issuer(
+        mut self,
+        issuer: std::sync::Arc<super::aws_access::AwsCredentialIssuer>,
+    ) -> Self {
+        self.aws_issuer = Some(issuer);
+        self
+    }
+
+    pub(crate) fn supports_spares(&self) -> bool {
+        !matches!(self.location, BucketLocation::S3 { .. })
+    }
+
+    pub(crate) fn validate_code(&self, code: &crate::bundle::ArtifactBundle) -> Result<()> {
+        match (&self.location, code) {
+            (
+                BucketLocation::Gcs {
+                    artifact_bucket, ..
+                },
+                crate::bundle::ArtifactBundle::Gcs(code),
+            ) => {
+                ensure!(
+                    code.bucket == *artifact_bucket,
+                    "code artifact belongs to another bucket"
+                );
+                artifact_prefix(code)?;
+                Ok(())
             }
-            | BucketLocation::S3 {
-                artifact_bucket, ..
-            } => artifact_bucket,
-            BucketLocation::File { .. } => {
-                anyhow::bail!("compiled GCS bundles require GCS storage")
+            (
+                BucketLocation::S3 {
+                    artifact_bucket,
+                    region,
+                    ..
+                },
+                crate::bundle::ArtifactBundle::S3(code),
+            ) => {
+                ensure!(
+                    code.bucket == *artifact_bucket && code.region == *region,
+                    "code artifact belongs to another storage location"
+                );
+                Ok(())
             }
-        };
-        ensure!(
-            code.bucket == *artifact_bucket,
-            "code artifact belongs to another bucket"
-        );
-        artifact_prefix(code)?;
-        Ok(())
+            (BucketLocation::File { .. }, _) => {
+                anyhow::bail!("compiled bundles require object storage")
+            }
+            _ => anyhow::bail!("code artifact provider does not match storage provider"),
+        }
     }
 
     pub async fn bootstrap(
@@ -118,11 +172,13 @@ impl RuntimeAccess {
         actor: &crate::actor::ActorKey,
         code_snapshot: Option<&str>,
     ) -> Result<String> {
+        let access = self.issue(actor, code_snapshot).await?;
         Ok(serde_json::to_string(&HostStorageConfig {
             bucket: self.location.clone(),
             persistence: self.persistence.clone(),
             region: region.into(),
-            tokens: self.issue(actor, code_snapshot).await?,
+            tokens: access.tokens,
+            aws: access.aws,
         })?)
     }
 
@@ -130,32 +186,32 @@ impl RuntimeAccess {
         &self,
         actor: &crate::actor::ActorKey,
         code_snapshot: Option<&str>,
-    ) -> Result<Option<StorageTokens>> {
+    ) -> Result<StorageAccess> {
         let (bucket, artifact_bucket) = match &self.location {
             BucketLocation::Gcs {
                 bucket,
                 artifact_bucket,
             } => (bucket.as_str(), artifact_bucket),
             BucketLocation::S3 {
-                artifact_bucket, ..
+                bucket,
+                artifact_bucket,
+                ..
             } => {
-                let Some(code_snapshot) = code_snapshot else {
-                    return Ok(None);
-                };
-                let code = crate::bundle::ActorBundle::decode(code_snapshot)?;
-                let token = self
-                    .token_source()?
-                    .issue(&code_rules(artifact_bucket, &code)?)
-                    .await?;
-                return Ok(Some(StorageTokens {
-                    ownership: token.clone(),
-                    state: token,
-                }));
+                return self
+                    .issue_aws(bucket, artifact_bucket, actor, code_snapshot)
+                    .await;
             }
-            BucketLocation::File { .. } => return Ok(None),
+            BucketLocation::File { .. } => return Ok(StorageAccess::default()),
         };
         let code = code_snapshot
-            .map(crate::bundle::ActorBundle::decode)
+            .map(crate::bundle::ArtifactBundle::decode)
+            .transpose()?
+            .map(|bundle| match bundle {
+                crate::bundle::ArtifactBundle::Gcs(bundle) => Ok(bundle),
+                crate::bundle::ArtifactBundle::S3(_) => {
+                    anyhow::bail!("GCS storage requires GCS code artifacts")
+                }
+            })
             .transpose()?;
         let scopes = scopes(
             bucket,
@@ -167,7 +223,63 @@ impl RuntimeAccess {
         let source = self.token_source()?;
         let (ownership, state) =
             tokio::try_join!(source.issue(&scopes.ownership), source.issue(&scopes.state))?;
-        Ok(Some(StorageTokens { ownership, state }))
+        Ok(StorageAccess {
+            tokens: Some(StorageTokens { ownership, state }),
+            aws: None,
+        })
+    }
+
+    async fn issue_aws(
+        &self,
+        bucket: &str,
+        artifact_bucket: &str,
+        actor: &crate::actor::ActorKey,
+        code_snapshot: Option<&str>,
+    ) -> Result<StorageAccess> {
+        let issuer = self
+            .aws_issuer
+            .as_ref()
+            .context("AWS credential issuer missing")?;
+        let ownership = super::aws_access::ownership_policy(bucket, actor)?;
+        let state = super::aws_access::state_policy(bucket, actor)?;
+        let artifact_batches = match code_snapshot {
+            Some(snapshot) => match crate::bundle::ArtifactBundle::decode(snapshot)? {
+                crate::bundle::ArtifactBundle::S3(bundle) => {
+                    ensure!(
+                        bundle.bucket == artifact_bucket,
+                        "code artifact belongs to another bucket"
+                    );
+                    super::aws_access::artifact_policies(
+                        artifact_bucket,
+                        &bundle
+                            .files
+                            .into_iter()
+                            .map(|file| file.object)
+                            .collect::<Vec<_>>(),
+                    )?
+                }
+                crate::bundle::ArtifactBundle::Gcs(_) => {
+                    anyhow::bail!("S3 storage requires S3 code artifacts")
+                }
+            },
+            None => Vec::new(),
+        };
+        let (ownership, state) = tokio::try_join!(issuer.issue(&ownership), issuer.issue(&state))?;
+        let mut artifacts = Vec::with_capacity(artifact_batches.len());
+        for batch in artifact_batches {
+            artifacts.push(AwsArtifactCredentials {
+                keys: batch.keys,
+                credentials: issuer.issue(&batch.policy).await?,
+            });
+        }
+        Ok(StorageAccess {
+            tokens: None,
+            aws: Some(AwsStorageCredentials {
+                ownership,
+                state,
+                artifacts,
+            }),
+        })
     }
 
     fn token_source(&self) -> Result<&dyn StorageTokenSource> {
@@ -180,18 +292,6 @@ impl RuntimeAccess {
 #[async_trait]
 trait StorageTokenSource: Send + Sync {
     async fn issue(&self, rules: &[Rule]) -> Result<StorageToken>;
-}
-
-fn code_rules(artifact_bucket: &str, code: &crate::bundle::ActorBundle) -> Result<Vec<Rule>> {
-    ensure!(
-        code.bucket == artifact_bucket,
-        "code artifact belongs to another bucket"
-    );
-    Ok(vec![rule(
-        &code.bucket,
-        artifact_prefix(code)?,
-        Permissions::OBJECT_VIEWER,
-    )])
 }
 
 struct ClientSideTokens {

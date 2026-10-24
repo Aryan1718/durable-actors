@@ -1,6 +1,7 @@
+#[cfg(test)]
+use std::sync::Arc;
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
     time::Duration,
 };
 
@@ -11,7 +12,9 @@ use bytes::Bytes;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 
-use crate::bucket::{Bucket, BucketObject, StorageRevision};
+#[cfg(test)]
+use crate::bucket::Bucket;
+use crate::bucket::{BucketObject, StorageRevision};
 
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
 
@@ -191,12 +194,14 @@ pub(crate) trait ArtifactReader: Send + Sync {
     ) -> Result<Option<BucketObject>>;
 }
 
+#[cfg(test)]
 pub(crate) struct BucketArtifactReader {
     bucket: String,
     region: String,
     storage: Arc<dyn Bucket>,
 }
 
+#[cfg(test)]
 impl BucketArtifactReader {
     pub fn new(bucket: String, region: String, storage: Arc<dyn Bucket>) -> Result<Self> {
         validate_location(&bucket, &region)?;
@@ -209,6 +214,7 @@ impl BucketArtifactReader {
 }
 
 #[async_trait]
+#[cfg(test)]
 impl ArtifactReader for BucketArtifactReader {
     async fn download(
         &self,

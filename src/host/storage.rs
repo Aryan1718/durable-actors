@@ -17,8 +17,9 @@ use super::{
 use crate::{
     actor::ActorKey,
     bucket::{
-        BucketSnapshots, GcsBucket, RapidSnapshots, RuntimeStorage, SnapshotStore, WarmStorage,
-        access::{HostStorageConfig, StorageToken, StorageTokens},
+        Bucket, BucketSnapshots, GcsBucket, RapidSnapshots, RuntimeStorage, SnapshotStore,
+        WarmStorage,
+        access::{HostStorageConfig, StorageAccess, StorageToken, StorageTokens},
     },
     clock::{Clock, SystemClock},
     control_plane::{ControlPlaneClient, LeaseFence},
@@ -28,7 +29,7 @@ use crate::{
 
 pub(crate) struct HostStorage {
     pub runtime: Arc<RuntimeStorage>,
-    objects: Option<google_cloud_storage::client::Storage>,
+    artifacts: Option<ArtifactStorage>,
     pub(super) stop: CancellationToken,
     observer: Arc<ControlPlaneClient>,
     host: HostId,
@@ -54,10 +55,15 @@ impl HostStorage {
         warm: Option<WarmStorage>,
         actor: ActorKey,
     ) -> Result<Self> {
-        let credentials = HostCredentials::new(config.tokens, client.clone(), stop.clone());
-        let (runtime, objects) = match config.bucket {
+        let access = Arc::new(std::sync::RwLock::new(StorageAccess {
+            tokens: config.tokens,
+            aws: config.aws,
+        }));
+        start_access_refresh(access.clone(), client.clone(), stop.clone());
+        let credentials = HostCredentials::new(access.clone());
+        let (runtime, artifacts) = match config.bucket {
             crate::bucket::access::BucketLocation::Gcs { bucket, .. } => {
-                Self::open_gcs(
+                let (runtime, objects) = Self::open_gcs(
                     &bucket,
                     config.persistence,
                     credentials,
@@ -65,7 +71,8 @@ impl HostStorage {
                     &stop,
                     &actor,
                 )
-                .await?
+                .await?;
+                (runtime, objects.map(ArtifactStorage::Gcs))
             }
             crate::bucket::access::BucketLocation::S3 {
                 bucket,
@@ -76,26 +83,28 @@ impl HostStorage {
                     config.persistence.rapid_settings().is_none(),
                     "Rapid persistence requires GCS"
                 );
-                let artifacts = match warm {
-                    Some(warm) => warm.ownership.bind(&artifact_bucket, credentials.into())?,
-                    None => {
-                        GcsBucket::with_credentials(&artifact_bucket, credentials.into()).await?
-                    }
-                };
-                let clients = artifacts.clients();
-                let sdk = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                    .region(aws_config::Region::new(region))
-                    .load()
-                    .await;
+                ensure!(warm.is_none(), "S3 hosts cannot reuse GCS storage clients");
+                let ownership = s3_bucket(
+                    &bucket,
+                    &region,
+                    AwsHostCredentials::new(access.clone(), AwsScope::Ownership),
+                )
+                .await?;
+                let state = s3_bucket(
+                    &bucket,
+                    &region,
+                    AwsHostCredentials::new(access.clone(), AwsScope::State),
+                )
+                .await?;
+                let snapshots: Arc<dyn SnapshotStore> = Arc::new(BucketSnapshots(Arc::new(state)));
                 (
-                    RuntimeStorage::new(
-                        Arc::new(crate::bucket::S3Bucket::new(
-                            &bucket,
-                            aws_sdk_s3::Client::new(&sdk),
-                        )?),
-                        Arc::new(SystemClock),
-                    )?,
-                    Some(clients.storage),
+                    RuntimeStorage::new(Arc::new(ownership), Arc::new(SystemClock))?
+                        .with_persistence(config.persistence, snapshots)?,
+                    Some(ArtifactStorage::S3(S3ArtifactReader {
+                        bucket: artifact_bucket,
+                        region,
+                        access,
+                    })),
                 )
             }
             crate::bucket::access::BucketLocation::File { directory } => {
@@ -108,7 +117,7 @@ impl HostStorage {
             }
         };
         Ok(Self {
-            objects,
+            artifacts,
             observer: client,
             stop,
             runtime: Arc::new(runtime),
@@ -164,15 +173,23 @@ impl HostStorage {
         Ok((runtime, Some(objects)))
     }
 
-    pub(crate) async fn install_code(&self, artifact: &crate::bundle::ActorBundle) -> Result<()> {
-        artifact
-            .install(
-                std::path::Path::new("/customer"),
-                self.objects
-                    .as_ref()
-                    .context("GCS artifact client missing")?,
-            )
-            .await
+    pub(crate) async fn install_code(
+        &self,
+        artifact: &crate::bundle::ArtifactBundle,
+    ) -> Result<()> {
+        match (artifact, self.artifacts.as_ref()) {
+            (crate::bundle::ArtifactBundle::Gcs(bundle), Some(ArtifactStorage::Gcs(storage))) => {
+                bundle
+                    .install(std::path::Path::new("/customer"), storage)
+                    .await
+            }
+            (crate::bundle::ArtifactBundle::S3(bundle), Some(ArtifactStorage::S3(reader))) => {
+                bundle
+                    .install(std::path::Path::new("/customer"), reader)
+                    .await
+            }
+            _ => anyhow::bail!("artifact provider does not match host storage"),
+        }
     }
 
     pub(crate) fn with_activation(
@@ -403,9 +420,165 @@ impl HostLeaseRegistry for HostStorage {
     }
 }
 
+enum ArtifactStorage {
+    Gcs(google_cloud_storage::client::Storage),
+    S3(S3ArtifactReader),
+}
+
+struct S3ArtifactReader {
+    bucket: String,
+    region: String,
+    access: Arc<std::sync::RwLock<StorageAccess>>,
+}
+
+#[async_trait]
+impl crate::bundle::s3::ArtifactReader for S3ArtifactReader {
+    async fn download(
+        &self,
+        bucket: &str,
+        region: &str,
+        object: &str,
+    ) -> Result<Option<crate::bucket::BucketObject>> {
+        ensure!(
+            self.bucket == bucket && self.region == region,
+            "artifact storage location mismatch"
+        );
+        s3_bucket(
+            bucket,
+            region,
+            AwsHostCredentials::new(self.access.clone(), AwsScope::Artifact(object.into())),
+        )
+        .await?
+        .download(object)
+        .await
+    }
+}
+
+async fn s3_bucket(
+    bucket: &str,
+    region: &str,
+    credentials: AwsHostCredentials,
+) -> Result<crate::bucket::S3Bucket> {
+    let sdk = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new(region.to_owned()))
+        .credentials_provider(credentials)
+        .load()
+        .await;
+    crate::bucket::S3Bucket::new(bucket, aws_sdk_s3::Client::new(&sdk))
+}
+
+#[derive(Clone, Debug)]
+enum AwsScope {
+    Ownership,
+    State,
+    Artifact(String),
+}
+
+#[derive(Clone, Debug)]
+struct AwsHostCredentials {
+    access: Arc<std::sync::RwLock<StorageAccess>>,
+    scope: AwsScope,
+}
+
+impl AwsHostCredentials {
+    fn new(access: Arc<std::sync::RwLock<StorageAccess>>, scope: AwsScope) -> Self {
+        Self { access, scope }
+    }
+
+    async fn load(&self) -> aws_credential_types::provider::Result {
+        let access = self.access.read().unwrap();
+        let aws = access.aws.as_ref().ok_or_else(credentials_missing)?;
+        let credential = match &self.scope {
+            AwsScope::Ownership => &aws.ownership,
+            AwsScope::State => &aws.state,
+            AwsScope::Artifact(key) => {
+                &aws.artifacts
+                    .iter()
+                    .find(|batch| batch.keys.contains(key))
+                    .ok_or_else(credentials_missing)?
+                    .credentials
+            }
+        };
+        Ok(aws_credential_types::Credentials::new(
+            credential.access_key_id.clone(),
+            credential.secret_access_key.clone(),
+            Some(credential.session_token.clone()),
+            Some(std::time::UNIX_EPOCH + Duration::from_millis(credential.expires_at_ms)),
+            "actor-scoped-sts",
+        ))
+    }
+}
+
+impl aws_credential_types::provider::ProvideCredentials for AwsHostCredentials {
+    fn provide_credentials<'a>(
+        &'a self,
+    ) -> aws_credential_types::provider::future::ProvideCredentials<'a>
+    where
+        Self: 'a,
+    {
+        aws_credential_types::provider::future::ProvideCredentials::new(self.load())
+    }
+}
+
+fn credentials_missing() -> aws_credential_types::provider::error::CredentialsError {
+    aws_credential_types::provider::error::CredentialsError::not_loaded(std::io::Error::other(
+        "actor-scoped AWS credentials missing",
+    ))
+}
+
+fn start_access_refresh(
+    access: Arc<std::sync::RwLock<StorageAccess>>,
+    client: Arc<ControlPlaneClient>,
+    stop: CancellationToken,
+) {
+    tokio::spawn(async move {
+        loop {
+            let now = SystemClock.now_ms().unwrap_or(u64::MAX);
+            let host_expiry = client.token_expires_at_ms().unwrap_or(now);
+            let expires = access
+                .read()
+                .unwrap()
+                .expires_at_ms()
+                .unwrap_or(host_expiry)
+                .min(host_expiry);
+            let delay = Duration::from_millis(
+                expires
+                    .saturating_sub(now.saturating_add(30_000))
+                    .clamp(1_000, 600_000),
+            );
+            tokio::select! { _ = stop.cancelled() => return, _ = tokio::time::sleep(delay) => {} }
+            match client.refresh_storage_access().await {
+                Ok(refreshed) => *access.write().unwrap() = refreshed,
+                Err(error) => tracing::warn!(%error, "could not refresh host storage credentials"),
+            }
+        }
+    });
+}
+
+impl StorageAccess {
+    fn expires_at_ms(&self) -> Option<u64> {
+        let gcs = self.tokens.as_ref().map(|tokens| {
+            tokens
+                .ownership
+                .expires_at_ms
+                .min(tokens.state.expires_at_ms)
+        });
+        let aws = self.aws.as_ref().map(|credentials| {
+            credentials.artifacts.iter().fold(
+                credentials
+                    .ownership
+                    .expires_at_ms
+                    .min(credentials.state.expires_at_ms),
+                |expires, artifact| expires.min(artifact.credentials.expires_at_ms),
+            )
+        });
+        gcs.into_iter().chain(aws).min()
+    }
+}
+
 #[derive(Clone)]
 struct HostCredentials {
-    tokens: Arc<std::sync::RwLock<Option<StorageTokens>>>,
+    access: Arc<std::sync::RwLock<StorageAccess>>,
     scope: fn(&StorageTokens) -> &StorageToken,
 }
 impl std::fmt::Debug for HostCredentials {
@@ -414,53 +587,16 @@ impl std::fmt::Debug for HostCredentials {
     }
 }
 impl HostCredentials {
-    fn new(
-        tokens: Option<StorageTokens>,
-        client: Arc<ControlPlaneClient>,
-        stop: CancellationToken,
-    ) -> Self {
-        let credentials = Self {
-            tokens: Arc::new(std::sync::RwLock::new(tokens)),
+    fn new(access: Arc<std::sync::RwLock<StorageAccess>>) -> Self {
+        Self {
+            access,
             scope: |tokens| &tokens.ownership,
-        };
-        let refreshed = credentials.tokens.clone();
-        tokio::spawn(async move {
-            loop {
-                let now = SystemClock.now_ms().unwrap_or(u64::MAX);
-                let host_expiry = client.token_expires_at_ms().unwrap_or(now);
-                let expires = refreshed
-                    .read()
-                    .unwrap()
-                    .as_ref()
-                    .map_or(host_expiry, |tokens| {
-                        tokens
-                            .ownership
-                            .expires_at_ms
-                            .min(tokens.state.expires_at_ms)
-                            .min(host_expiry)
-                    });
-                let delay = Duration::from_millis(
-                    expires
-                        .saturating_sub(now.saturating_add(30_000))
-                        .clamp(1_000, 600_000),
-                );
-                tokio::select! { _ = stop.cancelled() => return, _ = tokio::time::sleep(delay) => {} }
-                match client.refresh_storage_access().await {
-                    Ok(tokens) => {
-                        *refreshed.write().unwrap() = tokens;
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "could not refresh host storage credentials")
-                    }
-                }
-            }
-        });
-        credentials
+        }
     }
 
     fn scoped(&self, scope: fn(&StorageTokens) -> &StorageToken) -> Credentials {
         Self {
-            tokens: self.tokens.clone(),
+            access: self.access.clone(),
             scope,
         }
         .into()
@@ -474,8 +610,8 @@ impl CredentialsProvider for HostCredentials {
         CacheableResource<axum::http::HeaderMap>,
         google_cloud_auth::errors::CredentialsError,
     > {
-        let stored = self.tokens.read().unwrap();
-        let token = stored.as_ref().map(self.scope).ok_or_else(|| {
+        let stored = self.access.read().unwrap();
+        let token = stored.tokens.as_ref().map(self.scope).ok_or_else(|| {
             google_cloud_auth::errors::CredentialsError::from_msg(false, "GCS credentials missing")
         })?;
         let mut headers = axum::http::HeaderMap::new();
