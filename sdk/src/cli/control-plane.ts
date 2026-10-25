@@ -12,7 +12,8 @@ interface ControlPlaneConnection {
 class ControlPlaneClient {
     constructor(
         readonly connection: ControlPlaneConnection,
-        private readonly request: typeof fetch
+        private readonly request: typeof fetch,
+        private readonly projectsPath = "/v1/projects"
     ) {}
 
     async checkConnection(): Promise<void> {
@@ -108,7 +109,7 @@ class ControlPlaneClient {
     }
 
     private projectPath(): string {
-        return `/v1/projects/${encodeURIComponent(validateProjectId(this.connection.projectId))}`
+        return `${this.projectsPath}/${encodeURIComponent(validateProjectId(this.connection.projectId))}`
     }
 
     private async requestJson(

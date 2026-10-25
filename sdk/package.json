@@ -59,6 +59,11 @@
             "import": "./dist/host.js",
             "default": "./dist/host.js"
         },
+        "./observe": {
+            "types": "./dist/observe.d.ts",
+            "import": "./dist/observe.js",
+            "default": "./dist/observe.js"
+        },
         "./compiler": {
             "types": "./dist/compiler/actor-compiler.d.ts",
             "import": "./dist/compiler/actor-compiler.js",
