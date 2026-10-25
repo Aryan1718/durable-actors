@@ -69,7 +69,7 @@ async fn assignment_is_authenticated_single_use_and_waits_for_readiness() -> any
         assert!(
             assigned
                 .ready
-                .send(super::super::process::HostReadiness {
+                .send(Ok(super::super::process::HostReadiness {
                     initial_reply: with_operation
                         .then(|| serde_json::json!({"type":"completed", "result":7})),
                     host_id: HostId::new("host.v3.test.one"),
@@ -83,7 +83,7 @@ async fn assignment_is_authenticated_single_use_and_waits_for_readiness() -> any
                         route: "https://host.test".into(),
                         expires_at_ms: 60_000,
                     },
-                })
+                }))
                 .is_ok()
         );
         let reply = call.await??;

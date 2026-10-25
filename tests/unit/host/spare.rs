@@ -168,7 +168,7 @@ async fn run_activation(
                 .is_err()
         );
         assert!(
-            ready_response.await.is_err(),
+            matches!(ready_response.await, Ok(Err(_))),
             "failed activation reported ready"
         );
         let record: serde_json::Value =
@@ -192,7 +192,9 @@ async fn run_activation(
         "{route}/v1/projects/{}/actors/{}/{}",
         actor.project_id, actor.actor_name, actor.actor_id
     );
-    let response = tokio::time::timeout(Duration::from_secs(1), ready_response).await??;
+    let Ok(response) = tokio::time::timeout(Duration::from_secs(1), ready_response).await?? else {
+        anyhow::bail!("host declined the assignment");
+    };
     assert_eq!(response.host_id, host_id);
     assert_eq!(response.session_id, session);
     let initial = response

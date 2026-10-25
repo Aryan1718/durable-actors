@@ -68,6 +68,7 @@ pub(super) async fn serve_assigned_host(
         Ok(prepared) => prepared,
         Err(error) => {
             log_startup(host_id, &timings, "failed", Some(&error));
+            super::assignment::decline(readiness);
             return Err(error);
         }
     };
@@ -95,6 +96,7 @@ pub(super) async fn serve_assigned_host(
         invocation_auth,
         sockets.clone(),
     );
+    let mut started = false;
     let initialized = async {
         let owner_epoch =
             initialize_executor(&executor_connection, &host, &sockets, &database).await?;
@@ -113,11 +115,14 @@ pub(super) async fn serve_assigned_host(
             tokio::fs::rename(temporary, path).await?;
         }
         ready.initial_reply = match operation {
-            Some(operation) => Some(
-                service
-                    .execute_initial(operation, owner_epoch, timings.elapsed_ms())
-                    .await?,
-            ),
+            Some(operation) => {
+                started = true;
+                Some(
+                    service
+                        .execute_initial(operation, owner_epoch, timings.elapsed_ms())
+                        .await?,
+                )
+            }
             None => None,
         };
         ready.lease = storage.current_lease()?;
@@ -130,6 +135,9 @@ pub(super) async fn serve_assigned_host(
             log_startup(host_id, &timings, "failed", Some(&error));
             let _ = lease.unregister().await;
             let _ = renewal.shutdown().await;
+            if !started {
+                super::assignment::decline(readiness);
+            }
             return Err(error);
         }
     };
@@ -141,7 +149,7 @@ pub(super) async fn serve_assigned_host(
         host.status(),
     )?;
     if let Some(readiness) = readiness {
-        let _ = readiness.send(ready);
+        let _ = readiness.send(Ok(ready));
     }
     timings.executor_notified_at_ms = Some(timings.elapsed_ms());
     log_startup(host_id, &timings, "ready", None);

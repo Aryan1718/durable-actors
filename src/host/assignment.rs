@@ -15,7 +15,17 @@ use crate::sandbox::assignment::{AssignmentRequest, InitialOperation, InitialReq
 pub(super) struct Assignment {
     pub environment: HashMap<String, String>,
     pub operation: Option<InitialOperation>,
-    pub ready: oneshot::Sender<HostReadiness>,
+    pub ready: oneshot::Sender<Readiness>,
+}
+
+pub(super) struct NotStarted;
+
+pub(super) type Readiness = Result<HostReadiness, NotStarted>;
+
+pub(super) fn decline(readiness: Option<oneshot::Sender<Readiness>>) {
+    if let Some(readiness) = readiness {
+        let _ = readiness.send(Err(NotStarted));
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -73,10 +83,11 @@ async fn assign(
             ready,
         })
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
-    receive
-        .await
-        .map(Json)
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)
+    match receive.await {
+        Ok(Ok(ready)) => Ok(Json(ready)),
+        Ok(Err(NotStarted)) => Err(StatusCode::CONFLICT),
+        Err(_) => Err(StatusCode::SERVICE_UNAVAILABLE),
+    }
 }
 
 fn validate_operation(

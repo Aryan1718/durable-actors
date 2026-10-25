@@ -288,3 +288,35 @@ async fn unreadable_assignment_operation_reply_has_an_unknown_outcome() -> Resul
     server.abort();
     Ok(())
 }
+
+#[tokio::test]
+async fn declined_assignment_operation_has_a_known_outcome() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let mut request = request()?;
+    let spare = request.spare.as_mut().unwrap();
+    spare.control_route = format!("http://{}", listener.local_addr()?);
+    let routes = axum::Router::new().route(
+        "/assign",
+        axum::routing::post(|| async { axum::http::StatusCode::CONFLICT }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, routes).await });
+    let operation = assignment::InitialOperation {
+        request: assignment::InitialRequest::Invoke {
+            invocation: crate::actor::ActorInvocation {
+                actor: request.actor.clone().unwrap(),
+                request_id: "first".into(),
+                method: "read".into(),
+                args: vec![],
+            },
+            grant: None,
+        },
+        routing_ms: 0.0,
+    };
+    let error = HttpAssignment(HostConnections::new()?)
+        .assign(spare, HashMap::new(), Some(operation))
+        .await
+        .unwrap_err();
+    assert!(!error.is::<assignment::AssignmentOutcomeUnknown>());
+    server.abort();
+    Ok(())
+}

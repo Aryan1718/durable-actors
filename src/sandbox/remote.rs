@@ -307,6 +307,11 @@ impl HostAssignment for HttpAssignment {
                 error.into()
             }
         })?;
+        let status = response.status();
+        ensure!(
+            !assignment::declined_before_execution(status),
+            "spare declined the assignment before running it: {status}"
+        );
         let result = async {
             let handle: ActorHostHandle = response
                 .error_for_status()?

@@ -41,3 +41,11 @@ impl std::fmt::Display for AssignmentOutcomeUnknown {
 }
 
 impl std::error::Error for AssignmentOutcomeUnknown {}
+
+pub(crate) fn declined_before_execution(status: reqwest::StatusCode) -> bool {
+    use reqwest::StatusCode;
+    matches!(
+        status,
+        StatusCode::BAD_REQUEST | StatusCode::UNAUTHORIZED | StatusCode::CONFLICT
+    )
+}

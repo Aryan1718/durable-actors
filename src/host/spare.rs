@@ -11,7 +11,7 @@ use crate::litestream::{Litestream, Replicator};
 
 pub(super) struct WarmHost {
     pub operation: Option<crate::sandbox::assignment::InitialOperation>,
-    pub readiness: Option<tokio::sync::oneshot::Sender<super::process::HostReadiness>>,
+    pub readiness: Option<tokio::sync::oneshot::Sender<super::assignment::Readiness>>,
     pub listener: TcpListener,
     pub executor: WarmExecutor,
     pub javascript: tokio::process::Child,
@@ -37,7 +37,7 @@ pub async fn serve_spare(shutdown: impl Future<Output = ()> + Send + 'static) ->
     let control = TcpListener::bind(control_bind).await?;
     let (send, receive) = tokio::sync::oneshot::channel();
     let stop = tokio_util::sync::CancellationToken::new();
-    let _stop_guard = stop.clone().drop_guard();
+    let stop_guard = stop.clone().drop_guard();
     let mut server = tokio::spawn(async move {
         axum::serve(control, super::assignment::router(token, send))
             .with_graceful_shutdown(stop.cancelled_owned())
@@ -76,10 +76,44 @@ pub async fn serve_spare(shutdown: impl Future<Output = ()> + Send + 'static) ->
         () = storage.keep_warm() => unreachable!("storage warmup stopped"),
     };
     tokio::fs::remove_file(&ready).await?;
-    let environment = assigned.environment;
     let timings = HostStartupTimings::start();
+    let result = match assigned_config(&assigned.environment, runtime) {
+        Ok(config) => {
+            let warm = WarmHost {
+                operation: assigned.operation,
+                readiness: Some(assigned.ready),
+                listener,
+                executor,
+                javascript,
+                storage,
+                control_plane,
+                replication,
+            };
+            let timings = timings.configuration_loaded();
+            serve_assigned_host(config, timings, Some(warm), shutdown).await
+        }
+        Err(error) => {
+            super::assignment::decline(Some(assigned.ready));
+            Err(error)
+        }
+    };
+    // Exiting before the assignment reply is written would turn a declined operation into a lost one.
+    drop(stop_guard);
+    let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
+    result
+}
+
+async fn prewarm_control_plane(url: Option<String>) -> Result<WarmControlPlane> {
+    let url = url.context("spare control-plane URL required")?;
+    let client = crate::control_plane::ControlPlaneClient::prewarm(&url).await?;
+    Ok(WarmControlPlane { url, client })
+}
+
+fn assigned_config(
+    environment: &std::collections::HashMap<String, String>,
+    runtime: crate::bundle::ActorRuntime,
+) -> Result<ActorHostConfig> {
     let config = ActorHostConfig::from_lookup(|name| environment.get(name).cloned())?;
-    let timings = timings.configuration_loaded();
     let entrypoint = config
         .executor
         .entrypoint
@@ -97,23 +131,7 @@ pub async fn serve_spare(shutdown: impl Future<Output = ()> + Send + 'static) ->
         config.executor.runtime == runtime,
         "actor artifact does not match the prewarmed executor runtime"
     );
-    let warm = WarmHost {
-        operation: assigned.operation,
-        readiness: Some(assigned.ready),
-        listener,
-        executor,
-        javascript,
-        storage,
-        control_plane,
-        replication,
-    };
-    serve_assigned_host(config, timings, Some(warm), shutdown).await
-}
-
-async fn prewarm_control_plane(url: Option<String>) -> Result<WarmControlPlane> {
-    let url = url.context("spare control-plane URL required")?;
-    let client = crate::control_plane::ControlPlaneClient::prewarm(&url).await?;
-    Ok(WarmControlPlane { url, client })
+    Ok(config)
 }
 
 #[cfg(test)]
