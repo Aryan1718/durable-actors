@@ -2,16 +2,20 @@ use super::*;
 
 pub(super) struct Segment {
     pub manifest: Manifest,
+    pub zones: Vec<Arc<dyn LogZone>>,
     writers: Vec<Box<dyn LogWriter>>,
     pub offset: u64,
     healthy: bool,
 }
 
 impl Segment {
+    /// Opens in `placed` zones when the session already chose them, otherwise by `storage`'s
+    /// placement.
     pub async fn open(
         storage: &LogStorage,
         stream: StateStream,
         first_version: u64,
+        placed: Option<Vec<Arc<dyn LogZone>>>,
     ) -> Result<Option<Self>> {
         let started = std::time::Instant::now();
         let actor = crate::storage_paths::actor_from_snapshot(&stream.object(first_version))?;
@@ -29,7 +33,10 @@ impl Segment {
                 );
                 prepared
             }
-            None => Prepared::new(prefix, storage.zones.clone()),
+            None => match placed {
+                Some(zones) => Prepared::new(prefix, zones, crate::bucket::RapidPlacement::All),
+                None => Prepared::new(prefix, storage.zones.clone(), storage.placement),
+            },
         };
         let mut manifest = Manifest {
             format: 1,
@@ -46,6 +53,7 @@ impl Segment {
             manifest.replicas.push(replica);
             writers.push(writer);
         }
+        let zones = storage.replica_zones(&manifest)?;
         let key = manifest.key()?;
         let open_ms = started.elapsed().as_secs_f64() * 1000.0;
         ensure!(
@@ -61,12 +69,19 @@ impl Segment {
         tracing::info!(
             event = "rapid_log_open",
             owner_epoch = manifest.stream.owner_epoch,
+            buckets = %manifest
+                .replicas
+                .iter()
+                .map(|replica| replica.bucket.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
             open_ms,
             manifest_ms = started.elapsed().as_secs_f64() * 1000.0 - open_ms,
             duration_ms = started.elapsed().as_secs_f64() * 1000.0
         );
         Ok(Some(Self {
             manifest,
+            zones,
             writers,
             offset: 0,
             healthy: true,

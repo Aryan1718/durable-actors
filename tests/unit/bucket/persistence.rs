@@ -48,3 +48,27 @@ fn rapid_accepts_one_or_two_distinct_zones_and_separate_archive() -> Result<()> 
     }
     Ok(())
 }
+
+#[test]
+fn nearest_placement_needs_two_zones_and_the_default_is_not_persisted() -> Result<()> {
+    let config = |placement: Option<&str>, zones: usize| -> Result<SnapshotStoreConfig> {
+        let mut value = json!({"type":"rapid", "archive_bucket":"archive-test", "buckets":[
+            {"bucket":"rapid-test-a", "zone":"us-west1-a"},
+            {"bucket":"rapid-test-b", "zone":"us-west4-a"}
+        ]});
+        value["buckets"].as_array_mut().unwrap().truncate(zones);
+        if let Some(placement) = placement {
+            value["placement"] = json!(placement);
+        }
+        Ok(serde_json::from_value(value)?)
+    };
+    let all = config(None, 2)?;
+    let nearest = config(Some("nearest"), 2)?;
+    nearest.validate()?;
+    assert!(config(Some("nearest"), 1)?.validate().is_err());
+    assert_eq!(config(Some("all"), 2)?, all);
+    assert!(all.same_backend(&nearest));
+    assert!(serde_json::to_value(&all)?.get("placement").is_none());
+    assert_eq!(serde_json::to_value(&nearest)?["placement"], "nearest");
+    Ok(())
+}

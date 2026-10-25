@@ -60,6 +60,7 @@ struct LogStorage {
     archive: Arc<dyn Bucket>,
     snapshots: Arc<dyn SnapshotStore>,
     zones: Vec<Arc<dyn LogZone>>,
+    placement: super::RapidPlacement,
     prepared: std::sync::Mutex<Option<Prepared>>,
     batch: super::ArchiveBatchConfig,
     live: std::sync::Mutex<BTreeMap<u64, index::LiveRecord>>,
@@ -106,8 +107,11 @@ impl RapidSnapshots {
             "logs-",
             1,
         );
-        *self.storage.prepared.lock().unwrap() =
-            Some(Prepared::new(prefix, self.storage.zones.clone()));
+        *self.storage.prepared.lock().unwrap() = Some(Prepared::new(
+            prefix,
+            self.storage.zones.clone(),
+            self.storage.placement,
+        ));
         Ok(())
     }
 
@@ -115,6 +119,7 @@ impl RapidSnapshots {
         archive: Arc<dyn Bucket>,
         snapshots: Arc<dyn SnapshotStore>,
         zones: Vec<Arc<dyn LogZone>>,
+        placement: super::RapidPlacement,
         batch: super::ArchiveBatchConfig,
         compactor: Arc<dyn crate::litestream::compaction::LtxCompactor>,
         stop: CancellationToken,
@@ -131,6 +136,7 @@ impl RapidSnapshots {
             archive,
             snapshots,
             zones,
+            placement,
             prepared: std::sync::Mutex::new(None),
             batch,
             live: std::sync::Mutex::new(BTreeMap::new()),
@@ -319,16 +325,35 @@ impl Manifest {
             object.rsplit('/').nth(1) == Some(format!("{:032x}", self.stream.owner_epoch).as_str()),
             "manifest epoch mismatch"
         );
-        ensure!(self.replicas.len() == zones.len(), "missing log replicas");
-        for (replica, zone) in self.replicas.iter().zip(zones) {
+        ensure!(!self.replicas.is_empty(), "missing log replicas");
+        let mut buckets = std::collections::HashSet::new();
+        for replica in &self.replicas {
             ensure!(
-                replica.bucket == zone.bucket()
+                buckets.insert(&replica.bucket)
+                    && zones.iter().any(|zone| zone.bucket() == replica.bucket)
                     && replica.object == self.object()?
                     && replica.generation > 0,
                 "invalid log replica descriptor"
             );
         }
         Ok(())
+    }
+}
+
+impl LogStorage {
+    fn zone(&self, replica: &Replica) -> Result<&Arc<dyn LogZone>> {
+        self.zones
+            .iter()
+            .find(|zone| zone.bucket() == replica.bucket)
+            .context("log replica names an unconfigured zone")
+    }
+
+    fn replica_zones(&self, manifest: &Manifest) -> Result<Vec<Arc<dyn LogZone>>> {
+        manifest
+            .replicas
+            .iter()
+            .map(|replica| self.zone(replica).cloned())
+            .collect()
     }
 }
 

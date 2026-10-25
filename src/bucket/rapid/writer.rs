@@ -29,6 +29,7 @@ impl Session {
             storage,
             stream.clone(),
             version.checked_add(1).context("state version overflow")?,
+            None,
         );
         Ok(Self {
             stream,
@@ -170,9 +171,11 @@ impl Session {
         let Some(first_version) = self.version.checked_add(1) else {
             return;
         };
-        let next = self
-            .next
-            .get_or_insert_with(|| prepare(storage.clone(), self.stream.clone(), first_version));
+        // Rotations stay in the zones the session was placed in.
+        let placed = self.segment.as_ref().map(|segment| segment.zones.clone());
+        let next = self.next.get_or_insert_with(|| {
+            prepare(storage.clone(), self.stream.clone(), first_version, placed)
+        });
         let Some(result) = next.now_or_never() else {
             return;
         };
@@ -247,9 +250,14 @@ impl Session {
     }
 }
 
-fn prepare(storage: Arc<LogStorage>, stream: StateStream, first: u64) -> Preparing {
+fn prepare(
+    storage: Arc<LogStorage>,
+    stream: StateStream,
+    first: u64,
+    placed: Option<Vec<Arc<dyn LogZone>>>,
+) -> Preparing {
     AbortOnDropHandle::new(tokio::spawn(async move {
-        Segment::open(&storage, stream, first).await
+        Segment::open(&storage, stream, first, placed).await
     }))
 }
 

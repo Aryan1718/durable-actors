@@ -5,7 +5,7 @@ mod rapid;
 pub(crate) use rapid::{RAPID_OPERATION_TIMEOUT, RapidSnapshots};
 pub(crate) mod recovery;
 mod snapshots;
-pub use snapshots::{ArchiveBatchConfig, RapidBucket, SnapshotStoreConfig};
+pub use snapshots::{ArchiveBatchConfig, RapidBucket, RapidPlacement, SnapshotStoreConfig};
 pub(crate) use snapshots::{BucketSnapshots, SnapshotStore};
 mod runtime;
 

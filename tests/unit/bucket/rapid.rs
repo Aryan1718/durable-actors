@@ -128,6 +128,154 @@ async fn actor_assignment_opens_both_connections_before_activation_and_reuses_th
 }
 
 #[tokio::test]
+async fn nearest_placement_writes_to_the_first_zone_to_open_and_discards_the_rest() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.placement = crate::bucket::RapidPlacement::Nearest;
+    f.zones[0].open_delay_ms.store(20, Ordering::SeqCst);
+    let store = f.store()?;
+    store.prepare(&crate::storage_paths::actor_from_snapshot(
+        &f.stream.object(1),
+    )?)?;
+    store.start(&f.stream).await?;
+    for version in 1..=2 {
+        store
+            .put(&f.stream.object(version), state(version, 1)?)
+            .await?;
+    }
+    assert!(written(&f.zones[1]) && !written(&f.zones[0]));
+    f.zones[0].discarded().await?;
+    assert_eq!(
+        f.store()?.latest(&f.stream.prefix).await?,
+        Some((f.stream.object(2), state(2, 1)?))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn nearest_placement_skips_an_unavailable_zone() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.placement = crate::bucket::RapidPlacement::Nearest;
+    f.zones[0].offline.store(true, Ordering::SeqCst);
+    let store = f.store()?;
+    store.start(&f.stream).await?;
+    store.put(&f.stream.object(1), state(1, 1)?).await?;
+    assert!(written(&f.zones[1]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn nearest_placement_rotates_within_the_chosen_zone() -> Result<()> {
+    let mut f = Fixture::new()?;
+    f.placement = crate::bucket::RapidPlacement::Nearest;
+    f.zones[0].open_delay_ms.store(20, Ordering::SeqCst);
+    let store = f.store()?;
+    store.start(&f.stream).await?;
+    store.put(&f.stream.object(1), state(1, 1)?).await?;
+    f.zones[0].discarded().await?;
+    f.zones[0].open_delay_ms.store(0, Ordering::SeqCst);
+    tokio::time::pause();
+    tokio::time::advance(Duration::from_secs(61)).await;
+    tokio::time::resume();
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while manifests(&f).await.len() < 2 {
+            let mut session = store.session.lock().await;
+            session
+                .as_mut()
+                .unwrap()
+                .rotate(store.storage.clone())
+                .await;
+            drop(session);
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await?;
+    store.put(&f.stream.object(2), state(2, 1)?).await?;
+    assert_eq!(f.zones[0].opens.load(Ordering::SeqCst), 1);
+    assert!(
+        manifests(&f)
+            .await
+            .iter()
+            .all(|m| m.replicas.len() == 1 && m.replicas[0].bucket == "b")
+    );
+    assert_eq!(
+        f.store()?.latest(&f.stream.prefix).await?,
+        Some((f.stream.object(2), state(2, 1)?))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn logs_stay_recoverable_when_placement_changes() -> Result<()> {
+    use crate::bucket::RapidPlacement::{All, Nearest};
+    for (writer, reader) in [(All, Nearest), (Nearest, All)] {
+        let mut f = Fixture::new()?;
+        f.placement = writer;
+        let store = f.store()?;
+        store.start(&f.stream).await?;
+        store.put(&f.stream.object(1), state(1, 1)?).await?;
+        drop(store);
+        f.placement = reader;
+        assert_eq!(
+            f.store()?.recover(&f.stream.prefix).await?,
+            Some((f.stream.object(1), state(1, 1)?))
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn manifests_must_name_distinct_configured_zones() -> Result<()> {
+    let tampers: [fn(&mut Vec<Replica>); 2] = [
+        |replicas| replicas.push(replicas[0].clone()),
+        |replicas| replicas[0].bucket = "unconfigured".into(),
+    ];
+    for tamper in tampers {
+        let f = Fixture::new()?;
+        let store = f.store()?;
+        store.start(&f.stream).await?;
+        store.put(&f.stream.object(1), state(1, 1)?).await?;
+        let prefix = crate::bucket::rapid::object_name(&f.stream.prefix)?;
+        let key = f
+            .archive
+            .list(&prefix)
+            .await?
+            .into_iter()
+            .find(|key| key.ends_with(".manifest"))
+            .unwrap();
+        let stored = f.archive.get(&key).await?.unwrap();
+        let mut manifest: Manifest = serde_json::from_slice(&stored.bytes)?;
+        tamper(&mut manifest.replicas);
+        let tampered = crate::payload::encode(&manifest)?;
+        assert!(
+            f.archive
+                .compare_and_swap(&key, Some(stored.generation), tampered)
+                .await?
+        );
+        assert!(f.store()?.latest(&f.stream.prefix).await.is_err());
+    }
+    Ok(())
+}
+
+fn written(zone: &MemoryZone) -> bool {
+    zone.objects
+        .lock()
+        .unwrap()
+        .values()
+        .any(|object| !object.bytes.is_empty())
+}
+
+async fn manifests(f: &Fixture) -> Vec<Manifest> {
+    let mut manifests = Vec::new();
+    for key in f.archive.list("").await.unwrap() {
+        if key.ends_with(".manifest") {
+            let bytes = f.archive.get(&key).await.unwrap().unwrap().bytes;
+            manifests.push(serde_json::from_slice(&bytes).unwrap());
+        }
+    }
+    manifests
+}
+
+#[tokio::test]
 async fn foreign_prepared_connections_are_rejected() -> Result<()> {
     let f = Fixture::new()?;
     let store = f.store()?;
@@ -191,6 +339,7 @@ async fn failed_manifest_publication_never_acknowledges_an_undiscoverable_log() 
             .iter()
             .map(|zone| zone.clone() as Arc<dyn LogZone>)
             .collect(),
+        f.placement,
         crate::bucket::ArchiveBatchConfig::default(),
         Arc::new(crate::litestream::compaction::RustCompactor),
         CancellationToken::new(),
@@ -226,6 +375,7 @@ async fn runtime_crash_recovery_advances_ownership_before_enabling_new_writes() 
     let clock = Arc::new(TestClock(AtomicU64::new(1)));
     let config = SnapshotStoreConfig::Rapid {
         archive_batch: Default::default(),
+        placement: Default::default(),
         archive_bucket: "archive".into(),
         buckets: vec![
             RapidBucket {
@@ -488,6 +638,7 @@ async fn failed_coverage_publication_never_deletes_a_durable_rapid_copy() -> Res
             .iter()
             .map(|z| z.clone() as Arc<dyn LogZone>)
             .collect(),
+        f.placement,
         crate::bucket::ArchiveBatchConfig::default(),
         Arc::new(crate::litestream::compaction::RustCompactor),
         CancellationToken::new(),
@@ -650,6 +801,7 @@ struct Fixture {
     _directory: tempfile::TempDir,
     archive: Arc<FileBucket>,
     zones: Vec<Arc<MemoryZone>>,
+    placement: crate::bucket::RapidPlacement,
     stream: StateStream,
 }
 
@@ -726,6 +878,7 @@ impl Fixture {
                 Arc::new(MemoryZone::new("a")),
                 Arc::new(MemoryZone::new("b")),
             ],
+            placement: Default::default(),
             stream: StateStream {
                 session: "session".into(),
                 prefix: object.strip_suffix("1.json").unwrap().into(),
@@ -742,6 +895,7 @@ impl Fixture {
                 .iter()
                 .map(|z| z.clone() as Arc<dyn LogZone>)
                 .collect(),
+            self.placement,
             crate::bucket::ArchiveBatchConfig::default(),
             Arc::new(crate::litestream::compaction::RustCompactor),
             CancellationToken::new(),
@@ -760,6 +914,7 @@ struct MemoryZone {
     offline: Arc<AtomicBool>,
     stalled: Arc<AtomicBool>,
     opens: AtomicU64,
+    open_delay_ms: AtomicU64,
     range_reads: AtomicU64,
 }
 impl MemoryZone {
@@ -770,8 +925,19 @@ impl MemoryZone {
             offline: Default::default(),
             stalled: Default::default(),
             opens: AtomicU64::new(0),
+            open_delay_ms: AtomicU64::new(0),
             range_reads: AtomicU64::new(0),
         }
+    }
+    async fn discarded(&self) -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while self.opens.load(Ordering::SeqCst) == 0 || !self.objects.lock().unwrap().is_empty()
+            {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await?;
+        Ok(())
     }
 }
 #[async_trait]
@@ -781,6 +947,10 @@ impl LogZone for MemoryZone {
     }
     async fn open(&self, object: &str) -> Result<(Replica, Box<dyn LogWriter>)> {
         ensure!(!self.offline.load(Ordering::SeqCst), "zone offline");
+        let delay = self.open_delay_ms.load(Ordering::SeqCst);
+        if delay > 0 {
+            tokio::time::sleep(Duration::from_millis(delay)).await;
+        }
         let mut objects = self.objects.lock().unwrap();
         ensure!(!objects.contains_key(object), "already exists");
         objects.insert(object.into(), MemoryObject::default());

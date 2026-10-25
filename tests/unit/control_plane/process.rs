@@ -477,6 +477,40 @@ fn persistence_selection_rejects_typos_and_conflicting_rapid_configuration() {
 }
 
 #[test]
+fn rapid_placement_defaults_to_every_zone_and_accepts_nearest() -> Result<()> {
+    let mut values = process_environment();
+    let parse = |values: &HashMap<&str, &str>| {
+        ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|value| (*value).into()))
+    };
+    let placement = |values: &HashMap<&str, &str>| -> Result<_> {
+        match parse(values)?.storage.persistence {
+            crate::bucket::SnapshotStoreConfig::Rapid { placement, .. } => Ok(placement),
+            crate::bucket::SnapshotStoreConfig::Local => anyhow::bail!("expected Rapid"),
+        }
+    };
+    assert_eq!(placement(&values)?, crate::bucket::RapidPlacement::All);
+    values.insert("DURABLE_ACTORS_RAPID_PLACEMENT", "nearest");
+    assert_eq!(placement(&values)?, crate::bucket::RapidPlacement::Nearest);
+    values.insert("DURABLE_ACTORS_RAPID_PLACEMENT", "closest");
+    assert!(parse(&values).is_err());
+    values.insert("DURABLE_ACTORS_RAPID_PLACEMENT", "nearest");
+    values.insert(
+        "DURABLE_ACTORS_RAPID_BUCKETS",
+        r#"[{"bucket":"rapid-test-a","zone":"us-west4-a"}]"#,
+    );
+    assert!(parse(&values).is_err());
+    for name in [
+        "DURABLE_ACTORS_PERSISTENCE",
+        "DURABLE_ACTORS_ARCHIVE_BUCKET",
+        "DURABLE_ACTORS_RAPID_BUCKETS",
+    ] {
+        values.remove(name);
+    }
+    assert!(parse(&values).is_err());
+    Ok(())
+}
+
+#[test]
 fn single_gke_zone_infers_the_actor_region() -> Result<()> {
     let mut values = process_environment();
     values.remove("DURABLE_ACTORS_GKE_ZONES");

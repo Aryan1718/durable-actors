@@ -53,6 +53,8 @@ storage:
       - {bucket: my-actor-rapid-b, zone: us-west4-b}
 ```
 
+Set `storage.rapid.placement: nearest` with one bucket in each of two regions to write each actor's log only in the zone that opens first from its host.
+
 Every configured copy must durably flush before a Rapid write is acknowledged. With one zone, there is no second Rapid copy if that zone is lost before archival. Mode and bucket identities are fixed for existing actor ownership records; choose Rapid before creating actors in that installation. An existing installation needs a planned data migration, not a values-only mode change.
 
 ## Advanced settings
