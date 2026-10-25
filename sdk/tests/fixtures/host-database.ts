@@ -112,11 +112,12 @@ export class HostDatabase {
     }
 
     private write(immediate: boolean, operation: () => DatabaseResult | void): DatabaseResult {
-        if (!this.transaction) this.connection.exec("BEGIN IMMEDIATE")
+        const opened = !this.transaction
+        if (opened) this.connection.exec("BEGIN IMMEDIATE")
         this.transaction = true
         const before = this.changeToken()
         const result = operation() ?? { type: "done" }
-        if (immediate && this.changeToken() !== before) this.commit()
+        if (immediate && (opened || this.changeToken() !== before)) this.commit()
         return result
     }
 

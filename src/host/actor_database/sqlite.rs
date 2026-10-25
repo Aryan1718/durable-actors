@@ -82,6 +82,7 @@ impl Engine {
     fn call(&mut self, call: DatabaseCall) -> Result<Executed> {
         let immediate = call.immediate();
         let before = token(&self.connection)?;
+        let mut opened = false;
         let result = match call {
             DatabaseCall::Commit => {
                 let committed = self.commit()?;
@@ -98,11 +99,12 @@ impl Engine {
                 unreachable!("alarm calls are handled by the control plane")
             }
             call => {
-                self.begin()?;
+                opened = self.begin()?;
                 self.write(call)?
             }
         };
-        let committed = immediate && token(&self.connection)? != before && self.commit()?;
+        let committed =
+            immediate && (opened || token(&self.connection)? != before) && self.commit()?;
         Ok(Executed { result, committed })
     }
 
@@ -218,13 +220,14 @@ impl Engine {
         Ok(())
     }
 
-    fn begin(&self) -> Result<()> {
-        if self.connection.is_autocommit() {
-            self.connection
-                .execute_batch("BEGIN IMMEDIATE")
-                .context("failed to begin actor transaction")?;
+    fn begin(&self) -> Result<bool> {
+        if !self.connection.is_autocommit() {
+            return Ok(false);
         }
-        Ok(())
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .context("failed to begin actor transaction")?;
+        Ok(true)
     }
 
     fn commit(&mut self) -> Result<bool> {

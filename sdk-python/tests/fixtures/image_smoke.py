@@ -52,12 +52,12 @@ class Counter(Actor):
                                 send(
                                     {
                                         "type": "database_result",
-                                        "message_id": message["message_id"],
+                                        "call_id": message["call_id"],
                                         "result": database.call(message["call"]),
                                     }
                                 )
 
-                        assert receive() == {"type": "warm", "protocol": 28}
+                        assert receive() == {"type": "warm", "protocol": 29}
                         send(
                             {
                                 "type": "load",
@@ -67,11 +67,11 @@ class Counter(Actor):
                         )
                         assert receive() == {
                             "type": "attach",
-                            "protocol": 28,
+                            "protocol": 29,
                             "actor_names": ["Counter"],
                         }
                         actor = {"project_id": "local", "actor_name": "Counter", "actor_id": "one"}
-                        send({"type": "attached", "protocol": 28, "actor": actor})
+                        send({"type": "attached", "protocol": 29, "actor": actor})
                         send(
                             {
                                 "type": "command",

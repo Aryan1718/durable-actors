@@ -35,9 +35,23 @@ type DatabaseTransport = (call: DatabaseCall) => DatabaseResult
 class DatabaseCommitError extends Error {}
 
 class DatabaseProxy implements ActorDatabase, ActorAlarmStorage {
+    private atomicInvocations = 0
+
     constructor(private readonly transport: DatabaseTransport) {}
 
+    async atomically<T>(operation: () => Promise<T>): Promise<T> {
+        this.atomicInvocations++
+        try {
+            return await operation()
+        } finally {
+            this.atomicInvocations--
+        }
+    }
+
     exec<Row extends object>(sql: string, ...bindings: SqliteValue[]): Row[] {
+        // Background SQL would join, and then commit, the open @Atomic transaction.
+        if (this.atomicInvocations > 0 && actorDatabaseMode() === "background")
+            throw new Error("actor database is unavailable to background work while an @Atomic method runs")
         const result = this.transport({ op: "exec", sql, bindings: bindings.map(encode), immediate: immediate() })
         if (result.type !== "rows") throw unexpected(result)
         return result.rows.map(
@@ -91,7 +105,8 @@ class DatabaseProxy implements ActorDatabase, ActorAlarmStorage {
 }
 
 function immediate(): boolean {
-    return actorDatabaseMode() === "immediate"
+    const mode = actorDatabaseMode()
+    return mode === "immediate" || mode === "background"
 }
 
 function encode(value: SqliteValue): DatabaseValue {

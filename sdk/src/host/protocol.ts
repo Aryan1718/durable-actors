@@ -74,12 +74,12 @@ const actorSessionServerMessageSchema = z.discriminatedUnion("type", [
     z
         .object({
             type: z.literal("database_result"),
-            message_id: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+            call_id: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
             result: databaseResultSchema.optional(),
             error: z.string().optional()
         })
         .refine(message => (message.result === undefined) !== (message.error === undefined)),
-    z.object({ type: z.literal("attached"), protocol: z.literal(28), actor: actorIdentitySchema }),
+    z.object({ type: z.literal("attached"), protocol: z.literal(29), actor: actorIdentitySchema }),
     z.object({
         type: z.literal("socket_connections"),
         message_id: z.number().int().nonnegative(),
@@ -107,7 +107,12 @@ type ActorSessionServerMessage = z.infer<typeof actorSessionServerMessageSchema>
 type ActorExecutorReply =
     InvokedReply | WebSocketHandledReply | FailedReply | EvictedReply | { readonly type: "hydrated" }
 type ActorSessionClientMessage =
-    | { readonly type: "database_call"; readonly message_id: number; readonly call: DatabaseCall }
+    | {
+          readonly type: "database_call"
+          readonly call_id: number
+          readonly message_id?: number
+          readonly call: DatabaseCall
+      }
     | { readonly type: "residency"; readonly resident: boolean }
     | AttachMessage
     | { readonly type: "ready_for_invocation"; readonly message_id: number }
@@ -117,7 +122,7 @@ type ActorSessionClientMessage =
 
 interface AttachMessage {
     readonly type: "attach"
-    readonly protocol: 28
+    readonly protocol: 29
     readonly actor_names: readonly string[]
 }
 
@@ -176,7 +181,7 @@ type ActorWorkerRequest =
 type ActorWorkerMessage =
     | {
           readonly type: "database_call"
-          readonly messageId: number
+          readonly messageId?: number
           readonly call: DatabaseCall
           readonly request: DatabaseRequest
       }

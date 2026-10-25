@@ -672,7 +672,7 @@ impl Stack {
             endpoint,
             actor.clone(),
             connection.executor(),
-            database,
+            database.clone(),
             local_sockets.clone(),
         ));
         connection
@@ -680,6 +680,7 @@ impl Stack {
                 host.actor().clone(),
                 Some(local_sockets.clone()),
                 Some(source.unwrap_or_else(|| local_sockets.clone())),
+                Some(database.background(host.actor().clone())),
             )
             .await?;
         host.activate().await?;

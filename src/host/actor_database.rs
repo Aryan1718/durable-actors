@@ -105,6 +105,29 @@ impl HostDatabase {
         owner_epoch: u64,
         origin: CommitOrigin,
     ) -> Arc<DatabaseInvocation> {
+        self.scope(invocation, Some(owner_epoch), origin)
+    }
+
+    /// A scope for the whole activation: it never closes and follows the current owner epoch.
+    pub(crate) fn background(
+        self: &Arc<Self>,
+        actor: crate::actor::ActorKey,
+    ) -> Arc<dyn ActorDatabase> {
+        let invocation = ActorInvocation {
+            actor,
+            request_id: "background".into(),
+            method: "background".into(),
+            args: vec![],
+        };
+        self.scope(invocation, None, CommitOrigin::default())
+    }
+
+    fn scope(
+        self: &Arc<Self>,
+        invocation: ActorInvocation,
+        owner_epoch: Option<u64>,
+        origin: CommitOrigin,
+    ) -> Arc<DatabaseInvocation> {
         Arc::new(DatabaseInvocation {
             database: self.clone(),
             scope: Arc::new(InvocationScope {
@@ -240,7 +263,7 @@ impl ActorDatabase for DatabaseInvocation {
 
 struct InvocationScope {
     invocation: ActorInvocation,
-    owner_epoch: u64,
+    owner_epoch: Option<u64>,
     origin: CommitOrigin,
     committed: AtomicU64,
     active: AtomicBool,

@@ -86,7 +86,7 @@ class Counter(Actor):
                 host = ExecutorHost(reader, writer, database)
                 try:
                     if generic:
-                        assert await host.receive() == {"type": "warm", "protocol": 28}
+                        assert await host.receive() == {"type": "warm", "protocol": 29}
                         host.send(
                             {
                                 "type": "load",
@@ -96,10 +96,10 @@ class Counter(Actor):
                         )
                     assert await host.receive() == {
                         "type": "attach",
-                        "protocol": 28,
+                        "protocol": 29,
                         "actor_names": ["Counter"],
                     }
-                    host.send({"type": "attached", "protocol": 28, "actor": actor})
+                    host.send({"type": "attached", "protocol": 29, "actor": actor})
                     host.send(
                         {
                             "type": "command",
@@ -192,7 +192,7 @@ class Counter(Actor):
                 receive, send = host.receive, host.send
                 assert (await receive())["type"] == "attach"
                 actor = {"project_id": "local", "actor_name": "Counter", "actor_id": "one"}
-                send({"type": "attached", "protocol": 28, "actor": actor})
+                send({"type": "attached", "protocol": 29, "actor": actor})
                 invocation = {
                     "type": "invoke",
                     "request_id": "r1",

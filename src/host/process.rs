@@ -84,6 +84,7 @@ pub(super) async fn serve_assigned_host(
         sockets,
         credentials: _credentials,
         storage,
+        database,
     } = prepared;
     let mut lease_lost = renewal.lease_lost();
     let mut status = host.status();
@@ -95,7 +96,8 @@ pub(super) async fn serve_assigned_host(
         sockets.clone(),
     );
     let initialized = async {
-        let owner_epoch = initialize_executor(&executor_connection, &host, &sockets).await?;
+        let owner_epoch =
+            initialize_executor(&executor_connection, &host, &sockets, &database).await?;
         let mut ready = HostReadiness {
             initial_reply: None,
             host_id: host_id.clone(),
@@ -207,12 +209,14 @@ async fn initialize_executor(
     connection: &ActorExecutorConnection,
     host: &Arc<ActorHost>,
     sockets: &Arc<super::sockets::HostSockets>,
+    database: &Arc<super::HostDatabase>,
 ) -> Result<u64> {
     connection
         .mark_ready(
             host.actor().clone(),
             Some(sockets.clone()),
             Some(sockets.clone()),
+            Some(database.background(host.actor().clone())),
         )
         .await?;
     Ok(host.activate().await?.owner_epoch)
@@ -231,6 +235,7 @@ struct PreparedActorHostResources {
     host: Arc<ActorHost>,
     lease: Arc<HostLeaseMaintainer>,
     renewal: LeaseRenewalTask,
+    database: Arc<super::HostDatabase>,
 }
 
 async fn prepare_actor_host(
@@ -349,7 +354,7 @@ async fn prepare_actor_host(
             endpoint,
             assignment.actor.clone(),
             executor_connection.executor(),
-            database,
+            database.clone(),
             sockets.clone(),
         )
         .with_traces(crate::request_traces::TraceSender::start(
@@ -371,6 +376,7 @@ async fn prepare_actor_host(
         host,
         lease,
         renewal,
+        database,
     })
 }
 

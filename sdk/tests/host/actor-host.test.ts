@@ -11,6 +11,7 @@ import { buildActor } from "../../src/compiler/actor-build.js"
 import { ActorSession, parseHostSettings } from "../../src/host/actor-host.js"
 import type { DatabaseCall } from "../../src/host/database.js"
 import type { ActorExecutorReply } from "../../src/host/protocol.js"
+import type { DatabaseRequester } from "../../src/host/types.js"
 import { ActorWorkerSupervisor } from "../../src/host/worker-supervisor.js"
 import { HostDatabase } from "../fixtures/host-database.js"
 import { assertReply } from "../fixtures/reply.js"
@@ -35,7 +36,7 @@ test("loads a prepared JavaScript artifact only inside the first execution Worke
         const lines = createInterface({ input: socket })
         lines.once("line", line => {
             assert.deepEqual(JSON.parse(line).actor_names, ["SessionCounter"])
-            socket.write(`${JSON.stringify({ type: "attached", protocol: 28, actor: actorIdentity() })}\n`)
+            socket.write(`${JSON.stringify({ type: "attached", protocol: 29, actor: actorIdentity() })}\n`)
             socket.end()
         })
     })
@@ -81,6 +82,58 @@ test("a stalled actor import times out and closes the Worker", { timeout: 5_000 
     assert.equal(closed, 1)
 })
 
+test("database calls outside a command carry only their call ID", { timeout: 5_000 }, async () => {
+    const socketPath = `/tmp/ta-activation-${process.pid}.sock`
+    await removeSocket(socketPath)
+    const server = createServer()
+    const customerSocketPromise = new Promise<Socket>(resolve => {
+        server.once("connection", resolve)
+    })
+    server.listen(socketPath)
+    await once(server, "listening")
+    let activationDatabase!: DatabaseRequester
+    const session = new ActorSession(
+        parseHostSettings({
+            DURABLE_ACTORS_EXECUTOR_SOCKET: socketPath,
+            DURABLE_ACTORS_ENTRYPOINT: await actorBundle()
+        }),
+        () => ({
+            ready: async () => ["SessionCounter"],
+            async handle() {
+                return { type: "evicted" }
+            },
+            close() {},
+            assign(_actor, database) {
+                activationDatabase = database
+            },
+            isResident: () => false,
+            onResidencyChange: () => () => {}
+        })
+    )
+    const startup = session.start()
+    try {
+        const customerSocket = await customerSocketPromise
+        const iterator = createInterface({ input: customerSocket, crlfDelay: Infinity })[Symbol.asyncIterator]()
+        await readMessage(iterator)
+        customerSocket.write(`${JSON.stringify({ type: "attached", protocol: 29, actor: actorIdentity() })}\n`)
+        await startup
+        const result = activationDatabase({ op: "fields" })
+        let message: unknown
+        do message = await readMessage(iterator)
+        while ((message as { type: string }).type === "residency")
+        assert.deepEqual(message, { type: "database_call", call_id: 1, call: { op: "fields" } })
+        customerSocket.write(
+            `${JSON.stringify({ type: "database_result", call_id: 1, result: { type: "fields", fields: {} } })}\n`
+        )
+        assert.deepEqual(await result, { type: "fields", fields: {} })
+        customerSocket.destroy()
+        await session.waitUntilDisconnected()
+    } finally {
+        server.close()
+        await removeSocket(socketPath)
+    }
+})
+
 test("the actor session carries only owned execution commands", async t => {
     const socketPath = `/tmp/ta-session-${process.pid}.sock`
     await removeSocket(socketPath)
@@ -115,10 +168,10 @@ test("the actor session carries only owned execution commands", async t => {
 
         assert.deepEqual(await readMessage(iterator), {
             type: "attach",
-            protocol: 28,
+            protocol: 29,
             actor_names: ["SessionCounter"]
         })
-        customerSocket.write(`${JSON.stringify({ type: "attached", protocol: 28, actor: actorIdentity() })}\n`)
+        customerSocket.write(`${JSON.stringify({ type: "attached", protocol: 29, actor: actorIdentity() })}\n`)
         await startup
 
         const database = new HostDatabase()
@@ -229,11 +282,11 @@ function assertSessionReply(message: unknown, id: number, expected: object): voi
 }
 
 function databaseServer(database: HostDatabase, send: (message: unknown) => void) {
-    return (message: { message_id: number; call: DatabaseCall }) => {
+    return (message: { call_id: number; call: DatabaseCall }) => {
         try {
-            send({ type: "database_result", message_id: message.message_id, result: database.call(message.call) })
+            send({ type: "database_result", call_id: message.call_id, result: database.call(message.call) })
         } catch (error) {
-            send({ type: "database_result", message_id: message.message_id, error: (error as Error).message })
+            send({ type: "database_result", call_id: message.call_id, error: (error as Error).message })
         }
     }
 }
@@ -243,7 +296,12 @@ async function readHostMessage(
     serve: ReturnType<typeof databaseServer>
 ): Promise<unknown> {
     for (;;) {
-        const message = (await readMessage(iterator)) as { type: string; message_id: number; call: DatabaseCall }
+        const message = (await readMessage(iterator)) as {
+            type: string
+            call_id: number
+            message_id: number
+            call: DatabaseCall
+        }
         if (message.type === "database_call") serve(message)
         else if (message.type !== "residency") return message
     }
@@ -274,7 +332,7 @@ test("assigns the attached actor and reports whether it is resident", { timeout:
         lines.on("line", line => {
             const message = JSON.parse(line)
             if (message.type === "attach")
-                socket.write(`${JSON.stringify({ type: "attached", protocol: 28, actor })}\n`)
+                socket.write(`${JSON.stringify({ type: "attached", protocol: 29, actor })}\n`)
             else if (message.type === "residency") {
                 received = message
                 socket.end()
@@ -343,7 +401,7 @@ for (const outcome of ["success", "rejection", "disconnect", "atomic", "method_f
                 void (async () => {
                     const message = JSON.parse(line)
                     if (message.type === "attach") {
-                        send({ type: "attached", protocol: 28, actor: actorIdentity() })
+                        send({ type: "attached", protocol: 29, actor: actorIdentity() })
                         send({
                             type: "command",
                             message_id: 17,
@@ -370,7 +428,11 @@ for (const outcome of ["success", "rejection", "disconnect", "atomic", "method_f
                             socket.destroy()
                             resolve()
                         } else if (outcome === "rejection")
-                            send({ type: "database_result", message_id: 17, error: "durable storage rejected write" })
+                            send({
+                                type: "database_result",
+                                call_id: message.call_id,
+                                error: "durable storage rejected write"
+                            })
                         else serve(message)
                     } else if (message.type === "reply") {
                         completed = true

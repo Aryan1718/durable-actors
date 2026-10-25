@@ -77,20 +77,28 @@ class ActorRuntime {
                 await this.prepare(command)
                 return { type: "hydrated" }
             }
-            if (command.type === "invoke") return await this.invoke(command)
+            if (command.type === "invoke") return await this.atomically(command.method, () => this.invoke(command))
             if (command.type === "evict") {
                 const isGracefuleShutdown = command.graceful
                 await this.close(isGracefuleShutdown)
                 this.reset()
                 return { type: "evicted" }
             }
-            return await this.handleSocketEvent(command)
+            return await this.atomically(lifecycleMethod(command), () => this.handleSocketEvent(command))
         } catch (error) {
             this.reset()
             const failure = failedReply("invalid_actor_state", errorMessage(error))
             if (this.interleaved) this.fatal = failure
             return failure
         }
+    }
+
+    private atomically(method: string, operation: () => Promise<ActorExecutorReply>): Promise<ActorExecutorReply> {
+        return this.isAtomic(method) ? this.database.atomically(operation) : operation()
+    }
+
+    private isAtomic(method: string): boolean {
+        return this.definition.state.atomicMethods?.includes(method) ?? false
     }
 
     private get interleaved(): boolean {
@@ -127,7 +135,7 @@ class ActorRuntime {
                 async () =>
                     runWithActorDatabase(
                         instance,
-                        this.definition.state.atomicMethods?.includes(command.method) ? "atomic" : "immediate",
+                        this.isAtomic(command.method) ? "atomic" : "immediate",
                         async () => Reflect.apply(method, instance, command.args) as Promise<unknown>
                     ),
                 this.publish,
@@ -177,7 +185,7 @@ class ActorRuntime {
                         )
                     await runWithActorDatabase(
                         instance,
-                        this.definition.state.atomicMethods?.includes(methodName) ? "atomic" : "immediate",
+                        this.isAtomic(methodName) ? "atomic" : "immediate",
                         async () => Reflect.apply(method, instance, args) as Promise<unknown>
                     )
                 },

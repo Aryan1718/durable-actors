@@ -94,6 +94,7 @@ class ActorSessionConnection {
         number,
         { resolve: (result: DatabaseResult) => void; reject: (error: Error) => void }
     >()
+    private nextDatabaseCallId = 0
     private readonly publishing = new Map<number, { resolve: () => void; reject: (error: Error) => void }>()
     private readonly loadingConnections = new Map<
         number,
@@ -113,7 +114,7 @@ class ActorSessionConnection {
         const connection = new ActorSessionConnection(socket, supervisor)
         connection.send({
             type: "attach",
-            protocol: 28,
+            protocol: 29,
             actor_names: actorNames
         })
         await connection.waitUntilAttached(timeoutMs)
@@ -181,7 +182,7 @@ class ActorSessionConnection {
             const message = parseActorSessionServerMessage(rawMessage)
             switch (message.type) {
                 case "attached":
-                    this.supervisor.assign(message.actor)
+                    this.supervisor.assign(message.actor, call => this.callDatabase(call))
                     this.reportResidency()
                     this.attachedResolve?.()
                     this.attachedResolve = undefined
@@ -193,17 +194,17 @@ class ActorSessionConnection {
                         await this.supervisor.handle(
                             message.command,
                             () => this.send({ type: "ready_for_invocation", message_id: message.message_id }),
-                            call => this.callDatabase(message.message_id, call),
+                            call => this.callDatabase(call, message.message_id),
                             effects => this.publish(message.message_id, effects),
                             query => this.getConnections(message.message_id, query)
                         )
                     )
                     break
                 case "database_result": {
-                    const pending = this.databaseCalls.get(message.message_id)
+                    const pending = this.databaseCalls.get(message.call_id)
                     if (pending === undefined)
                         throw new ActorProtocolError("Rust host replied to unknown database call")
-                    this.databaseCalls.delete(message.message_id)
+                    this.databaseCalls.delete(message.call_id)
                     if (message.result === undefined) pending.reject(new ActorSessionError(message.error!))
                     else pending.resolve(message.result)
                     break
@@ -249,16 +250,15 @@ class ActorSessionConnection {
         this.activityTimer.unref()
     }
 
-    private callDatabase(messageId: number, call: DatabaseCall): Promise<DatabaseResult> {
+    private callDatabase(call: DatabaseCall, messageId?: number): Promise<DatabaseResult> {
         return new Promise((resolve, reject) => {
             if (this.socket.destroyed) throw new ActorSessionError("Rust host disconnected before the database call")
-            if (this.databaseCalls.has(messageId))
-                throw new ActorProtocolError("actor database call is already pending")
-            this.databaseCalls.set(messageId, { resolve, reject })
+            const callId = ++this.nextDatabaseCallId
+            this.databaseCalls.set(callId, { resolve, reject })
             try {
-                this.send({ type: "database_call", message_id: messageId, call })
+                this.send({ type: "database_call", call_id: callId, message_id: messageId, call })
             } catch (error) {
-                this.databaseCalls.delete(messageId)
+                this.databaseCalls.delete(callId)
                 reject(sessionError(error))
             }
         })

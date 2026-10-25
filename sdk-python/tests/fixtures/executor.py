@@ -54,7 +54,7 @@ class ExecutorHost:
         return json.loads(line)
 
     async def answer(self, message):
-        reply = {"type": "database_result", "message_id": message["message_id"]}
+        reply = {"type": "database_result", "call_id": message["call_id"]}
         try:
             reply["result"] = await self.database.call(message["call"])
         except Exception as error:
@@ -84,7 +84,7 @@ async def warm_executor(entrypoint, environment):
         try:
             async with asyncio.timeout(10):
                 host = await connected
-                assert await host.receive() == {"type": "warm", "protocol": 28}
+                assert await host.receive() == {"type": "warm", "protocol": 29}
                 host.send({"type": "load", "entrypoint": entrypoint, "environment": environment})
                 attach = await host.receive()
                 assert attach["type"] == "attach"
@@ -92,7 +92,7 @@ async def warm_executor(entrypoint, environment):
                 host.send(
                     {
                         "type": "attached",
-                        "protocol": 28,
+                        "protocol": 29,
                         "actor": {
                             "project_id": "local",
                             "actor_name": actor_name,

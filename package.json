@@ -33,6 +33,7 @@
         "packages/*",
         "examples/*",
         "examples/persistence/*",
+        "examples/background/*",
         "examples/pi/*"
     ],
     "engines": {

@@ -112,8 +112,8 @@ function allowNextInvocation(): void {
 }
 
 function callDatabase(call: DatabaseCall): DatabaseResult {
+    if (exiting) throw new Error("actor Worker is exiting")
     const messageId = invocation.getStore()
-    if (messageId === undefined || exiting) throw new Error("actor database call has no active invocation")
     return requestDatabaseCall(request => post({ type: "database_call", messageId, call, request }, [request.port]))
 }
 

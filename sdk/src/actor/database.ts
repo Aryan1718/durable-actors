@@ -8,6 +8,7 @@ interface ActorDatabase {
 }
 
 type PersistenceMode = "atomic" | "immediate"
+type DatabaseMode = PersistenceMode | "background"
 
 interface ActorInvocationContext {
     readonly actor: object
@@ -22,9 +23,10 @@ function isActorInvocation(actor: object): boolean {
     return context?.actor === actor && context.active
 }
 
-function actorDatabaseMode(): PersistenceMode | undefined {
+function actorDatabaseMode(): DatabaseMode | undefined {
     const context = invocation.getStore()
-    return context?.active ? context.mode : undefined
+    if (context === undefined) return undefined
+    return context.active ? context.mode : "background"
 }
 
 async function runWithActorDatabase<T>(actor: object, mode: PersistenceMode, operation: () => Promise<T>): Promise<T> {

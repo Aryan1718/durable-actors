@@ -32,6 +32,24 @@
         "vite": "^8.3.0",
       },
     },
+    "examples/background/background-gym": {
+      "name": "durable-actors-example-background-gym",
+      "dependencies": {
+        "durable-actors": "workspace:^",
+      },
+      "devDependencies": {
+        "@types/node": "^22.0.0",
+        "typescript": "~5.9.3",
+      },
+    },
+    "examples/background/cli": {
+      "name": "durable-actors-example-background-cli",
+      "devDependencies": {
+        "@types/node": "^22.0.0",
+        "durable-actors": "workspace:^",
+        "typescript": "~5.9.3",
+      },
+    },
     "examples/bank-python": {
       "name": "durable-actors-example-bank-python",
       "dependencies": {
@@ -842,6 +860,10 @@
     "durable-actors": ["durable-actors@workspace:sdk"],
 
     "durable-actors-example-ai-chat": ["durable-actors-example-ai-chat@workspace:examples/ai-chat"],
+
+    "durable-actors-example-background-cli": ["durable-actors-example-background-cli@workspace:examples/background/cli"],
+
+    "durable-actors-example-background-gym": ["durable-actors-example-background-gym@workspace:examples/background/background-gym"],
 
     "durable-actors-example-bank-python": ["durable-actors-example-bank-python@workspace:examples/bank-python"],
 

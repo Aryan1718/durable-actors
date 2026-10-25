@@ -1,0 +1,16 @@
+{
+    "name": "durable-actors-example-background-gym",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "durable-actors dev",
+        "check": "tsc --noEmit"
+    },
+    "dependencies": {
+        "durable-actors": "workspace:^"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "typescript": "~5.9.3"
+    }
+}

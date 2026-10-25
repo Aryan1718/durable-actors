@@ -1,0 +1,15 @@
+{
+    "name": "durable-actors-example-background-cli",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "generate": "durable-actors generate",
+        "start": "bun src/index.ts",
+        "check": "tsc --noEmit"
+    },
+    "devDependencies": {
+        "durable-actors": "workspace:^",
+        "@types/node": "^22.0.0",
+        "typescript": "~5.9.3"
+    }
+}

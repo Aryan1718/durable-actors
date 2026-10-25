@@ -28,6 +28,7 @@ interface ActorWorkerSupervisorOptions {
 interface ResidentActorWorkerOptions {
     readonly sequenceBase: number
     readonly onResidencyChange: () => void
+    readonly database: DatabaseRequester
     readonly moduleUrl: string
     readonly worker?: ActorWorkerHandle
     readonly createWorker: ActorWorkerFactory
@@ -48,7 +49,11 @@ interface ActorWorkerHandle {
     terminate(reason: string): void
 }
 
-type ActorWorkerFactory = (data: ActorWorkerData, onStateChange: () => void) => ActorWorkerHandle
+type ActorWorkerFactory = (
+    data: ActorWorkerData,
+    onStateChange: () => void,
+    database: DatabaseRequester
+) => ActorWorkerHandle
 
 export type {
     ActorHostSettings,

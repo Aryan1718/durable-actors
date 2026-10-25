@@ -107,7 +107,6 @@ export class ModalSandbox implements ActorResource {
         // No sandbox session associated with this actor
         if (sandboxId === undefined) {
             this._sandbox = await this.createNewSandbox()
-            this.resourceKV.set("sandbox_id", this._sandbox.sandboxId)
             return;
         }
 

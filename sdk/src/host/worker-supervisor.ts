@@ -57,7 +57,8 @@ class ActorWorker implements ActorWorkerHandle {
 
     constructor(
         data?: ActorWorkerData,
-        private onStateChange: () => void = () => {}
+        private onStateChange: () => void = () => {},
+        private activationDatabase: DatabaseRequester = unavailableDatabase
     ) {
         this.assigned = data !== undefined
         this.warmPromise = new Promise((resolve, reject) => {
@@ -129,9 +130,10 @@ class ActorWorker implements ActorWorkerHandle {
         return this.warmPromise
     }
 
-    load(data: ActorWorkerData, onStateChange: () => void): void {
+    load(data: ActorWorkerData, onStateChange: () => void, database: DatabaseRequester): void {
         if (this.assigned) throw new Error("customer code already assigned")
         this.onStateChange = onStateChange
+        this.activationDatabase = database
         this.assigned = true
         this.post({ type: "load", data })
     }
@@ -182,11 +184,15 @@ class ActorWorker implements ActorWorkerHandle {
         this.stop(new ActorWorkerTerminatedError(reason))
     }
 
-    private async callDatabase(messageId: number, call: DatabaseCall, request: DatabaseRequest): Promise<void> {
+    private async callDatabase(
+        messageId: number | undefined,
+        call: DatabaseCall,
+        request: DatabaseRequest
+    ): Promise<void> {
         this.databaseCalls.add(request)
         try {
-            const database = this.pending.get(messageId)?.database
-            if (database === undefined) throw new Error("actor database call has no active invocation")
+            const database =
+                (messageId === undefined ? undefined : this.pending.get(messageId)?.database) ?? this.activationDatabase
             completeDatabaseCall(request, { result: await database(call) })
         } catch (error) {
             completeDatabaseCall(request, { error: errorMessage(error) })
@@ -265,13 +271,15 @@ class ActorWorkerSupervisor {
     private readonly residencyListeners = new Set<() => void>()
     private speculativeWorker: ActorWorkerHandle | undefined
     private identity: ActorIdentity | undefined
+    private activationDatabase: DatabaseRequester = unavailableDatabase
     private closed = false
     private actorNames: readonly string[] | undefined
     private lastSequence = 0
 
     constructor(options: ActorWorkerSupervisorOptions) {
         this.actorEntrypointUrl = options.actorEntrypointUrl
-        this.createWorker = options.createWorker ?? ((data, onStateChange) => new ActorWorker(data, onStateChange))
+        this.createWorker =
+            options.createWorker ?? ((data, onStateChange, database) => new ActorWorker(data, onStateChange, database))
         this.preload()
     }
 
@@ -283,10 +291,11 @@ class ActorWorkerSupervisor {
         return this.actorNames
     }
 
-    assign(actor: ActorIdentity): void {
+    assign(actor: ActorIdentity, database: DatabaseRequester): void {
         if (!this.actorNames?.includes(actor.actor_name))
             throw new Error(`actor name ${actor.actor_name} is not loaded in this customer process`)
         this.identity = { ...actor }
+        this.activationDatabase = database
     }
 
     async handle(
@@ -339,7 +348,11 @@ class ActorWorkerSupervisor {
     }
 
     private preload(): ActorWorkerHandle {
-        const worker = this.createWorker({ moduleUrl: this.actorEntrypointUrl }, () => this.notifyResidencyChange())
+        const worker = this.createWorker(
+            { moduleUrl: this.actorEntrypointUrl },
+            () => this.notifyResidencyChange(),
+            this.callActivationDatabase
+        )
         this.speculativeWorker = worker
         void worker.ready().catch(() => this.discardPreload(worker))
         return worker
@@ -365,7 +378,8 @@ class ActorWorkerSupervisor {
                 moduleUrl: this.actorEntrypointUrl,
                 worker: this.takeSpeculativeWorker(),
                 createWorker: this.createWorker,
-                onResidencyChange: () => this.notifyResidencyChange()
+                onResidencyChange: () => this.notifyResidencyChange(),
+                database: this.callActivationDatabase
             })
             this.resident = actor
         }
@@ -397,6 +411,8 @@ class ActorWorkerSupervisor {
         return { type: "evicted" }
     }
 
+    private readonly callActivationDatabase: DatabaseRequester = call => this.activationDatabase(call)
+
     private workerCommand(command: ActorExecutorCommand): ActorWorkerCommand {
         if (this.identity === undefined) throw new Error("actor supervisor has no assigned actor")
         return { ...command, actor: this.identity }
@@ -414,6 +430,7 @@ class ResidentActorWorker {
     readonly moduleUrl: string
     readonly createWorker: ActorWorkerFactory
     private readonly onResidencyChange: () => void
+    private readonly database: DatabaseRequester
     private worker: ActorWorkerHandle | undefined
 
     constructor(options: ResidentActorWorkerOptions) {
@@ -421,6 +438,7 @@ class ResidentActorWorker {
         this.moduleUrl = options.moduleUrl
         this.createWorker = options.createWorker
         this.onResidencyChange = options.onResidencyChange
+        this.database = options.database
         this.worker = options.worker
     }
 
@@ -431,7 +449,7 @@ class ResidentActorWorker {
         publish?: SocketPublisher,
         connections?: SocketSource
     ): Promise<ActorExecutorReply> {
-        this.worker ??= this.createWorker({ moduleUrl: this.moduleUrl }, this.onResidencyChange)
+        this.worker ??= this.createWorker({ moduleUrl: this.moduleUrl }, this.onResidencyChange, this.database)
         const worker = this.worker
         this.onResidencyChange()
         let reply: ActorExecutorReply
@@ -467,6 +485,10 @@ class ResidentActorWorker {
         this.worker = undefined
         this.onResidencyChange()
     }
+}
+
+async function unavailableDatabase(): Promise<never> {
+    throw new Error("actor database is unavailable before the actor is assigned")
 }
 
 class ActorWorkerTerminatedError extends Error {

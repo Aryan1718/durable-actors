@@ -27,7 +27,7 @@ use super::{
     DatabaseResult,
 };
 
-const ACTOR_EXECUTOR_PROTOCOL_VERSION: u32 = 28;
+const ACTOR_EXECUTOR_PROTOCOL_VERSION: u32 = 29;
 const MAX_PENDING_EXECUTOR_COMMANDS: usize = 64;
 
 #[derive(Debug, Serialize)]
@@ -329,8 +329,11 @@ impl ActorExecutorConnection {
         actor: ActorKey,
         publisher: Option<Arc<dyn ActorSocketPublisher>>,
         sockets: Option<Arc<dyn ActorSocketSource>>,
+        database: Option<Arc<dyn ActorDatabase>>,
     ) -> Result<()> {
-        self.executor.mark_ready(actor, publisher, sockets).await?;
+        self.executor
+            .mark_ready(actor, publisher, sockets, database)
+            .await?;
         info!(
             actor_names = ?self.executor.actor_names,
             "customer JavaScript process attached to actor executor"
@@ -522,6 +525,7 @@ impl JsActorExecutor {
         actor: ActorKey,
         publisher: Option<Arc<dyn ActorSocketPublisher>>,
         sockets: Option<Arc<dyn ActorSocketSource>>,
+        database: Option<Arc<dyn ActorDatabase>>,
     ) -> Result<()> {
         let (reply, ready) = oneshot::channel();
         self.commands
@@ -530,6 +534,7 @@ impl JsActorExecutor {
                 written: reply,
                 publisher,
                 sockets,
+                database,
             })
             .await
             .context("actor executor stopped")?;
@@ -578,6 +583,7 @@ async fn run_executor_connection(
         outbound,
         publisher: None,
         sockets: None,
+        database: None,
         publishing: JoinSet::new(),
         publishing_ids: HashSet::new(),
         loading_connections: JoinSet::new(),
@@ -602,11 +608,12 @@ struct ExecutorDriver {
     outbound: mpsc::Sender<ExecutorWrite>,
     publisher: Option<Arc<dyn ActorSocketPublisher>>,
     sockets: Option<Arc<dyn ActorSocketSource>>,
+    database: Option<Arc<dyn ActorDatabase>>,
     publishing: JoinSet<(u64, Result<()>)>,
     publishing_ids: HashSet<u64>,
     loading_connections: JoinSet<(u64, Result<super::SocketLookup>)>,
     connection_lookup_ids: HashSet<u64>,
-    database_calls: JoinSet<(u64, Result<DatabaseResult>)>,
+    database_calls: JoinSet<(u64, Option<u64>, Result<DatabaseResult>)>,
     database_ids: HashSet<u64>,
 }
 
@@ -630,24 +637,14 @@ impl ExecutorDriver {
                         ActorExecutorClientMessage::ReadyForInvocation { message_id } => self.allow_next_invocation(message_id)?,
                         ActorExecutorClientMessage::Reply { message_id, reply } => self.deliver(message_id, reply)?,
                         ActorExecutorClientMessage::SocketEffects { message_id, effects } => self.publish(message_id, effects)?,
-                        ActorExecutorClientMessage::DatabaseCall { message_id, call } => self.call_database(message_id, call)?,
+                        ActorExecutorClientMessage::DatabaseCall { call_id, message_id, call } => self.call_database(call_id, message_id, call)?,
                         ActorExecutorClientMessage::GetConnections { message_id, query } => self.load_connections(message_id, query)?,
                         ActorExecutorClientMessage::Warm { .. } | ActorExecutorClientMessage::Attach { .. } => anyhow::bail!("customer actor executor attached more than once"),
                     }
                 }
                 called = self.database_calls.join_next(), if !self.database_calls.is_empty() => {
-                    let (message_id, result) = called.context("actor database call stopped")??;
-                    self.database_ids.remove(&message_id);
-                    let (result, error) = match result {
-                        Ok(result) => (Some(result), None),
-                        Err(error) => (None, Some(format!("{error:#}"))),
-                    };
-                    self.outbound.send(ExecutorWrite {
-                        bytes: encode_server_message(&ActorExecutorServerMessage::DatabaseResult {
-                            message_id, result, error,
-                        })?,
-                        written: None,
-                    }).await.context("actor executor writer stopped")?;
+                    let (call_id, message_id, result) = called.context("actor database call stopped")??;
+                    self.database_called(call_id, message_id, result).await?;
                 }
                 published = self.publishing.join_next(), if !self.publishing.is_empty() => {
                     let (message_id, result) = published.context("socket publisher stopped")??;
@@ -690,9 +687,11 @@ impl ExecutorDriver {
                 written,
                 publisher,
                 sockets,
+                database,
             } => {
                 self.publisher = publisher;
                 self.sockets = sockets;
+                self.database = database;
                 self.outbound
                     .try_send(ExecutorWrite {
                         bytes: encode_server_message(&ActorExecutorServerMessage::Attached {
@@ -729,21 +728,57 @@ impl ExecutorDriver {
         Ok(())
     }
 
-    fn call_database(&mut self, message_id: u64, call: DatabaseCall) -> Result<()> {
-        let database = self
-            .pending
-            .get(&message_id)
-            .context("database call has no active invocation")?
-            .database
-            .clone()
-            .context("command has no actor database")?;
-        ensure!(
-            self.database_ids.insert(message_id),
-            "actor sent concurrent database calls"
-        );
-        self.database_calls
-            .spawn(async move { (message_id, database.call(call).await) });
+    fn call_database(
+        &mut self,
+        call_id: u64,
+        message_id: Option<u64>,
+        call: DatabaseCall,
+    ) -> Result<()> {
+        let message_id = message_id.filter(|id| self.pending.contains_key(id));
+        let database = match message_id {
+            Some(id) => self.pending[&id].database.clone(),
+            None => self.database.clone(),
+        };
+        if let Some(id) = message_id {
+            ensure!(
+                self.database_ids.insert(id),
+                "actor sent concurrent database calls"
+            );
+        }
+        self.database_calls.spawn(async move {
+            let result = match database {
+                Some(database) => database.call(call).await,
+                None => Err(anyhow::anyhow!("actor database is unavailable")),
+            };
+            (call_id, message_id, result)
+        });
         Ok(())
+    }
+
+    async fn database_called(
+        &mut self,
+        call_id: u64,
+        message_id: Option<u64>,
+        result: Result<DatabaseResult>,
+    ) -> Result<()> {
+        if let Some(id) = message_id {
+            self.database_ids.remove(&id);
+        }
+        let (result, error) = match result {
+            Ok(result) => (Some(result), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
+        self.outbound
+            .send(ExecutorWrite {
+                bytes: encode_server_message(&ActorExecutorServerMessage::DatabaseResult {
+                    call_id,
+                    result,
+                    error,
+                })?,
+                written: None,
+            })
+            .await
+            .context("actor executor writer stopped")
     }
 
     fn load_connections(&mut self, message_id: u64, query: super::SocketQuery) -> Result<()> {
@@ -911,6 +946,7 @@ enum ExecutorRequest {
         written: oneshot::Sender<Result<()>>,
         publisher: Option<Arc<dyn ActorSocketPublisher>>,
         sockets: Option<Arc<dyn ActorSocketSource>>,
+        database: Option<Arc<dyn ActorDatabase>>,
     },
 }
 
@@ -983,7 +1019,7 @@ async fn remove_socket(path: &Path) -> Result<()> {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ActorExecutorServerMessage<'a> {
     DatabaseResult {
-        message_id: u64,
+        call_id: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<DatabaseResult>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -1014,7 +1050,9 @@ enum ActorExecutorServerMessage<'a> {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ActorExecutorClientMessage {
     DatabaseCall {
-        message_id: u64,
+        call_id: u64,
+        #[serde(default)]
+        message_id: Option<u64>,
         call: DatabaseCall,
     },
     Warm {
