@@ -38,6 +38,7 @@ impl HostAssignment for Assign {
         &self,
         spare: &SpareHandle,
         environment: HashMap<String, String>,
+        _: Option<assignment::InitialOperation>,
     ) -> Result<ActorHostHandle> {
         assert_eq!(
             environment["DURABLE_ACTORS_ENTRYPOINT"],
@@ -49,6 +50,7 @@ impl HostAssignment for Assign {
         assert_eq!(secrets["CUSTOMER_SECRET"], "assigned-secret");
         let host = HostId::new(environment["DURABLE_ACTORS_HOST_ID"].clone());
         Ok(ActorHostHandle {
+            initial_reply: None,
             lease: Some(crate::host_leases::HostLease {
                 id: host.clone(),
                 session_id: environment["DURABLE_ACTORS_SESSION_ID"].clone(),
@@ -95,6 +97,7 @@ fn request() -> Result<EnsureHostRequest> {
         }],
     };
     Ok(EnsureHostRequest {
+        initial_operation: None,
         actor_is_new: true,
         owner_hint: None,
         actor: Some(crate::actor::ActorKey {
@@ -161,8 +164,9 @@ impl HostAssignment for ExpiredAssignment {
         &self,
         spare: &SpareHandle,
         environment: HashMap<String, String>,
+        _: Option<assignment::InitialOperation>,
     ) -> Result<ActorHostHandle> {
-        let mut handle = Assign.assign(spare, environment).await?;
+        let mut handle = Assign.assign(spare, environment, None).await?;
         handle.lease.as_mut().unwrap().expires_at_ms = 0;
         Ok(handle)
     }
@@ -246,5 +250,41 @@ async fn secret_resolution_failure_retires_the_modal_spare_without_assignment() 
     assert_eq!(error.to_string(), "secret unavailable");
     assert_eq!(cluster.retires.load(Ordering::SeqCst), 1);
     assert_eq!(cluster.creates.load(Ordering::SeqCst), 0);
+    Ok(())
+}
+
+#[tokio::test]
+async fn unreadable_assignment_operation_reply_has_an_unknown_outcome() -> Result<()> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let mut request = request()?;
+    let spare = request.spare.as_mut().unwrap();
+    spare.control_route = format!("http://{}", listener.local_addr()?);
+    let routes =
+        axum::Router::new().route("/assign", axum::routing::post(|| async { "lost reply" }));
+    let server = tokio::spawn(async move { axum::serve(listener, routes).await });
+    let assignment = HttpAssignment(HostConnections::new()?);
+    let operation = assignment::InitialOperation {
+        request: assignment::InitialRequest::Invoke {
+            invocation: crate::actor::ActorInvocation {
+                actor: request.actor.clone().unwrap(),
+                request_id: "first".into(),
+                method: "read".into(),
+                args: vec![],
+            },
+            grant: None,
+        },
+        routing_ms: 0.0,
+    };
+    let error = assignment
+        .assign(spare, HashMap::new(), Some(operation))
+        .await
+        .unwrap_err();
+    assert!(error.is::<assignment::AssignmentOutcomeUnknown>());
+    let error = assignment
+        .assign(spare, HashMap::new(), None)
+        .await
+        .unwrap_err();
+    assert!(!error.is::<assignment::AssignmentOutcomeUnknown>());
+    server.abort();
     Ok(())
 }

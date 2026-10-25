@@ -456,7 +456,12 @@ impl super::super::service::HostProvisioner for PausedProvisioner {
         actor: &crate::actor::ActorKey,
         new_actor: bool,
         _: Option<&crate::bucket::OwnershipHint>,
-    ) -> Result<(crate::host_leases::HostLease, u64)> {
+        _: Option<&crate::sandbox::assignment::InitialOperation>,
+    ) -> Result<(
+        crate::host_leases::HostLease,
+        u64,
+        Option<serde_json::Value>,
+    )> {
         assert_eq!(region, "north-america-east");
         assert_eq!(actor.actor_id, "one");
         assert!(new_actor);
@@ -481,6 +486,7 @@ impl super::super::service::HostProvisioner for PausedProvisioner {
                 expires_at_ms: u64::MAX,
             },
             7,
+            None,
         ))
     }
 

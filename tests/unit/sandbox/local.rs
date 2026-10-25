@@ -275,6 +275,7 @@ impl LocalFixture {
 
     fn request(&self, id: &str) -> EnsureHostRequest {
         EnsureHostRequest {
+            initial_operation: None,
             actor_is_new: true,
             owner_hint: None,
             actor: Some(ActorKey {
@@ -378,6 +379,7 @@ async fn shutdown_rejects_new_hosts_before_starting_a_process() -> Result<()> {
     .await?;
     provider.shutdown().await;
     let request = EnsureHostRequest {
+        initial_operation: None,
         actor_is_new: true,
         owner_hint: Some("{\"generation\":17,\"record\":{\"epoch\":3}}".into()),
         actor: None,

@@ -370,6 +370,7 @@ impl LocalHost {
 
 fn handle(lease: crate::host_leases::HostLease, region: &str, owner_epoch: u64) -> ActorHostHandle {
     ActorHostHandle {
+        initial_reply: None,
         lease: Some(lease.clone()),
         owner_epoch,
         host_id: lease.id,

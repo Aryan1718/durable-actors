@@ -10,6 +10,7 @@ use crate::bucket::WarmStorage;
 use crate::litestream::{Litestream, Replicator};
 
 pub(super) struct WarmHost {
+    pub operation: Option<crate::sandbox::assignment::InitialOperation>,
     pub readiness: Option<tokio::sync::oneshot::Sender<super::process::HostReadiness>>,
     pub listener: TcpListener,
     pub executor: WarmExecutor,
@@ -97,6 +98,7 @@ pub async fn serve_spare(shutdown: impl Future<Output = ()> + Send + 'static) ->
         "actor artifact does not match the prewarmed executor runtime"
     );
     let warm = WarmHost {
+        operation: assigned.operation,
         readiness: Some(assigned.ready),
         listener,
         executor,

@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::host::HostId;
 
+pub(crate) mod assignment;
 pub(crate) mod connections;
 pub(crate) mod gke;
 mod local;
@@ -96,9 +97,11 @@ pub struct CreateSpareRequest {
     pub resources: ResourceLimits,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EnsureHostRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) initial_operation: Option<assignment::InitialOperation>,
     pub actor_is_new: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub owner_hint: Option<String>,
@@ -127,6 +130,8 @@ pub struct EnsureHostRequest {
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ActorHostHandle {
+    #[serde(default)]
+    pub(crate) initial_reply: Option<serde_json::Value>,
     pub lease: Option<crate::host_leases::HostLease>,
     #[serde(default)]
     pub owner_epoch: u64,

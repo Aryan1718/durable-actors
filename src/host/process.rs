@@ -35,6 +35,8 @@ const EXECUTOR_STARTUP_TIMEOUT: Duration = RAPID_OPERATION_TIMEOUT.saturating_mu
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct HostReadiness {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_reply: Option<serde_json::Value>,
     pub host_id: super::HostId,
     pub session_id: String,
     pub route: String,
@@ -60,6 +62,7 @@ pub(super) async fn serve_assigned_host(
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<()> {
     let readiness = warm.as_mut().and_then(|warm| warm.readiness.take());
+    let operation = warm.as_mut().and_then(|warm| warm.operation.take());
     let host_id = &config.identity.host_id;
     let prepared = match prepare_actor_host(&config, &mut timings, warm).await {
         Ok(prepared) => prepared,
@@ -90,11 +93,11 @@ pub(super) async fn serve_assigned_host(
         config.identity.session_id.clone(),
         invocation_auth,
         sockets.clone(),
-    )
-    .router();
+    );
     let initialized = async {
         let owner_epoch = initialize_executor(&executor_connection, &host, &sockets).await?;
-        let ready = HostReadiness {
+        let mut ready = HostReadiness {
+            initial_reply: None,
             host_id: host_id.clone(),
             session_id: config.identity.session_id.clone(),
             route: route.clone(),
@@ -107,6 +110,15 @@ pub(super) async fn serve_assigned_host(
             tokio::fs::write(&temporary, serde_json::to_vec(&ready)?).await?;
             tokio::fs::rename(temporary, path).await?;
         }
+        ready.initial_reply = match operation {
+            Some(operation) => Some(
+                service
+                    .execute_initial(operation, owner_epoch, timings.elapsed_ms())
+                    .await?,
+            ),
+            None => None,
+        };
+        ready.lease = storage.current_lease()?;
         anyhow::Ok(ready)
     }
     .await;
@@ -134,7 +146,7 @@ pub(super) async fn serve_assigned_host(
     let executor_stop = CancellationToken::new();
     let server_stop = CancellationToken::new();
     let serving = server_stop.clone();
-    let routes = service;
+    let routes = service.router();
     let mut server = Box::pin(async move {
         axum::serve(listener, routes)
             .with_graceful_shutdown(async move { serving.cancelled().await })

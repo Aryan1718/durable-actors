@@ -21,7 +21,7 @@ pub(super) async fn invoke_alarm(
 ) -> anyhow::Result<()> {
     let started = tokio::time::Instant::now();
     let target = service
-        .resolve_actor_route(&alarm.actor, None, None, None)
+        .resolve_actor_route(&alarm.actor, None, None, None, None)
         .await
         .context("could not route alarm")?;
     let invocation = ActorInvocation {
@@ -94,28 +94,34 @@ async fn resolve_and_dispatch(
     let deadline = started + super::CONTROL_PLANE_REQUEST_TIMEOUT;
     let mut host_state = HostState::Warm;
     loop {
-        let target = resolve_actor_target(
+        let mut target = resolve_actor_target(
             state,
             &invocation.actor,
             headers,
             Ok(Json(FindActorRequest {
                 home_region: home_region.clone(),
             })),
+            Some(invocation),
         )
         .await?;
         if target.host_state == HostState::Cold {
             host_state = HostState::Cold;
         }
-        let outcome = dispatch(
-            &state.hosts,
-            &target.backend_route,
-            &target.token,
-            target.owner_epoch,
-            invocation,
-            host_state,
-            started.elapsed().as_secs_f64() * 1000.0,
-        )
-        .await?;
+        let outcome = match target.initial_reply.take() {
+            Some(reply) => validate_reply(reply)?,
+            None => {
+                dispatch(
+                    &state.hosts,
+                    &target.backend_route,
+                    &target.token,
+                    target.owner_epoch,
+                    invocation,
+                    host_state,
+                    started.elapsed().as_secs_f64() * 1000.0,
+                )
+                .await?
+            }
+        };
         if !matches!(
             outcome["type"].as_str(),
             Some("not_executed" | "unauthenticated")
@@ -291,6 +297,10 @@ async fn dispatch(
         return Err(outcome_unknown());
     }
     let reply = read_reply(response).await?;
+    validate_reply(reply)
+}
+
+fn validate_reply(reply: Value) -> Result<Value, ApiError> {
     match reply.get("type").and_then(Value::as_str) {
         Some("not_executed")
             if matches!(

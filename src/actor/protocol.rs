@@ -34,7 +34,7 @@ impl ActorKey {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ActorInvocation {
     /// Correlation ID for this caller attempt. It is not an idempotency key.
     pub request_id: String,

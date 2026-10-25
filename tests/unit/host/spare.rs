@@ -24,7 +24,7 @@ async fn generic_bun_host_restores_committed_state_before_becoming_ready() -> Re
         actor_name: "Counter".into(),
         actor_id: "one".into(),
     };
-    for before in -1..2 {
+    for before in [-1, 0, 1, 3] {
         run_activation(
             project.path(),
             data.path(),
@@ -109,6 +109,39 @@ async fn run_activation(
     let config = ActorHostConfig::from_lookup(|key| environment.get(key).cloned())?;
     let (readiness, ready_response) = tokio::sync::oneshot::channel();
     let warm = WarmHost {
+        operation: Some(crate::sandbox::assignment::InitialOperation {
+            request: if before >= 2 {
+                crate::sandbox::assignment::InitialRequest::Socket {
+                    invocation: crate::actor::ActorSocketInvocation {
+                        actor: actor.clone(),
+                        request_id: "initial-connect".into(),
+                        event: crate::actor::ActorSocketEvent::Connect {
+                            connection: crate::actor::ActorSocketConnection {
+                                id: "initial".into(),
+                                metadata: serde_json::Value::Null,
+                                tags: vec![],
+                            },
+                        },
+                        connections: vec![],
+                    },
+                }
+            } else {
+                crate::sandbox::assignment::InitialRequest::Invoke {
+                    invocation: crate::actor::ActorInvocation {
+                        actor: actor.clone(),
+                        request_id: "initial-read".into(),
+                        method: if before == 1 {
+                            "increment".into()
+                        } else {
+                            "read".into()
+                        },
+                        args: vec![],
+                    },
+                    grant: None,
+                }
+            },
+            routing_ms: 0.0,
+        }),
         control_plane: None,
         readiness: Some(readiness),
         listener,
@@ -162,14 +195,30 @@ async fn run_activation(
     let response = tokio::time::timeout(Duration::from_secs(1), ready_response).await??;
     assert_eq!(response.host_id, host_id);
     assert_eq!(response.session_id, session);
+    let initial = response
+        .initial_reply
+        .context("assignment omitted operation result")?;
+    assert_eq!(initial["type"], "completed");
+    let assigned = before + i64::from(before == 1);
+    if before >= 2 {
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(
+                initial["effects"][0]["message"]["data"].as_str().unwrap()
+            )?,
+            format!("ready:{before}")
+        );
+    } else {
+        assert_eq!(initial["result"], assigned);
+        assert_eq!(initial["metadata"]["hostState"], "cold");
+    }
     let epoch = response.owner_epoch;
     assert!(epoch > 0);
     let marker: serde_json::Value = serde_json::from_slice(&tokio::fs::read(&ready).await?)?;
     assert_eq!(marker["ownerEpoch"], epoch);
     for (method, expected) in [
-        ("read", before),
-        ("increment", before + 1),
-        ("read", before + 1),
+        ("read", assigned),
+        ("increment", assigned + 1),
+        ("read", assigned + 1),
     ] {
         let result: serde_json::Value = client.post(format!("{actor_url}/invoke")).bearer_auth(&token).json(&serde_json::json!({"requestId":uuid::Uuid::new_v4().to_string(), "ownerEpoch":epoch, "routingMs":0.0, "method":method, "args":[]})).send().await?.error_for_status()?.json().await?;
         assert_eq!(result["type"], "completed");
@@ -206,7 +255,7 @@ fn issuer() -> Result<ActorJwtIssuer> {
 async fn compile_counter(sdk: &Path, project: &Path) -> Result<Vec<u8>> {
     let source = project.join("actors.ts");
     let compiled = project.join("actors.mjs");
-    tokio::fs::write(&source, "import { Actor, Persisted } from 'durable-actors'; export class Counter extends Actor { @Persisted value = 0; async read() { return this.value; } async increment() { return ++this.value; } }").await?;
+    tokio::fs::write(&source, "import { Actor, Persisted } from 'durable-actors'; export class Counter extends Actor { @Persisted value = 0; async read() { return this.value; } async increment() { return ++this.value; } async onConnect(socket: any) { socket.send(`ready:${this.value}`); } }").await?;
     tokio::fs::write(project.join("tsconfig.json"), r#"{"compilerOptions":{"target":"ES2022","module":"NodeNext","moduleResolution":"NodeNext","strict":true,"skipLibCheck":true},"include":["actors.ts"]}"#).await?;
     let result = Command::new("bun").args(["--input-type=module", "--eval", "const { buildActor } = await import(process.argv[1]); await buildActor(process.argv[2], process.argv[3]);"])
         .arg(sdk.join("dist/compiler/actor-build.js")).arg(source).arg(&compiled).output().await?;

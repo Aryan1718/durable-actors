@@ -368,7 +368,7 @@ async fn find_actor(
     headers: HeaderMap,
     request: Result<Json<FindActorRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
-    let target = resolve_actor_target(&state, &path.into_actor(), &headers, request).await?;
+    let target = resolve_actor_target(&state, &path.into_actor(), &headers, request, None).await?;
     Ok(([(header::CACHE_CONTROL, "no-store")], Json(target)).into_response())
 }
 
@@ -377,6 +377,7 @@ pub(super) async fn resolve_actor_target(
     actor: &ActorKey,
     headers: &HeaderMap,
     request: Result<Json<FindActorRequest>, JsonRejection>,
+    invocation: Option<&crate::actor::ActorInvocation>,
 ) -> Result<ActorTargetReply, ApiError> {
     let mut timings = TargetResolutionTimings::new();
     let request_id = headers
@@ -437,12 +438,26 @@ pub(super) async fn resolve_actor_target(
             }
             None => None,
         };
+        let operation = invocation.map(|invocation| crate::sandbox::assignment::InitialOperation {
+            request: crate::sandbox::assignment::InitialRequest::Invoke {
+                invocation: invocation.clone(),
+                grant: grant.clone(),
+            },
+            routing_ms: timings.elapsed_ms(),
+        });
         let target = state
             .invocations
-            .resolve_actor_target_timed(actor, request.home_region.as_deref(), &mut timings, grant)
+            .resolve_actor_target_timed(
+                actor,
+                request.home_region.as_deref(),
+                &mut timings,
+                grant,
+                operation.as_ref(),
+            )
             .await
             .map_err(ApiError::routing)?;
         Ok(ActorTargetReply {
+            initial_reply: target.initial_reply,
             host_state: target.host_state,
             home_region: target.home_region,
             backend_route: target.route.clone(),
@@ -592,6 +607,8 @@ struct DeploymentReply {
 #[serde(rename_all = "camelCase")]
 pub(super) struct ActorTargetReply {
     #[serde(skip)]
+    pub initial_reply: Option<Value>,
+    #[serde(skip)]
     pub host_state: HostState,
     #[serde(skip)]
     pub backend_route: String,
@@ -632,7 +649,13 @@ impl ApiError {
     }
 
     pub(super) fn routing(error: anyhow::Error) -> Self {
-        if error.is::<super::access::AccessDisabled>() {
+        if error.is::<crate::sandbox::assignment::AssignmentOutcomeUnknown>() {
+            Self::new(
+                StatusCode::BAD_GATEWAY,
+                "outcome_unknown",
+                error.to_string(),
+            )
+        } else if error.is::<super::access::AccessDisabled>() {
             Self::access(error)
         } else if let Some(rejected) =
             error.downcast_ref::<super::project_limits::AdmissionRejected>()

@@ -39,22 +39,35 @@ impl RemoteSandboxProvider {
         );
         let secrets = self.secrets.resolve(&request.secret_refs).await?;
         let environment = assignment_environment(request, spare, secrets)?;
-        let handle = self.assignment.assign(spare, environment).await?;
-        let lease = handle
-            .lease
-            .as_ref()
-            .context("assigned host did not acquire ownership")?;
-        ensure!(
-            handle.host_id == request.host_id
-                && lease.id == request.host_id
-                && lease.session_id == request.session_id
-                && lease.expires_at_ms > now_ms()?
-                && handle.owner_epoch > 0
-                && handle.route == spare.route
-                && lease.route == spare.route
-                && handle.canonical_region == request.canonical_region,
-            "assigned host identity mismatch"
-        );
+        let handle = self
+            .assignment
+            .assign(spare, environment, request.initial_operation.clone())
+            .await?;
+        let validated = (|| -> Result<()> {
+            let lease = handle
+                .lease
+                .as_ref()
+                .context("assigned host did not acquire ownership")?;
+            ensure!(
+                handle.host_id == request.host_id
+                    && lease.id == request.host_id
+                    && lease.session_id == request.session_id
+                    && lease.expires_at_ms > now_ms()?
+                    && handle.owner_epoch > 0
+                    && handle.route == spare.route
+                    && lease.route == spare.route
+                    && handle.canonical_region == request.canonical_region,
+                "assigned host identity mismatch"
+            );
+            Ok(())
+        })();
+        validated.map_err(|error| {
+            if handle.initial_reply.is_some() {
+                error.context(assignment::AssignmentOutcomeUnknown)
+            } else {
+                error
+            }
+        })?;
         Ok(handle)
     }
 }
@@ -250,6 +263,7 @@ trait HostAssignment: Send + Sync {
         &self,
         spare: &SpareHandle,
         environment: HashMap<String, String>,
+        operation: Option<assignment::InitialOperation>,
     ) -> Result<ActorHostHandle>;
 }
 
@@ -268,22 +282,51 @@ impl HostAssignment for HttpAssignment {
         &self,
         spare: &SpareHandle,
         environment: HashMap<String, String>,
+        operation: Option<assignment::InitialOperation>,
     ) -> Result<ActorHostHandle> {
-        self.0
+        let request = self
+            .0
             .client
             .post(format!(
                 "{}/assign",
                 spare.control_route.trim_end_matches('/')
             ))
             .bearer_auth(&spare.control_token)
-            .timeout(Duration::from_secs(120))
-            .json(&environment)
-            .send()
-            .await?
-            .error_for_status()?
-            .json()
-            .await
-            .context("decode host assignment")
+            .timeout(Duration::from_secs(120));
+        let request = match &operation {
+            Some(operation) => request.json(&assignment::AssignmentRequest {
+                environment,
+                operation: operation.clone(),
+            }),
+            None => request.json(&environment),
+        };
+        let response = request.send().await.map_err(|error| {
+            if operation.is_some() && !error.is_connect() {
+                anyhow::Error::new(error).context(assignment::AssignmentOutcomeUnknown)
+            } else {
+                error.into()
+            }
+        })?;
+        let result = async {
+            let handle: ActorHostHandle = response
+                .error_for_status()?
+                .json()
+                .await
+                .context("decode host assignment")?;
+            ensure!(
+                operation.is_none() || handle.initial_reply.is_some(),
+                "assignment omitted operation result"
+            );
+            Ok(handle)
+        }
+        .await;
+        result.map_err(|error: anyhow::Error| {
+            if operation.is_some() {
+                error.context(assignment::AssignmentOutcomeUnknown)
+            } else {
+                error
+            }
+        })
     }
 }
 

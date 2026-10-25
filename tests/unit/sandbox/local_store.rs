@@ -56,6 +56,7 @@ async fn retirement_and_shutdown_reject_reservations_until_their_lifecycle_allow
 
 fn request(id: &str) -> EnsureHostRequest {
     EnsureHostRequest {
+        initial_operation: None,
         actor_is_new: true,
         owner_hint: None,
         actor: Some(ActorKey {

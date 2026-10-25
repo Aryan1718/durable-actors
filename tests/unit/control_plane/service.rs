@@ -59,7 +59,8 @@ impl HostProvisioner for UnavailableProvisioner {
         _actor: &ActorKey,
         _new_actor: bool,
         _owner_hint: Option<&crate::bucket::OwnershipHint>,
-    ) -> Result<(HostLease, u64)> {
+        _: Option<&crate::sandbox::assignment::InitialOperation>,
+    ) -> Result<(HostLease, u64, Option<serde_json::Value>)> {
         anyhow::bail!("host creation is outside this test")
     }
 
@@ -102,7 +103,8 @@ impl HostProvisioner for FakeRetiringProvisioner {
         _actor: &ActorKey,
         _new_actor: bool,
         _owner_hint: Option<&crate::bucket::OwnershipHint>,
-    ) -> Result<(HostLease, u64)> {
+        _: Option<&crate::sandbox::assignment::InitialOperation>,
+    ) -> Result<(HostLease, u64, Option<serde_json::Value>)> {
         anyhow::bail!("host creation is outside this test")
     }
 
@@ -152,8 +154,9 @@ async fn gcs_routes_use_the_hosts_epoch_without_claiming_or_preparing_in_the_con
             _actor: &ActorKey,
             _new_actor: bool,
             _owner_hint: Option<&crate::bucket::OwnershipHint>,
-        ) -> Result<(HostLease, u64)> {
-            Ok((self.0.clone(), 42))
+            _: Option<&crate::sandbox::assignment::InitialOperation>,
+        ) -> Result<(HostLease, u64, Option<serde_json::Value>)> {
+            Ok((self.0.clone(), 42, None))
         }
         async fn terminate_hosts(
             &self,
@@ -218,13 +221,13 @@ async fn gcs_routes_use_the_hosts_epoch_without_claiming_or_preparing_in_the_con
         actor_id: "one".into(),
     };
     let target = service
-        .resolve_actor_route(&actor, None, None, None)
+        .resolve_actor_route(&actor, None, None, None, None)
         .await?;
     assert_eq!(target.route, route);
     assert_eq!(target.owner_epoch, 42);
     assert!(placements.get(&actor.storage_key()).await?.is_none());
     service
-        .resolve_actor_route(&actor, None, None, None)
+        .resolve_actor_route(&actor, None, None, None, None)
         .await?;
     assert_eq!(
         requests.load(std::sync::atomic::Ordering::SeqCst),
@@ -554,7 +557,7 @@ async fn sandbox_regions_constrain_new_and_existing_actors() -> Result<()> {
             ControlPlaneService::new(placements, auth, registry, issuer, provisioner.clone());
         service.region = Some("north-america-east".into());
         let result = service
-            .route_actor(&actor, "north-america-east", assigned, None)
+            .route_actor(&actor, "north-america-east", assigned, None, None)
             .await;
         assert_eq!(
             result.is_ok(),
@@ -678,7 +681,8 @@ impl HostProvisioner for LosingActivation {
         _actor: &ActorKey,
         _new_actor: bool,
         _owner_hint: Option<&crate::bucket::OwnershipHint>,
-    ) -> Result<(HostLease, u64)> {
+        _: Option<&crate::sandbox::assignment::InitialOperation>,
+    ) -> Result<(HostLease, u64, Option<serde_json::Value>)> {
         let host = HostId::new(format!("host.v3.{}.winner", spec.host_config_key()));
         let mut lease = test_lease(&host);
         lease.route = "https://winner.example.com".into();
@@ -733,7 +737,7 @@ async fn a_losing_activation_routes_to_the_ready_winner() -> Result<()> {
     });
     let service = ControlPlaneService::new(placements, auth, registry, issuer, provisioner.clone());
     let target = service
-        .route_actor(&actor, "north-america-east", None, None)
+        .route_actor(&actor, "north-america-east", None, None, None)
         .await?;
     assert_eq!(target.lease.route, "https://winner.example.com");
     assert!(provisioner.waited.load(std::sync::atomic::Ordering::SeqCst));
@@ -770,7 +774,8 @@ impl HostProvisioner for FakeRoutingProvisioner {
         _actor: &ActorKey,
         _new_actor: bool,
         _owner_hint: Option<&crate::bucket::OwnershipHint>,
-    ) -> Result<(HostLease, u64)> {
+        _: Option<&crate::sandbox::assignment::InitialOperation>,
+    ) -> Result<(HostLease, u64, Option<serde_json::Value>)> {
         self.calls.lock().unwrap().push(region.to_owned());
         ensure!(
             !self.failed_regions.contains(&region),
@@ -784,6 +789,7 @@ impl HostProvisioner for FakeRoutingProvisioner {
                 expires_at_ms: u64::MAX,
             },
             1,
+            None,
         ))
     }
 
@@ -886,6 +892,7 @@ async fn provisioning_never_changes_the_assigned_region() -> Result<()> {
                 &spec,
                 before.as_ref(),
                 &select_target_region(before.as_ref(), reported)?,
+                None,
                 None,
             )
             .await;

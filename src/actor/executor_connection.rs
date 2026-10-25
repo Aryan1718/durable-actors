@@ -69,7 +69,7 @@ pub enum ActorSocketEvent {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ActorSocketInvocation {
     pub request_id: String,
     pub actor: ActorKey,

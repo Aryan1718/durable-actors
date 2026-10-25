@@ -1,4 +1,6 @@
 use crate::request_tracking::HostState;
+use crate::sandbox::assignment::{AssignmentOutcomeUnknown, InitialOperation};
+use serde_json::Value;
 use std::{sync::Arc, time::Instant};
 
 use anyhow::{Context, Result, ensure};
@@ -269,8 +271,9 @@ impl ControlPlaneService {
         home_region: Option<&str>,
         timings: &mut TargetResolutionTimings,
         grant: Option<super::session::InvocationGrant>,
+        operation: Option<&InitialOperation>,
     ) -> Result<ActorTarget> {
-        self.resolve_actor_route(actor, home_region, Some(timings), grant)
+        self.resolve_actor_route(actor, home_region, Some(timings), grant, operation)
             .await
     }
 
@@ -326,6 +329,7 @@ impl ControlPlaneService {
         home_region: Option<&str>,
         mut timings: Option<&mut TargetResolutionTimings>,
         grant: Option<super::session::InvocationGrant>,
+        operation: Option<&InitialOperation>,
     ) -> Result<ActorTarget> {
         actor.validate()?;
         let target = self
@@ -334,8 +338,27 @@ impl ControlPlaneService {
                 self.default_region(),
                 home_region,
                 timings.as_deref_mut(),
+                operation,
             )
             .await?;
+        let executed = target.initial_reply.is_some();
+        self.issue_actor_target(actor, target, timings, grant)
+            .map_err(|error| {
+                if executed {
+                    error.context(AssignmentOutcomeUnknown)
+                } else {
+                    error
+                }
+            })
+    }
+
+    fn issue_actor_target(
+        &self,
+        actor: &ActorKey,
+        target: RoutedActor,
+        mut timings: Option<&mut TargetResolutionTimings>,
+        grant: Option<super::session::InvocationGrant>,
+    ) -> Result<ActorTarget> {
         let resolved_at_ms = crate::clock::Clock::now_ms(&crate::clock::SystemClock)?;
         let idle_expires_at_ms = resolved_at_ms.saturating_add(
             target
@@ -366,6 +389,7 @@ impl ControlPlaneService {
             timings.route_selected_at_ms = Some(timings.elapsed_ms());
         }
         Ok(ActorTarget {
+            initial_reply: target.initial_reply,
             host_id: target.lease.id,
             session_id: target.lease.session_id,
             host_state: target.host_state,
@@ -380,6 +404,7 @@ impl ControlPlaneService {
 
 #[derive(Clone)]
 pub(super) struct ActorTarget {
+    pub initial_reply: Option<Value>,
     pub host_id: HostId,
     pub session_id: String,
     pub host_state: HostState,
@@ -579,11 +604,18 @@ impl ControlPlaneService {
         storage_region: &str,
         home_region: Option<&str>,
         mut timings: Option<&mut TargetResolutionTimings>,
+        operation: Option<&InitialOperation>,
     ) -> Result<RoutedActor> {
         let deadline = tokio::time::Instant::now() + super::CONTROL_PLANE_REQUEST_TIMEOUT;
         loop {
             match self
-                .route_actor(actor, storage_region, home_region, timings.as_deref_mut())
+                .route_actor(
+                    actor,
+                    storage_region,
+                    home_region,
+                    timings.as_deref_mut(),
+                    operation,
+                )
                 .await
             {
                 Err(error) if error.is::<ShuttingDownHost>() => {
@@ -625,6 +657,7 @@ impl ControlPlaneService {
         storage_region: &str,
         home_region: Option<&str>,
         mut timings: Option<&mut TargetResolutionTimings>,
+        operation: Option<&InitialOperation>,
     ) -> Result<RoutedActor> {
         self.validate_home_region(home_region)?;
         let spec = self
@@ -674,6 +707,7 @@ impl ControlPlaneService {
                 current.as_ref(),
                 owner_hint.as_ref(),
                 &regions,
+                operation,
             )
             .await?;
         if let Some(timings) = timings.as_deref_mut() {
@@ -692,15 +726,19 @@ impl ControlPlaneService {
         current: Option<&ObjectPlacement>,
         owner_hint: Option<&OwnershipHint>,
         regions: &[String],
+        operation: Option<&InitialOperation>,
     ) -> Result<RoutedActor> {
         let mut last_error = None;
         for region in regions {
             match self
-                .ensure_actor_host(actor, spec, current, region, owner_hint)
+                .ensure_actor_host(actor, spec, current, region, owner_hint, operation)
                 .await
             {
                 Ok(target) => return Ok(target),
-                Err(error) if error.is::<super::project_limits::AdmissionFailure>() => {
+                Err(error)
+                    if error.is::<AssignmentOutcomeUnknown>()
+                        || error.is::<super::project_limits::AdmissionFailure>() =>
+                {
                     return Err(error);
                 }
                 Err(error) => {
@@ -729,19 +767,28 @@ impl ControlPlaneService {
         current: Option<&ObjectPlacement>,
         requested_region: &str,
         owner_hint: Option<&OwnershipHint>,
+        operation: Option<&InitialOperation>,
     ) -> Result<RoutedActor> {
         let region = current
             .map(|p| p.home_region.clone())
             .unwrap_or_else(|| requested_region.to_owned());
-        let (lease, owner_epoch) = self
+        let (lease, owner_epoch, initial_reply) = self
             .provisioner
-            .ensure_actor_host(spec, &region, actor, current.is_none(), owner_hint)
+            .ensure_actor_host(
+                spec,
+                &region,
+                actor,
+                current.is_none(),
+                owner_hint,
+                operation,
+            )
             .await?;
         ensure!(
             owner_epoch > 0,
             "host readiness returned no ownership epoch"
         );
         Ok(RoutedActor {
+            initial_reply,
             host_state: HostState::Cold,
             placement: ObjectPlacement {
                 lease: lease.clone(),
@@ -821,6 +868,7 @@ impl ControlPlaneService {
         }
         self.provisioner.wait_ready(&placement.owner).await?;
         Ok(Some(RoutedActor {
+            initial_reply: None,
             host_state: HostState::Warm,
             placement: placement.clone(),
             lease: lease.clone(),
@@ -926,7 +974,8 @@ pub(crate) trait HostProvisioner: Send + Sync {
         actor: &ActorKey,
         new_actor: bool,
         owner_hint: Option<&OwnershipHint>,
-    ) -> Result<(HostLease, u64)>;
+        operation: Option<&InitialOperation>,
+    ) -> Result<(HostLease, u64, Option<Value>)>;
     async fn terminate_hosts(
         &self,
         spec: &HostLaunchSpec,
@@ -1051,8 +1100,9 @@ impl HostProvisioner for SandboxHostProvisioner {
         actor: &ActorKey,
         new_actor: bool,
         owner_hint: Option<&OwnershipHint>,
-    ) -> Result<(HostLease, u64)> {
-        self.launch(spec, region, actor, new_actor, owner_hint)
+        operation: Option<&InitialOperation>,
+    ) -> Result<(HostLease, u64, Option<Value>)> {
+        self.launch(spec, region, actor, new_actor, owner_hint, operation)
             .await
     }
 
@@ -1084,7 +1134,8 @@ impl SandboxHostProvisioner {
         actor: &ActorKey,
         new_actor: bool,
         owner_hint: Option<&OwnershipHint>,
-    ) -> Result<(HostLease, u64)> {
+        operation: Option<&InitialOperation>,
+    ) -> Result<(HostLease, u64, Option<Value>)> {
         let started_at = Instant::now();
         let mut request = self.request(spec, region, actor)?;
         if let Some(admission) = &self.admission {
@@ -1092,6 +1143,7 @@ impl SandboxHostProvisioner {
                 .reserve(actor, &request.host_id, &request.session_id)
                 .await?;
         }
+        request.initial_operation = operation.cloned();
         request.actor_is_new = new_actor;
         request.owner_hint = owner_hint.map(serde_json::to_string).transpose()?;
         let token = async {
@@ -1134,6 +1186,9 @@ impl SandboxHostProvisioner {
                 return Err(error);
             }
         };
+        if let Some(operation) = &mut request.initial_operation {
+            operation.routing_ms += elapsed_ms(started_at);
+        }
         let handle = match self.provider.ensure_host(&request).await {
             Ok(handle) => handle,
             Err(error) => {
@@ -1199,7 +1254,11 @@ impl SandboxHostProvisioner {
                 if let Some(pool) = &self.pool {
                     let _ = pool.failed(request.host_id.as_str()).await;
                 }
-                return Err(error);
+                return Err(if handle.initial_reply.is_some() {
+                    error.context(AssignmentOutcomeUnknown)
+                } else {
+                    error
+                });
             }
         };
         let lease_validated_at_ms = elapsed_ms(started_at);
@@ -1229,7 +1288,7 @@ impl SandboxHostProvisioner {
             outcome = "ready",
             "actor host provisioning completed"
         );
-        Ok((lease, owner_epoch))
+        Ok((lease, owner_epoch, handle.initial_reply))
     }
 
     fn request(
@@ -1264,6 +1323,7 @@ impl SandboxHostProvisioner {
             )?
             .token;
         Ok(EnsureHostRequest {
+            initial_operation: None,
             actor_is_new: false,
             owner_hint: None,
             actor: Some(actor.clone()),
@@ -1328,6 +1388,7 @@ fn ready_lease(
 }
 
 struct RoutedActor {
+    initial_reply: Option<Value>,
     host_state: HostState,
     placement: ObjectPlacement,
     lease: HostLease,
