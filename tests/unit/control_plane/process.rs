@@ -578,6 +578,23 @@ fn single_gke_zone_infers_the_actor_region() -> Result<()> {
 }
 
 #[test]
+fn aws_zone_infers_the_actor_region() -> Result<()> {
+    let mut values = process_environment();
+    values.remove("DURABLE_ACTORS_GKE_ZONES");
+    values.insert("DURABLE_ACTORS_GKE_ZONE", "us-west-2a");
+    let config =
+        ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|v| (*v).into()))?;
+    assert_eq!(config.region.as_deref(), Some("north-america-west"));
+    assert_eq!(gke(&config).zones["north-america-west"], ["us-west-2a"]);
+    values.insert("DURABLE_ACTORS_GKE_ZONE", "us-west-9a");
+    assert!(
+        ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|v| (*v).into()))
+            .is_err()
+    );
+    Ok(())
+}
+
+#[test]
 fn compiled_artifacts_select_their_language_image() -> Result<()> {
     let values = process_environment();
     let config = ControlPlaneProcessConfig::from_lookup(|name| {

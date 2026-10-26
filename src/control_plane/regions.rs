@@ -35,7 +35,7 @@ pub(super) fn storage_region(region: &str) -> Result<&str> {
         {
             base
         }
-        _ => region,
+        _ => aws_zone_region(region),
     };
     match location {
         "canada"
@@ -61,5 +61,14 @@ pub(super) fn storage_region(region: &str) -> Result<&str> {
         "ap-southeast-1" | "asia-southeast1" | "asia-southeast2" | "ap-singapore-1"
         | "southeastasia" => Ok("asia-southeast"),
         _ => bail!("workflow region {region:?} has no storage-region mapping"),
+    }
+}
+
+fn aws_zone_region(zone: &str) -> &str {
+    match zone.as_bytes() {
+        [.., digit, letter] if digit.is_ascii_digit() && letter.is_ascii_lowercase() => {
+            &zone[..zone.len() - 1]
+        }
+        _ => zone,
     }
 }
