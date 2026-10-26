@@ -1,0 +1,14 @@
+publicUrl: https://actors.example.com
+placement:
+  zone: us-west-2a
+storage:
+  bucket: test-state
+  region: us-west-2
+  actorRoleArn: arn:aws:iam::123456789012:role/durable-actors-actor
+images:
+  controlPlane:
+    digest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  typescript:
+    digest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  python:
+    digest: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc

@@ -1,0 +1,135 @@
+{{- include "actors.validate" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "actors.name" . }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "actors.name" . }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "actors.name" . }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "actors.name" . }}
+    spec:
+      serviceAccountName: {{ include "actors.name" . }}
+      terminationGracePeriodSeconds: 60
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: sandbox.gke.io/runtime
+                    operator: NotIn
+                    values: [gvisor]
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000
+        runAsGroup: 10000
+        fsGroup: 10000
+      containers:
+        - name: control-plane
+          image: {{ include "actors.image" .Values.images.controlPlane | quote }}
+          ports:
+            - {name: http, containerPort: 7100}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          volumeMounts:
+            - {name: tmp, mountPath: /tmp}
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 10
+          env:
+            - {name: DURABLE_ACTORS_PROCESS_ROLE, value: control_plane}
+            - {name: DURABLE_ACTORS_CONTROL_PLANE_BIND, value: "0.0.0.0:7100"}
+            - {name: DURABLE_ACTORS_ALARM_POLL_INTERVAL_MS, value: {{ .Values.alarms.pollIntervalMs | quote }}}
+            - {name: DURABLE_ACTORS_POSTGRES_MAX_CONNECTIONS, value: {{ .Values.postgres.maxConnections | quote }}}
+            - {name: DURABLE_ACTORS_PROJECT_LIMITS_ENABLED, value: {{ .Values.projectLimits.enabled | quote }}}
+            - {name: DURABLE_ACTORS_PROJECT_MAX_ACTIVE_ACTORS, value: {{ .Values.projectLimits.maxActiveActors | quote }}}
+            - {name: DURABLE_ACTORS_PROJECT_ACTOR_STARTS_PER_SECOND, value: {{ .Values.projectLimits.actorStartsPerSecond | quote }}}
+            - {name: DURABLE_ACTORS_PROJECT_ACTOR_START_BURST, value: {{ .Values.projectLimits.actorStartBurst | quote }}}
+            - name: DURABLE_ACTORS_CONTROL_PLANE_URL
+              value: {{ printf "http://%s.%s.svc.cluster.local:7100" (include "actors.name" .) .Release.Namespace | quote }}
+            - {name: DURABLE_ACTORS_PUBLIC_URL, value: {{ .Values.publicUrl | quote }}}
+            - {name: DURABLE_ACTORS_TYPESCRIPT_IMAGE, value: {{ include "actors.image" .Values.images.typescript | quote }}}
+            - {name: DURABLE_ACTORS_PYTHON_IMAGE, value: {{ include "actors.image" .Values.images.python | quote }}}
+            - {name: DURABLE_ACTORS_GKE_NAMESPACE, value: {{ include "actors.sandboxNamespace" . | quote }}}
+            - {name: DURABLE_ACTORS_GKE_ZONE, value: {{ .Values.placement.zone | quote }}}
+            - {name: DURABLE_ACTORS_STORAGE_PROVIDER, value: s3}
+            - {name: DURABLE_ACTORS_AWS_REGION, value: {{ .Values.storage.region | quote }}}
+            - {name: DURABLE_ACTORS_AWS_ACTOR_ROLE_ARN, value: {{ .Values.storage.actorRoleArn | quote }}}
+            - {name: DURABLE_ACTORS_BUCKET, value: {{ .Values.storage.bucket | quote }}}
+            - {name: DURABLE_ACTORS_ARTIFACT_BUCKET, value: {{ .Values.storage.bucket | quote }}}
+            - {name: DURABLE_ACTORS_HOST_CPU_MILLIS, value: {{ .Values.actors.cpuMillis | quote }}}
+            {{- with .Values.actors.cpuLimitMillis }}
+            - {name: DURABLE_ACTORS_HOST_CPU_LIMIT_MILLIS, value: {{ . | quote }}}
+            {{- end }}
+            - {name: DURABLE_ACTORS_HOST_MEMORY_MIB, value: {{ .Values.actors.memoryMiB | quote }}}
+            {{- with .Values.actors.memoryLimitMiB }}
+            - {name: DURABLE_ACTORS_HOST_MEMORY_LIMIT_MIB, value: {{ . | quote }}}
+            {{- end }}
+            - name: DURABLE_ACTORS_POSTGRES_URL
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.credentialsSecret | quote }}, key: postgres-url}
+            - name: DURABLE_ACTORS_JWT_SIGNING_KEY
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.credentialsSecret | quote }}, key: jwt-signing-key}
+            - name: DURABLE_ACTORS_SECRET
+              valueFrom:
+                secretKeyRef: {name: {{ .Values.credentialsSecret | quote }}, key: api-key}
+            {{- with .Values.redis.urlSecretKey }}
+            - name: DURABLE_ACTORS_REDIS_URL
+              valueFrom:
+                secretKeyRef: {name: {{ $.Values.credentialsSecret | quote }}, key: {{ . | quote }}}
+            {{- end }}
+            {{- with .Values.redis.caSecretKey }}
+            - name: DURABLE_ACTORS_REDIS_CA_CERT
+              valueFrom:
+                secretKeyRef: {name: {{ $.Values.credentialsSecret | quote }}, key: {{ . | quote }}}
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "actors.name" . }}
+spec:
+  selector:
+    app.kubernetes.io/name: {{ include "actors.name" . }}
+  ports:
+    - {name: http, port: 7100, targetPort: http}
+{{- if gt (int .Values.replicaCount) 1 }}
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "actors.name" . }}
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "actors.name" . }}
+{{- end }}

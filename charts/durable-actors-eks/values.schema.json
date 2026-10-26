@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "publicUrl": {"type": "string", "pattern": "^https://[^/?#@]+/?$"},
+    "placement": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "zone": {"type": "string", "pattern": "^[a-z]{2}(-[a-z]+)+-[0-9]+[a-z]$"}
+      },
+      "required": ["zone"]
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bucket": {"type": "string", "minLength": 3, "maxLength": 63, "pattern": "^[a-z0-9][a-z0-9.-]+[a-z0-9]$"},
+        "region": {"type": "string", "pattern": "^[a-z]{2}(-[a-z]+)+-[0-9]+$"},
+        "actorRoleArn": {"type": "string", "pattern": "^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$"}
+      },
+      "required": ["bucket", "region", "actorRoleArn"]
+    },
+    "credentialsSecret": {"type": "string", "minLength": 1},
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "className": {"type": "string"},
+        "tlsSecret": {"type": "string"},
+        "annotations": {"type": "object", "additionalProperties": {"type": "string"}}
+      },
+      "required": ["enabled", "className", "tlsSecret", "annotations"]
+    },
+    "replicaCount": {"type": "integer", "minimum": 1, "maximum": 100},
+    "actors": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "cpuMillis": {"type": "integer", "minimum": 1},
+        "cpuLimitMillis": {"type": ["integer", "null"], "minimum": 1},
+        "memoryMiB": {"type": "integer", "minimum": 1},
+        "memoryLimitMiB": {"type": ["integer", "null"], "minimum": 1}
+      },
+      "required": ["cpuMillis", "memoryMiB"]
+    },
+    "alarms": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"pollIntervalMs": {"type": "integer", "minimum": 1}},
+      "required": ["pollIntervalMs"]
+    },
+    "projectLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "maxActiveActors": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "actorStartsPerSecond": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "actorStartBurst": {"type": "integer", "minimum": 1, "maximum": 4294967295}
+      },
+      "required": ["enabled", "maxActiveActors", "actorStartsPerSecond", "actorStartBurst"]
+    },
+    "postgres": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"maxConnections": {"type": "integer", "minimum": 1, "maximum": 1000}},
+      "required": ["maxConnections"]
+    },
+    "redis": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"urlSecretKey": {"type": "string"}, "caSecretKey": {"type": "string"}}
+    },
+    "resources": {"type": "object"},
+    "images": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "controlPlane": {"$ref": "#/definitions/image"},
+        "typescript": {"$ref": "#/definitions/image"},
+        "python": {"$ref": "#/definitions/image"}
+      },
+      "required": ["controlPlane", "typescript", "python"]
+    },
+    "sandboxNamespace": {"type": "string", "pattern": "^$|^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 63},
+    "nodeSelector": {"type": "object", "additionalProperties": {"type": "string"}},
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"dnsCidrs": {"type": "array", "items": {"type": "string", "minLength": 1}}},
+      "required": ["dnsCidrs"]
+    }
+  },
+  "required": [
+    "publicUrl", "placement", "storage", "credentialsSecret", "ingress", "replicaCount", "actors",
+    "alarms", "projectLimits", "postgres", "resources", "images", "sandboxNamespace", "nodeSelector",
+    "networkPolicy"
+  ],
+  "definitions": {
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "repository": {"type": "string", "minLength": 1},
+        "digest": {"type": "string", "pattern": "^[a-f0-9]{64}$"}
+      },
+      "required": ["repository", "digest"]
+    }
+  }
+}
