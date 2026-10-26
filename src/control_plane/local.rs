@@ -23,6 +23,7 @@ use crate::{
     bucket::{
         Bucket, FileBucket, GcsBucket, RuntimeStorage,
         access::{BucketLocation, RuntimeAccess},
+        aws_access::{AwsCredentialIssuer, AwsStorage},
     },
     clock::SystemClock,
     sandbox::{HostSandboxRuntimeConfig, LocalSandboxProvider},
@@ -92,6 +93,7 @@ pub(super) fn resolve_entrypoint(project: &Path, configured: Option<&str>) -> Re
 pub enum DevStorage {
     Local,
     Gcs,
+    S3,
 }
 
 pub async fn serve_local(
@@ -285,7 +287,28 @@ struct LocalState {
 }
 
 async fn local_storage(options: &DevOptions, directory: &Path) -> Result<LocalState> {
-    let location = match options.storage {
+    let location = dev_location(options.storage, directory)?;
+    let (bucket, aws_issuer) = dev_bucket(&location).await?;
+    let runtime = Arc::new(RuntimeStorage::new(bucket, Arc::new(SystemClock))?);
+    let mut bootstrap = RuntimeAccess::new(location, runtime.persistence.clone())?;
+    if let Some(issuer) = aws_issuer {
+        bootstrap = bootstrap.with_aws_issuer(issuer);
+    }
+    Ok(LocalState {
+        traces: crate::request_traces::TraceStore::open(Arc::new(
+            crate::request_traces::persistence::sqlite::SqliteTracePersistence::new(
+                directory.join("request-traces.sqlite3"),
+            ),
+        ))
+        .await?,
+        runtime,
+        access: Arc::new(bootstrap),
+        region: "north-america-east".into(),
+    })
+}
+
+fn dev_location(storage: DevStorage, directory: &Path) -> Result<BucketLocation> {
+    Ok(match storage {
         DevStorage::Local => BucketLocation::File {
             directory: directory.canonicalize()?.join("objects"),
         },
@@ -295,24 +318,31 @@ async fn local_storage(options: &DevOptions, directory: &Path) -> Result<LocalSt
             bucket: std::env::var("DURABLE_ACTORS_BUCKET")
                 .context("DURABLE_ACTORS_STORAGE=gcs requires DURABLE_ACTORS_BUCKET")?,
         },
-    };
-    let bucket: Arc<dyn Bucket> = match &location {
-        BucketLocation::File { directory } => Arc::new(FileBucket::new(directory.clone())?),
-        BucketLocation::Gcs { bucket, .. } => Arc::new(GcsBucket::new(bucket).await?),
-        BucketLocation::S3 { .. } => anyhow::bail!("S3 storage is unavailable in local mode"),
-    };
-    let runtime = Arc::new(RuntimeStorage::new(bucket, Arc::new(SystemClock))?);
-    let bootstrap = Arc::new(RuntimeAccess::new(location, runtime.persistence.clone())?);
-    Ok(LocalState {
-        traces: crate::request_traces::TraceStore::open(Arc::new(
-            crate::request_traces::persistence::sqlite::SqliteTracePersistence::new(
-                directory.join("request-traces.sqlite3"),
-            ),
-        ))
-        .await?,
-        runtime,
-        access: bootstrap,
-        region: "north-america-east".into(),
+        DevStorage::S3 => {
+            let bucket = std::env::var("DURABLE_ACTORS_BUCKET")
+                .context("DURABLE_ACTORS_STORAGE=s3 requires DURABLE_ACTORS_BUCKET")?;
+            BucketLocation::S3 {
+                artifact_bucket: bucket.clone(),
+                bucket,
+                region: std::env::var("DURABLE_ACTORS_AWS_REGION")
+                    .context("DURABLE_ACTORS_STORAGE=s3 requires DURABLE_ACTORS_AWS_REGION")?,
+            }
+        }
+    })
+}
+
+async fn dev_bucket(
+    location: &BucketLocation,
+) -> Result<(Arc<dyn Bucket>, Option<Arc<AwsCredentialIssuer>>)> {
+    Ok(match location {
+        BucketLocation::File { directory } => (Arc::new(FileBucket::new(directory.clone())?), None),
+        BucketLocation::Gcs { bucket, .. } => (Arc::new(GcsBucket::new(bucket).await?), None),
+        BucketLocation::S3 { bucket, region, .. } => {
+            let role_arn = std::env::var("DURABLE_ACTORS_AWS_ACTOR_ROLE_ARN")
+                .context("DURABLE_ACTORS_STORAGE=s3 requires DURABLE_ACTORS_AWS_ACTOR_ROLE_ARN")?;
+            let aws = AwsStorage::connect(bucket, region, &role_arn).await?;
+            (aws.bucket, Some(aws.issuer))
+        }
     })
 }
 

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use tracing::{info, warn};
 
 use crate::{
-    bucket::{Bucket, GcsBucket, RuntimeStorageReader, S3Bucket},
+    bucket::{Bucket, GcsBucket, RuntimeStorageReader, aws_access::AwsStorage},
     postgres::PostgresDatabase,
     redis_client::{Redis, RedisConfig},
     request_traces::{
@@ -242,24 +242,17 @@ async fn control_plane_routes(
             ),
         ));
     }
-    let (authority, gcs): (Arc<dyn Bucket>, Option<Arc<GcsBucket>>) = match &config.storage.provider
-    {
-        StorageProviderConfig::Gcs => {
+    let aws = match &config.storage.provider {
+        StorageProviderConfig::Gcs => None,
+        StorageProviderConfig::S3 { region, role_arn } => {
+            Some(AwsStorage::connect(&config.storage.bucket, region, role_arn).await?)
+        }
+    };
+    let (authority, gcs): (Arc<dyn Bucket>, Option<Arc<GcsBucket>>) = match &aws {
+        Some(aws) => (aws.bucket.clone(), None),
+        None => {
             let bucket = Arc::new(GcsBucket::new(&config.storage.bucket).await?);
             (bucket.clone(), Some(bucket))
-        }
-        StorageProviderConfig::S3 { region, .. } => {
-            let sdk = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                .region(aws_config::Region::new(region.clone()))
-                .load()
-                .await;
-            (
-                Arc::new(S3Bucket::new(
-                    &config.storage.bucket,
-                    aws_sdk_s3::Client::new(&sdk),
-                )?),
-                None,
-            )
         }
     };
     let registry = Arc::new(super::PostgresAdminRegistry::from_database(
@@ -294,20 +287,8 @@ async fn control_plane_routes(
         },
         storage.persistence.clone(),
     )?;
-    if let StorageProviderConfig::S3 { region, role_arn } = &config.storage.provider {
-        let sdk = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .region(aws_config::Region::new(region.clone()))
-            .load()
-            .await;
-        runtime_access = runtime_access.with_aws_issuer(Arc::new(
-            crate::bucket::aws_access::AwsCredentialIssuer::new(
-                role_arn.clone(),
-                Arc::new(crate::bucket::aws_access::SdkAssumeRole::new(
-                    aws_sdk_sts::Client::new(&sdk),
-                )),
-                Arc::new(crate::clock::SystemClock),
-            )?,
-        ));
+    if let Some(aws) = aws {
+        runtime_access = runtime_access.with_aws_issuer(aws.issuer);
     }
     let runtime_access = Arc::new(runtime_access);
     let placements = storage.clone();

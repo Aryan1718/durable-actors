@@ -27,7 +27,7 @@ Configuration uses environment variables. Precedence is to use exported variable
 | `DURABLE_ACTORS_ENTRYPOINT` | Auto-detected | Actor source file, relative to the project. Discovers `actors.ts` or `actors.py` in `src/` or the project root; multiple matches require an explicit setting. |
 | `DURABLE_ACTORS_PORT`       | `7100`                             | Listening port; `0` selects a free port. `--port` overrides it for one run.                                           |
 | `DURABLE_ACTORS_DATA_DIR`   | `<project>/.durable-actors`        | Persistent local state directory.                                                                                     |
-| `DURABLE_ACTORS_STORAGE`    | `local`                            | `local` for file storage or `gcs` for a GCS bucket. GCS also requires `DURABLE_ACTORS_BUCKET` and Google credentials. |
+| `DURABLE_ACTORS_STORAGE`    | `local`                            | `local` for file storage, `gcs` for a GCS bucket, or `s3` for an S3 bucket. GCS also requires `DURABLE_ACTORS_BUCKET` and Google credentials; S3 requires `DURABLE_ACTORS_BUCKET`, `DURABLE_ACTORS_AWS_REGION`, `DURABLE_ACTORS_AWS_ACTOR_ROLE_ARN`, and AWS credentials. |
 
 ## WebSockets
 
@@ -118,8 +118,9 @@ Use the [self-hosting guide](../self-hosting.md) and [Helm chart](../../charts/d
 | `DURABLE_ACTORS_REDIS_CA_CERT` | PEM CA for a `rediss://` server with a private CA, such as Memorystore. The chart reads it from the key named by `redis.caSecretKey`. |
 | `DURABLE_ACTORS_PERSISTENCE` | `standard` by default. Select `rapid` for Rapid append logs with Standard archives. |
 | `DURABLE_ACTORS_STORAGE_PROVIDER` | State storage provider, `gcs` by default. `s3` currently supports Standard persistence only. |
-| `DURABLE_ACTORS_BUCKET` | Standard GCS bucket for ownership and, in Standard mode, immutable state snapshots. |
+| `DURABLE_ACTORS_BUCKET` | Standard GCS or S3 bucket for ownership and, in Standard mode, immutable state snapshots. |
 | `DURABLE_ACTORS_AWS_REGION` | Required when `DURABLE_ACTORS_STORAGE_PROVIDER=s3`; AWS region containing the Standard S3 state bucket. |
+| `DURABLE_ACTORS_AWS_ACTOR_ROLE_ARN` | Required when `DURABLE_ACTORS_STORAGE_PROVIDER=s3`; IAM role the controller assumes with per-actor session policies to issue host credentials. |
 | `DURABLE_ACTORS_ARTIFACT_BUCKET` | Immutable compiled actor code. Defaults to `DURABLE_ACTORS_BUCKET` in Standard mode; the chart uses that bucket in both modes. |
 | `DURABLE_ACTORS_ARCHIVE_BUCKET` | Required only in Rapid mode: permanent Standard GCS manifests, checkpoints, and archived log segments. The chart uses `storage.bucket`. |
 | `DURABLE_ACTORS_RAPID_BUCKETS` | Required only in Rapid mode: JSON array of one or two `{ "bucket": "name", "zone": "us-west4-a" }` placements in distinct zones. Every configured zone must durably flush before acknowledgment. One zone has no second Rapid copy if that zone is lost before archival. |

@@ -12,6 +12,28 @@ const POLICY_LIMIT: usize = 2_048;
 const ISSUANCE_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_SECONDS: i32 = 900;
 
+pub(crate) struct AwsStorage {
+    pub bucket: Arc<super::S3Bucket>,
+    pub issuer: Arc<AwsCredentialIssuer>,
+}
+
+impl AwsStorage {
+    pub(crate) async fn connect(bucket: &str, region: &str, role_arn: &str) -> Result<Self> {
+        let sdk = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_config::Region::new(region.to_owned()))
+            .load()
+            .await;
+        Ok(Self {
+            bucket: Arc::new(super::S3Bucket::new(bucket, aws_sdk_s3::Client::new(&sdk))?),
+            issuer: Arc::new(AwsCredentialIssuer::new(
+                role_arn.to_owned(),
+                Arc::new(SdkAssumeRole::new(aws_sdk_sts::Client::new(&sdk))),
+                Arc::new(crate::clock::SystemClock),
+            )?),
+        })
+    }
+}
+
 pub(crate) struct AwsCredentialIssuer {
     role_arn: String,
     sts: Arc<dyn AssumeRole>,
