@@ -204,7 +204,7 @@ impl SnapshotStore for BucketSnapshots {
     async fn get(&self, object: &str) -> Result<Option<Bytes>> {
         Ok(self
             .0
-            .download(object)
+            .get(object)
             .await?
             .map(|object| Bytes::from(object.bytes)))
     }

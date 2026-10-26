@@ -15,14 +15,11 @@ use std::{future::Future, time::Duration};
 
 const MULTIPART_PART_SIZE: usize = 5 * 1024 * 1024;
 const MAX_MULTIPART_PARTS: usize = 10_000;
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const PART_TIMEOUT: Duration = Duration::from_secs(60);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(300);
 const LIST_TIMEOUT: Duration = Duration::from_secs(30);
-
-enum ReadTarget {
-    Memory,
-    Download,
-}
 
 pub struct S3Bucket {
     bucket: String,
@@ -45,11 +42,7 @@ impl S3Bucket {
 #[async_trait]
 impl Bucket for S3Bucket {
     async fn get(&self, key: &str) -> Result<Option<BucketObject>> {
-        bounded(REQUEST_TIMEOUT, self.read(key, None, ReadTarget::Memory)).await
-    }
-
-    async fn download(&self, key: &str) -> Result<Option<BucketObject>> {
-        bounded(TRANSFER_TIMEOUT, self.read(key, None, ReadTarget::Download)).await
+        bounded(TRANSFER_TIMEOUT, self.read(key, None)).await
     }
 
     async fn range(&self, key: &str, start: u64, length: u64) -> Result<Option<BucketObject>> {
@@ -57,11 +50,7 @@ impl Bucket for S3Bucket {
         let end = start
             .checked_add(length - 1)
             .context("object range overflow")?;
-        let object = bounded(
-            REQUEST_TIMEOUT,
-            self.read(key, Some((start, end)), ReadTarget::Memory),
-        )
-        .await?;
+        let object = bounded(REQUEST_TIMEOUT, self.read(key, Some((start, end)))).await?;
         ensure!(
             object
                 .as_ref()
@@ -201,7 +190,7 @@ impl S3Bucket {
             .set_if_match(if_match)
             .set_if_none_match(if_none_match)
             .customize()
-            .config_override(single_attempt())
+            .config_override(single_attempt().timeout_config(transfer_timeouts(TRANSFER_TIMEOUT)))
             .send()
             .await;
         match result {
@@ -235,6 +224,11 @@ impl S3Bucket {
                 .part_number(i32::try_from(index + 1)?)
                 .body(ByteStream::from(bytes.to_vec()))
                 .checksum_algorithm(ChecksumAlgorithm::Crc32C)
+                .customize()
+                .config_override(
+                    aws_sdk_s3::config::Builder::new()
+                        .timeout_config(transfer_timeouts(PART_TIMEOUT)),
+                )
                 .send()
                 .await?;
             parts.push(
@@ -263,12 +257,7 @@ impl S3Bucket {
             .await;
     }
 
-    async fn read(
-        &self,
-        key: &str,
-        range: Option<(u64, u64)>,
-        target: ReadTarget,
-    ) -> Result<Option<BucketObject>> {
+    async fn read(&self, key: &str, range: Option<(u64, u64)>) -> Result<Option<BucketObject>> {
         let response = self
             .client
             .get_object()
@@ -301,10 +290,7 @@ impl S3Bucket {
             .map(u64::try_from)
             .transpose()
             .context("S3 object has a negative content length")?;
-        let bytes = match target {
-            ReadTarget::Memory => response.body.collect().await?.into_bytes(),
-            ReadTarget::Download => download(response.body).await?,
-        };
+        let bytes = download(response.body).await?;
         ensure!(
             expected_length.is_none_or(|length| length == bytes.len() as u64),
             "incomplete S3 object download"
@@ -315,7 +301,7 @@ impl S3Bucket {
 
 fn configured_client(client: aws_sdk_s3::Client) -> aws_sdk_s3::Client {
     let timeout = TimeoutConfig::builder()
-        .connect_timeout(Duration::from_secs(2))
+        .connect_timeout(CONNECT_TIMEOUT)
         .read_timeout(Duration::from_secs(5))
         .operation_attempt_timeout(Duration::from_secs(5))
         .operation_timeout(REQUEST_TIMEOUT)
@@ -343,6 +329,16 @@ async fn bounded<T>(timeout: Duration, operation: impl Future<Output = Result<T>
 fn single_attempt() -> aws_sdk_s3::config::Builder {
     // Creation is not idempotent; publication retries require content reconciliation.
     aws_sdk_s3::config::Builder::new().retry_config(RetryConfig::disabled())
+}
+
+fn transfer_timeouts(attempt: Duration) -> TimeoutConfig {
+    // An override replaces the client's timeouts wholesale, so every limit is restated.
+    TimeoutConfig::builder()
+        .connect_timeout(CONNECT_TIMEOUT)
+        .read_timeout(attempt)
+        .operation_attempt_timeout(attempt)
+        .operation_timeout(TRANSFER_TIMEOUT)
+        .build()
 }
 
 async fn download(mut body: ByteStream) -> Result<bytes::Bytes> {

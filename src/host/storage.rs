@@ -449,7 +449,7 @@ impl crate::bundle::s3::ArtifactReader for S3ArtifactReader {
             AwsHostCredentials::new(self.access.clone(), AwsScope::Artifact(object.into())),
         )
         .await?
-        .download(object)
+        .get(object)
         .await
     }
 }

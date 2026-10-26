@@ -227,7 +227,7 @@ impl ArtifactReader for BucketArtifactReader {
             "artifact storage location mismatch"
         );
         self.storage
-            .download(object)
+            .get(object)
             .await
             .map_err(|_| anyhow::anyhow!("artifact download failed"))
     }

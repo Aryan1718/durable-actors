@@ -1,49 +1,6 @@
 use super::*;
 use serde_json::json;
 
-struct StreamingBucket;
-
-#[async_trait]
-impl Bucket for StreamingBucket {
-    async fn get(&self, _: &str) -> Result<Option<super::super::BucketObject>> {
-        anyhow::bail!("snapshot used buffered read")
-    }
-
-    async fn download(&self, _: &str) -> Result<Option<super::super::BucketObject>> {
-        Ok(Some(super::super::BucketObject {
-            revision: super::super::StorageRevision::Generation(1),
-            bytes: Bytes::from_static(b"snapshot"),
-        }))
-    }
-
-    async fn range(&self, _: &str, _: u64, _: u64) -> Result<Option<super::super::BucketObject>> {
-        unreachable!()
-    }
-
-    async fn compare_and_swap(
-        &self,
-        _: &str,
-        _: Option<super::super::StorageRevision>,
-        _: Bytes,
-    ) -> Result<bool> {
-        unreachable!()
-    }
-
-    async fn list(&self, _: &str) -> Result<Vec<String>> {
-        unreachable!()
-    }
-}
-
-#[tokio::test]
-async fn standard_snapshots_use_streaming_bucket_reads() -> Result<()> {
-    let snapshots = BucketSnapshots(Arc::new(StreamingBucket));
-    assert_eq!(
-        snapshots.get("snapshot").await?,
-        Some(Bytes::from_static(b"snapshot"))
-    );
-    Ok(())
-}
-
 #[test]
 fn rapid_accepts_one_or_two_distinct_zones_and_separate_archive() -> Result<()> {
     let good = json!({"type":"rapid", "archive_bucket":"archive-test", "buckets":[

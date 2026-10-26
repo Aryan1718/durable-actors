@@ -281,15 +281,15 @@ async fn snapshot_downloads_spool_large_objects_and_reject_incomplete_data() -> 
     let bucket = server.bucket()?;
     let expected = Bytes::from(vec![7; crate::payload::IO_BUFFER_BYTES + 17]);
 
-    let object = bucket.download("large-snapshot").await?.unwrap();
+    let object = bucket.get("large-snapshot").await?.unwrap();
     assert_eq!(
         object.revision,
         StorageRevision::ETag("\"etag-large\"".into())
     );
     assert_eq!(object.bytes, expected);
-    assert!(bucket.download("partial-snapshot").await.is_err());
-    assert!(bucket.download("truncated-snapshot").await.is_err());
-    assert!(bucket.download("corrupt").await.is_err());
+    assert!(bucket.get("partial-snapshot").await.is_err());
+    assert!(bucket.get("truncated-snapshot").await.is_err());
+    assert!(bucket.get("corrupt").await.is_err());
 
     let snapshots = BucketSnapshots(Arc::new(server.bucket()?));
     assert_eq!(snapshots.get("large-snapshot").await?.unwrap(), expected);

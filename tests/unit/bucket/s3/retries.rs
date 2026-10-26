@@ -126,18 +126,20 @@ async fn transport_disconnects_stop_after_three_attempts() -> Result<()> {
 
 #[tokio::test]
 async fn timed_out_publications_reconcile_stored_content_without_replay() -> Result<()> {
-    for (key, method, fragment, bytes) in [
+    for (key, method, fragment, bytes, seconds) in [
         (
             "timed-put",
             "PUT",
             "timed-put",
             Bytes::from_static(b"stored"),
+            6,
         ),
         (
             "runtime/large-timed",
             "POST",
             "uploadId=",
             Bytes::from(vec![7; 5 * 1024 * 1024 + 1]),
+            301,
         ),
     ] {
         let server = TestServer::start().await?;
@@ -146,7 +148,7 @@ async fn timed_out_publications_reconcile_stored_content_without_replay() -> Res
             tokio::spawn(async move { crate::bucket::replace(&bucket, key, None, bytes).await });
         wait_for_request(&server, method, fragment).await;
         tokio::time::pause();
-        tokio::time::advance(Duration::from_secs(6)).await;
+        tokio::time::advance(Duration::from_secs(seconds)).await;
         tokio::time::resume();
         assert!(tokio::time::timeout(Duration::from_secs(2), operation).await???);
         assert_eq!(
@@ -165,12 +167,7 @@ async fn timed_out_publications_reconcile_stored_content_without_replay() -> Res
 
 #[tokio::test]
 async fn stalled_responses_and_endless_listings_have_total_deadlines() -> Result<()> {
-    for key in [
-        "stalled-headers",
-        "stalled-body",
-        "endless-list",
-        "download",
-    ] {
+    for key in ["stalled-headers", "stalled-body", "endless-list"] {
         let server = TestServer::start().await?;
         let mut bucket = server.bucket()?;
         bucket.client = aws_sdk_s3::Client::from_conf(
@@ -186,14 +183,13 @@ async fn stalled_responses_and_endless_listings_have_total_deadlines() -> Result
         let operation = tokio::spawn(async move {
             match key {
                 "endless-list" => bucket.list(key).await.map(|_| ()),
-                "download" => bucket.download("stalled-body").await.map(|_| ()),
                 _ => bucket.get(key).await.map(|_| ()),
             }
         });
         wait_for_request(&server, "GET", "").await;
         tokio::time::pause();
         let seconds = match key {
-            "download" => 301,
+            "stalled-body" => 301,
             "endless-list" => 31,
             _ => 11,
         };
