@@ -21,62 +21,87 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, tungstenite::Message};
 mod shutdown_routing;
 
 #[tokio::test]
-async fn suspension_rejects_cached_tickets_on_every_gateway_replica() -> Result<()> {
-    let fixture = Fixture::start(vec![]).await?;
-    let target: Value = fixture
-        .post("find-actor", "api-key", json!({}))
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
-    let token = target["token"].as_str().unwrap();
-    let epoch = target["ownerEpoch"].as_u64().unwrap();
-    fixture
-        .admin
-        .set_organization_access("org-test", AccessSource::Admin, false)
-        .await?;
-    for origin in [&fixture.origin, &fixture.replica] {
-        for (endpoint, body) in [
-            (
-                "invoke",
-                json!({"requestId":"blocked","method":"clear","args":[],"ownerEpoch":epoch}),
-            ),
-            ("socket-effects", json!({"ownerEpoch":epoch,"effects":[]})),
-        ] {
-            assert_eq!(
-                post_actor(origin, endpoint, token, body).await?.status(),
-                StatusCode::FORBIDDEN
-            );
-        }
+async fn assignment_returns_invocation_outcomes_without_a_second_host_request() -> Result<()> {
+    for outcome in [
+        json!({"type":"completed", "result":7}),
+        json!({"type":"failed", "code":"actor_method_failed", "message":"failed"}),
+    ] {
+        let fixture = Fixture::start(vec![(StatusCode::OK, outcome.clone())]).await?;
+        fixture.host.assign_operation.store(true, Ordering::SeqCst);
+        let expiry = (super::super::super::auth::unix_seconds()? + 30) * 1000;
+        let session = fixture
+            .admin
+            .issue_session("default".into(), "subject".into(), expiry)?;
+        let reply: Value = fixture
+            .call(
+                &session.token,
+                json!({"requestId":"first", "method":"sendMessage", "args":["hello"]}),
+            )
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+        assert_eq!(reply["outcome"], outcome);
+        assert_eq!(fixture.host.calls.load(Ordering::SeqCst), 0);
+        let operations = fixture.host.initial_operations.lock().unwrap();
+        assert_eq!(operations.len(), 1);
+        let crate::sandbox::assignment::InitialRequest::Invoke { invocation, grant } =
+            &operations[0].request
+        else {
+            panic!("expected invocation")
+        };
+        assert_eq!(invocation.request_id, "first");
+        assert_eq!(invocation.args, vec![json!("hello")]);
+        assert_eq!(grant.as_ref().unwrap().subject, "subject");
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn assignment_socket_effects_are_delivered_once_and_never_cached() -> Result<()> {
+    let fixture = Fixture::start(vec![]).await?;
+    fixture.host.assign_operation.store(true, Ordering::SeqCst);
+    let _first = fixture.connect().await?;
+    assert_eq!(fixture.host.initial_operations.lock().unwrap().len(), 1);
+    assert!(fixture.host.socket_requests.lock().unwrap().is_empty());
+    let _second = fixture.connect().await?;
+    assert_eq!(fixture.host.initial_operations.lock().unwrap().len(), 1);
+    assert_eq!(fixture.host.socket_requests.lock().unwrap().len(), 1);
+    Ok(())
+}
+
+#[tokio::test]
+async fn lost_assignment_operation_reply_is_never_redispatched_to_the_ready_host() -> Result<()> {
+    let fixture = Fixture::start(vec![]).await?;
+    fixture.host.assign_operation.store(true, Ordering::SeqCst);
+    fixture
+        .host
+        .lose_assignment_reply
+        .store(true, Ordering::SeqCst);
+    let response = fixture
+        .call(
+            "api-key",
+            json!({"requestId":"first", "method":"clear", "args":[]}),
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
+    let reply: Value = response.json().await?;
+    assert_eq!(reply["error"]["code"], "outcome_unknown");
+    assert_eq!(fixture.host.initial_operations.lock().unwrap().len(), 1);
     assert_eq!(fixture.host.calls.load(Ordering::SeqCst), 0);
     Ok(())
 }
 
 #[tokio::test]
-async fn suspension_blocks_existing_websocket_routes_and_connection_tickets() -> Result<()> {
+async fn suspension_closes_existing_websockets() -> Result<()> {
     let fixture = Fixture::start(vec![]).await?;
     let mut socket = fixture.connect().await?;
-    let grant: Value = fixture
-        .post("find-websocket", "api-key", json!({"metadata":{}}))
-        .await?
-        .error_for_status()?
-        .json()
-        .await?;
     let before = fixture.host.socket_requests.lock().unwrap().len();
     fixture
         .admin
         .set_organization_access("org-test", AccessSource::Admin, false)
         .await?;
-    let error = tokio_tungstenite::connect_async(grant["websocketUrl"].as_str().unwrap())
-        .await
-        .unwrap_err();
-    match error {
-        tokio_tungstenite::tungstenite::Error::Http(response) => {
-            assert_eq!(response.status(), StatusCode::FORBIDDEN)
-        }
-        error => panic!("unexpected handshake error: {error}"),
-    }
+    fixture.gateway.reconcile_access().await?;
     socket.send(Message::Text("{}".into())).await?;
     let message = next_message(&mut socket).await?;
     assert!(matches!(message, Message::Close(_)));
@@ -362,6 +387,7 @@ async fn backend_socket_effects_reach_clients_connected_to_another_replica() -> 
 
 struct Fixture {
     service: ControlPlaneService,
+    gateway: ControlPlaneService,
     placements: Arc<LocalObjectPlacementStore>,
     origin: String,
     replica: String,
@@ -389,6 +415,9 @@ impl Fixture {
         routing: Option<Arc<dyn crate::actor_lifecycle::routing::RoutingHints>>,
     ) -> Result<Self> {
         let host = Arc::new(HostFixture {
+            assign_operation: false.into(),
+            lose_assignment_reply: false.into(),
+            initial_operations: Mutex::new(vec![]),
             socket_requests: Mutex::new(vec![]),
             replies: Mutex::new(replies.into()),
             calls: AtomicUsize::new(0),
@@ -471,6 +500,7 @@ impl Fixture {
             registry,
             issuer.clone(),
             Arc::new(InvocationProvisioner {
+                host: host.clone(),
                 route: host_origin,
                 placements: placements.clone(),
             }),
@@ -479,10 +509,11 @@ impl Fixture {
             service.lifecycle = service.lifecycle.with_routing(routing);
         }
         let hub = super::super::super::socket_bus::MemorySocketHub::default();
-        let (origin, server) = serve_replica(&service, &admin, &issuer, &hub).await?;
-        let (replica, replica_server) = serve_replica(&service, &admin, &issuer, &hub).await?;
+        let (origin, server, gateway) = serve_replica(&service, &admin, &issuer, &hub).await?;
+        let (replica, replica_server, _) = serve_replica(&service, &admin, &issuer, &hub).await?;
         Ok(Self {
             service,
+            gateway,
             placements,
             origin,
             replica,
@@ -540,7 +571,11 @@ async fn serve_replica(
     admin: &AdminService,
     issuer: &ActorJwtIssuer,
     hub: &super::super::super::socket_bus::MemorySocketHub,
-) -> Result<(String, tokio::task::JoinHandle<std::io::Result<()>>)> {
+) -> Result<(
+    String,
+    tokio::task::JoinHandle<std::io::Result<()>>,
+    ControlPlaneService,
+)> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
     let sockets = super::super::super::socket_gateway::SocketGateway::start(
@@ -555,9 +590,9 @@ async fn serve_replica(
         origin.clone(),
         sockets,
     )?);
-    let routes = super::super::super::public_api::router(service, admin.clone());
+    let routes = super::super::super::public_api::router(service.clone(), admin.clone());
     let server = tokio::spawn(async move { axum::serve(listener, routes).await });
-    Ok((origin, server))
+    Ok((origin, server, service))
 }
 
 async fn post_actor(
@@ -588,6 +623,9 @@ async fn next_message(socket: &mut Socket) -> Result<Message> {
 }
 
 struct HostFixture {
+    assign_operation: std::sync::atomic::AtomicBool,
+    lose_assignment_reply: std::sync::atomic::AtomicBool,
+    initial_operations: Mutex<Vec<crate::sandbox::assignment::InitialOperation>>,
     socket_requests: Mutex<Vec<String>>,
     replies: Mutex<VecDeque<(StatusCode, Value)>>,
     calls: AtomicUsize,
@@ -637,6 +675,7 @@ async fn host_socket_event(
 }
 
 struct InvocationProvisioner {
+    host: Arc<HostFixture>,
     route: String,
     placements: Arc<LocalObjectPlacementStore>,
 }
@@ -664,7 +703,8 @@ impl HostProvisioner for InvocationProvisioner {
         actor: &ActorKey,
         _: bool,
         _: Option<&crate::bucket::OwnershipHint>,
-    ) -> Result<(HostLease, u64)> {
+        operation: Option<&crate::sandbox::assignment::InitialOperation>,
+    ) -> Result<(HostLease, u64, Option<serde_json::Value>)> {
         tokio::time::sleep(Duration::from_millis(25)).await;
         let lease = HostLease {
             route: self.route.clone(),
@@ -676,7 +716,45 @@ impl HostProvisioner for InvocationProvisioner {
         };
         self.placements
             .set_owner(&actor.storage_key(), lease.clone(), region)?;
-        Ok((lease, 1))
+        let initial_reply = if self.host.assign_operation.load(Ordering::SeqCst) {
+            use crate::sandbox::assignment::InitialRequest;
+            let operation = operation.context("missing initial operation")?;
+            self.host
+                .initial_operations
+                .lock()
+                .unwrap()
+                .push(operation.clone());
+            if self.host.lose_assignment_reply.load(Ordering::SeqCst) {
+                return Err(crate::sandbox::assignment::AssignmentOutcomeUnknown.into());
+            }
+            Some(match &operation.request {
+                InitialRequest::Invoke { .. } => {
+                    self.host
+                        .replies
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .context("unexpected replay")?
+                        .1
+                }
+                InitialRequest::Socket { invocation } => {
+                    let ActorSocketEvent::Connect { connection } = &invocation.event else {
+                        anyhow::bail!("expected connect")
+                    };
+                    serde_json::to_value(SocketEventReply::Completed {
+                        effects: vec![ActorSocketEffect::Send {
+                            connection_id: connection.id.clone(),
+                            message: ActorSocketMessage::Text {
+                                data: "ready".into(),
+                            },
+                        }],
+                    })?
+                }
+            })
+        } else {
+            None
+        };
+        Ok((lease, 1, initial_reply))
     }
     async fn terminate_hosts(&self, _: &HostLaunchSpec, _: &[String]) -> Result<HostTermination> {
         anyhow::bail!("unexpected termination")

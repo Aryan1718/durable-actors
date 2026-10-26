@@ -16,7 +16,26 @@ pub enum SnapshotStoreConfig {
         archive_bucket: String,
         #[serde(default)]
         archive_batch: ArchiveBatchConfig,
+        // Omitted when default so records stay readable by releases that predate it.
+        #[serde(default, skip_serializing_if = "RapidPlacement::is_all")]
+        placement: RapidPlacement,
     },
+}
+
+/// Where a session's log segments are written: every configured zone, or only the zone that
+/// opened first at assignment.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RapidPlacement {
+    #[default]
+    All,
+    Nearest,
+}
+
+impl RapidPlacement {
+    fn is_all(&self) -> bool {
+        *self == Self::All
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,14 +89,25 @@ impl SnapshotStoreConfig {
             } => Some((buckets, archive_bucket)),
         }
     }
+    // Placement is excluded: each manifest names the zones its segment was written to.
     pub(crate) fn same_backend(&self, other: &Self) -> bool {
         self.rapid_settings() == other.rapid_settings()
     }
 
     pub(crate) fn validate(&self) -> Result<()> {
         use std::collections::HashSet;
-        if let Self::Rapid { archive_batch, .. } = self {
+        if let Self::Rapid {
+            archive_batch,
+            placement,
+            buckets,
+            ..
+        } = self
+        {
             archive_batch.validate()?;
+            ensure!(
+                placement.is_all() || buckets.len() == 2,
+                "nearest Rapid placement requires two zones"
+            );
         }
         let Some((buckets, archive_bucket)) = self.rapid_settings() else {
             return Ok(());

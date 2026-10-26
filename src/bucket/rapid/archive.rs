@@ -292,8 +292,8 @@ impl LogStorage {
     }
 
     pub async fn read_range(&self, manifest: &Manifest, start: u64, length: u64) -> Result<Bytes> {
-        for (zone, replica) in self.zones.iter().zip(&manifest.replicas) {
-            match bounded(zone.read_range(replica, start, length)).await {
+        for replica in &manifest.replicas {
+            match bounded(self.zone(replica)?.read_range(replica, start, length)).await {
                 Ok(bytes) => return Ok(bytes),
                 Err(error) => tracing::warn!(%error, "Rapid archive source unavailable"),
             }
@@ -355,8 +355,8 @@ impl LogStorage {
                 .is_some(),
             "cannot delete unreplicated segment"
         );
-        for (zone, replica) in self.zones.iter().zip(&manifest.replicas) {
-            bounded(zone.delete(replica)).await?;
+        for replica in &manifest.replicas {
+            bounded(self.zone(replica)?.delete(replica)).await?;
         }
         ensure!(
             bounded(replace(

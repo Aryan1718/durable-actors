@@ -111,33 +111,34 @@ impl SocketGateway {
         &self,
         service: &ControlPlaneService,
         ticket: &SocketTicket,
+        invocation: &ActorSocketInvocation,
+        started: Instant,
     ) -> Result<ActorTarget> {
-        service
-            .ensure_project_access(&ticket.actor.project_id)
-            .await?;
         let route = self.route(&ticket.actor).await;
         let mut cached = route.lock().await;
         let now = crate::clock::Clock::now_ms(&crate::clock::SystemClock)? as i64;
-        if let Some(target) = cached.as_ref().filter(|target| target.expires_at_ms > now)
-            && service
-                .lifecycle
-                .routing(
-                    &ticket.actor.storage_key(),
-                    target.host_id.as_str(),
-                    &target.session_id,
-                    target.owner_epoch,
-                )
-                .await
-                .is_none()
-        {
+        if let Some(target) = cached.as_ref().filter(|target| target.expires_at_ms > now) {
             return Ok(target.clone());
         }
         *cached = None;
+        let operation = crate::sandbox::assignment::InitialOperation {
+            request: crate::sandbox::assignment::InitialRequest::Socket {
+                invocation: invocation.clone(),
+            },
+            routing_ms: started.elapsed().as_secs_f64() * 1000.0,
+        };
         let target = service
-            .resolve_actor_route(&ticket.actor, ticket.home_region.as_deref(), None, None)
+            .resolve_actor_route(
+                &ticket.actor,
+                ticket.home_region.as_deref(),
+                None,
+                None,
+                Some(&operation),
+            )
             .await?;
         let mut cached_target = target.clone();
         cached_target.host_state = HostState::Warm;
+        cached_target.initial_reply = None;
         *cached = Some(cached_target);
         Ok(target)
     }
@@ -173,10 +174,13 @@ impl SocketGateway {
                 Instant::now() < retry_deadline,
                 "actor remained unavailable during socket handoff"
             );
-            let target = tokio::time::timeout_at(retry_deadline, self.target(service, ticket))
-                .await
-                .context("actor remained unavailable during socket handoff")?;
-            let target = match target {
+            let target = tokio::time::timeout_at(
+                retry_deadline,
+                self.target(service, ticket, &invocation, started),
+            )
+            .await
+            .context("actor remained unavailable during socket handoff")?;
+            let mut target = match target {
                 Ok(target) => target,
                 Err(error) if error.is::<crate::sandbox::HostNotReady>() => {
                     self.wait_to_retry().await?;
@@ -195,43 +199,50 @@ impl SocketGateway {
                 actor.actor_name,
                 actor.actor_id
             );
-            let reply = self
-                .http
-                .post(url)
-                .bearer_auth(&target.token)
-                .json(&SocketEventRequest {
-                    host_state,
-                    routing_ms: started.elapsed().as_secs_f64() * 1000.0,
-                    owner_epoch: target.owner_epoch,
-                    invocation: invocation.clone(),
-                })
-                .send()
-                .await;
-            match reply {
-                Err(error) if error.is_connect() => {
-                    self.invalidate(actor, &target).await;
-                }
-                Err(error) => {
-                    return Err(error)
-                        .context("socket event outcome unknown; event was not replayed");
-                }
-                Ok(reply)
-                    if matches!(
-                        reply.status(),
-                        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
-                    ) =>
-                {
-                    self.invalidate(actor, &target).await;
-                }
-                Ok(reply) => match reply.error_for_status()?.json::<SocketEventReply>().await? {
-                    SocketEventReply::Completed { effects } => return Ok(effects),
-                    SocketEventReply::NotExecuted => {
+            let reply = if let Some(reply) = target.initial_reply.take() {
+                serde_json::from_value::<SocketEventReply>(reply)?
+            } else {
+                let reply = self
+                    .http
+                    .post(url)
+                    .bearer_auth(&target.token)
+                    .json(&SocketEventRequest {
+                        host_state,
+                        routing_ms: started.elapsed().as_secs_f64() * 1000.0,
+                        owner_epoch: target.owner_epoch,
+                        invocation: invocation.clone(),
+                    })
+                    .send()
+                    .await;
+                match reply {
+                    Err(error) if error.is_connect() => {
                         self.invalidate(actor, &target).await;
+                        self.wait_to_retry().await?;
+                        continue;
                     }
-                    SocketEventReply::Failed { message } => {
-                        anyhow::bail!("socket handler failed: {message}")
+                    Err(error) => {
+                        return Err(error)
+                            .context("socket event outcome unknown; event was not replayed");
                     }
-                },
+                    Ok(reply)
+                        if matches!(
+                            reply.status(),
+                            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+                        ) =>
+                    {
+                        self.invalidate(actor, &target).await;
+                        self.wait_to_retry().await?;
+                        continue;
+                    }
+                    Ok(reply) => reply.error_for_status()?.json::<SocketEventReply>().await?,
+                }
+            };
+            match reply {
+                SocketEventReply::Completed { effects } => return Ok(effects),
+                SocketEventReply::NotExecuted => self.invalidate(actor, &target).await,
+                SocketEventReply::Failed { message } => {
+                    anyhow::bail!("socket handler failed: {message}")
+                }
             }
             self.wait_to_retry().await?;
         }
@@ -276,7 +287,14 @@ impl SocketDispatcher for GatewaySocketDispatcher {
         actor: &ActorKey,
         effects: Vec<ActorSocketEffect>,
     ) -> Result<()> {
-        self.gateway.bus.publish(actor, effects).await
+        let bus = self.gateway.bus.clone();
+        let actor = actor.clone();
+        tokio::spawn(async move {
+            if let Err(error) = bus.publish(&actor, effects).await {
+                tracing::warn!(actor = %actor.storage_key().as_str(), error = %format!("{error:#}"), "socket effects were not published");
+            }
+        });
+        Ok(())
     }
     fn notify(&self, ticket: &SocketTicket, event: &crate::actor::ActorSocketEvent) {
         self.service

@@ -80,6 +80,13 @@ test("enables Rapid with two distinct zones and the same Standard bucket for arc
     for (const value of ["rapid-a", "rapid-b", "us-west4-a", "us-west4-b"]) assert.ok(output.includes(value))
 })
 
+test("places each Rapid log in whichever configured zone opens first", () => {
+    const output = manifests({ storage: { mode: "rapid", rapid: { placement: "nearest", buckets: [
+        { bucket: "rapid-a", zone: "us-west1-a" }, { bucket: "rapid-b", zone: "us-west4-a" }
+    ] } } })
+    assert.match(output, /DURABLE_ACTORS_RAPID_PLACEMENT, value: "nearest"/)
+})
+
 test("enables Rapid with one zone", () => {
     const output = manifests({ storage: { mode: "rapid", rapid: { buckets: [
         { bucket: "rapid-a", zone: "us-west4-a" }
@@ -110,6 +117,9 @@ for (const [name, overrides] of [
     ["duplicate Rapid zones", { storage: { mode: "rapid", rapid: { buckets: [{ bucket: "rapid-a", zone: "us-west4-a" }, { bucket: "rapid-b", zone: "us-west4-a" }] } } }],
     ["shared Standard and Rapid bucket", { storage: { mode: "rapid", rapid: { buckets: [{ bucket: "test-state", zone: "us-west4-a" }, { bucket: "rapid-b", zone: "us-west4-b" }] } } }],
     ["Rapid settings in Standard mode", { storage: { rapid: { buckets: [{ bucket: "rapid-a", zone: "us-west4-a" }] } } }],
+    ["nearest Rapid placement in Standard mode", { storage: { rapid: { placement: "nearest" } } }],
+    ["nearest Rapid placement with one zone", { storage: { mode: "rapid", rapid: { placement: "nearest", buckets: [{ bucket: "rapid-a", zone: "us-west4-a" }] } } }],
+    ["unknown Rapid placement", { storage: { mode: "rapid", rapid: { placement: "closest", buckets: [{ bucket: "rapid-a", zone: "us-west4-a" }] } } }],
     ["mutable control-plane image", { images: { controlPlane: { digest: "latest" } } }],
     ["mutable TypeScript image", { images: { typescript: { digest: "latest" } } }],
     ["mutable Python image", { images: { python: { digest: "latest" } } }],

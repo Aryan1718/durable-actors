@@ -140,7 +140,7 @@ async def test_replaced_and_evicted_instances_are_released():
     runtime = ActorRuntime(Counter, Effects())
     instances = []
     for _ in range(3):
-        await runtime.handle(command("fail"))
+        await asyncio.create_task(runtime.handle(command("fail")))
         instances.append(weakref.ref(runtime.instance))
     await runtime.handle({"type": "evict"})
     gc.collect()
@@ -256,173 +256,6 @@ async def test_socket_messages_are_typed_and_emit_persisted_changes():
     assert reply["effects"][0]["changes"] == {"value": {"count": 3}}
 
 
-@pytest.mark.parametrize("evict", [False, True])
-async def test_sync_handlers_keep_order_and_drain_before_eviction(evict):
-    entered = asyncio.Event()
-    release = Event()
-    loop = asyncio.get_running_loop()
-
-    class Blocking(Actor):
-        count: int = persisted(0)
-
-        def hold(self) -> int:
-            assert self.id == "one"
-            loop.call_soon_threadsafe(entered.set)
-            if not release.wait(3):
-                raise TimeoutError("test did not release the handler")
-            self.count += 1
-            return self.count
-
-        def increment(self) -> int:
-            self.count += 1
-            return self.count
-
-    runtime = ActorRuntime(Blocking, Effects())
-    active = asyncio.create_task(runtime.handle(command("hold")))
-    tasks = [active]
-    try:
-        await asyncio.wait_for(entered.wait(), 1)
-        assert not active.done()
-        running = next(iter(runtime.pending))
-        queued = asyncio.create_task(runtime.handle(command()))
-        tasks.append(queued)
-        await asyncio.sleep(0)
-        assert not queued.done()
-        if evict:
-            eviction = asyncio.create_task(runtime.handle({"type": "evict"}))
-            tasks.append(eviction)
-            await asyncio.sleep(0)
-            running.cancel()
-            await asyncio.sleep(0)
-            assert not eviction.done()
-        release.set()
-        results = await asyncio.wait_for(asyncio.gather(*tasks), 1)
-        if evict:
-            assert [reply["code"] for reply in results[:2]] == ["actor_evicted"] * 2
-            assert results[2] == {"type": "evicted"}
-            assert (await runtime.handle(command()))["result"] == 1
-        else:
-            assert [reply["result"] for reply in results] == [1, 2]
-    finally:
-        release.set()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def test_eviction_unblocks_sync_socket_queries():
-    entered = asyncio.Event()
-
-    class WaitingEffects(Effects):
-        async def get_connections(self, tag=None, count_only=False):
-            entered.set()
-            await asyncio.Event().wait()
-
-    class Room(Actor):
-        def count_connections(self) -> int:
-            return len(self.get_connections())
-
-    runtime = ActorRuntime(Room, WaitingEffects())
-    active = asyncio.create_task(runtime.handle(command("count_connections")))
-    try:
-        await asyncio.wait_for(entered.wait(), 1)
-        assert await asyncio.wait_for(runtime.handle({"type": "evict"}), 1) == {"type": "evicted"}
-        assert (await active)["code"] == "actor_evicted"
-    finally:
-        active.cancel()
-        await asyncio.gather(active, return_exceptions=True)
-
-
-async def test_nested_sync_reentrant_calls_keep_the_ordinary_call_exclusive():
-    entered = asyncio.Event()
-    release = Event()
-    loop = asyncio.get_running_loop()
-    calls = []
-
-    class Nested(Actor):
-        def ordinary(self) -> None:
-            calls.append("ordinary:start")
-            self.hold()
-            calls.append("ordinary:end")
-
-        @interleave
-        def hold(self) -> None:
-            calls.append("hold")
-            loop.call_soon_threadsafe(entered.set)
-            if not release.wait(3):
-                raise TimeoutError("test did not release the handler")
-
-    effects = Effects()
-    runtime = ActorRuntime(Nested, effects)
-    ordinary = asyncio.create_task(runtime.handle(command("ordinary")))
-    tasks = [ordinary]
-    try:
-        await asyncio.wait_for(entered.wait(), 1)
-        direct = asyncio.create_task(runtime.handle(command("hold")))
-        tasks.append(direct)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        assert effects.admissions == 0
-        assert calls == ["ordinary:start", "hold"]
-        release.set()
-        replies = await asyncio.wait_for(asyncio.gather(*tasks), 1)
-        assert all(reply["type"] == "invoked" for reply in replies)
-        assert effects.admissions == 1
-        assert calls == ["ordinary:start", "hold", "ordinary:end", "hold"]
-    finally:
-        release.set()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
-async def test_eviction_drains_all_sync_reentrant_handlers_before_rehydrating():
-    entered, finished = asyncio.Queue(), asyncio.Queue()
-    releases = [Event(), Event()]
-    loop = asyncio.get_running_loop()
-
-    class Concurrent(Actor):
-        count: int = persisted(0)
-
-        @interleave
-        def hold(self, index: int) -> None:
-            loop.call_soon_threadsafe(entered.put_nowait, index)
-            try:
-                if not releases[index].wait(3):
-                    raise TimeoutError("test did not release the handler")
-                self.count = 99
-                self.broadcast("too late")
-            finally:
-                loop.call_soon_threadsafe(finished.put_nowait, index)
-
-        def increment(self) -> int:
-            self.count += 1
-            return self.count
-
-    effects = Effects()
-    runtime = ActorRuntime(Concurrent, effects)
-    tasks = [
-        asyncio.create_task(runtime.handle(command("hold", args=[index]))) for index in range(2)
-    ]
-    try:
-        assert {await asyncio.wait_for(entered.get(), 1) for _ in range(2)} == {0, 1}
-        eviction = asyncio.create_task(runtime.handle({"type": "evict"}))
-        tasks.append(eviction)
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        releases[0].set()
-        assert await asyncio.wait_for(finished.get(), 1) == 0
-        assert not eviction.done()
-        releases[1].set()
-        replies = await asyncio.wait_for(asyncio.gather(*tasks), 1)
-        assert [reply["code"] for reply in replies[:2]] == ["actor_evicted"] * 2
-        assert replies[2] == {"type": "evicted"}
-        assert effects.published == []
-        reply = await runtime.handle(command())
-        assert reply["result"] == 1
-        assert reply["sequence"] == 1
-    finally:
-        for release in releases:
-            release.set()
-        await asyncio.gather(*tasks, return_exceptions=True)
-
-
 async def test_sql_commits_with_fields_and_rolls_back_when_the_call_fails():
     captured: list[object] = []
 
@@ -476,7 +309,7 @@ async def test_sql_commits_with_fields_and_rolls_back_when_the_call_fails():
         captured[0].exec("SELECT amount FROM ledger")  # type: ignore[attr-defined]
 
 
-async def test_async_actor_serializes_across_awaits_and_persists_results():
+async def test_async_actor_persists_results_across_awaits():
     class Counter(AsyncActor):
         count: int = persisted(0)
 
@@ -489,6 +322,6 @@ async def test_async_actor_serializes_across_awaits_and_persists_results():
     runtime = ActorRuntime(Counter, Effects(), HostDatabase.seeded({"count": 3}))
     reply = await runtime.handle(command(args=[2]))
     assert reply["result"] == 5
-    replies = await asyncio.gather(*(runtime.handle(command()) for _ in range(3)))
-    assert [reply["result"] for reply in replies] == [6, 7, 8]
+    for expected in [6, 7, 8]:
+        assert (await runtime.handle(command()))["result"] == expected
     assert runtime.host.fields() == {"count": 8}

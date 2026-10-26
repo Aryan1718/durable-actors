@@ -367,7 +367,7 @@ async fn resolved_targets_expire_within_host_idle_lease_and_authorization_limits
             methods: vec!["increment".into()],
         });
         let target = service
-            .resolve_actor_route(&actor, None, None, grant.clone())
+            .resolve_actor_route(&actor, None, None, grant.clone(), None)
             .await?;
         let after = SystemClock.now_ms()?;
         let expiry = u64::try_from(target.expires_at_ms)?;

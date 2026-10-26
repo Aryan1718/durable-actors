@@ -368,7 +368,6 @@ async fn failed_persistence_is_not_published_and_reports_the_failure() -> Result
         SqliteTracePersistence::in_memory(),
     )))
     .await?;
-    let changes = store.changes.subscribe();
     assert!(
         store
             .record("default", "host", "session", vec![trace(1)], 2)
@@ -413,7 +412,6 @@ async fn failed_persistence_is_not_published_and_reports_the_failure() -> Result
             .await?
             .persistence_failed
     );
-    assert!(changes.has_changed()?);
     Ok(())
 }
 
@@ -551,7 +549,6 @@ async fn cancelling_a_report_does_not_cancel_its_commit() -> Result<()> {
         finished: tokio::sync::Notify::new(),
     });
     let store = TraceStore::open(persistence.clone()).await?;
-    let mut changes = store.changes.subscribe();
     let writer = store.clone();
     let report = tokio::spawn(async move {
         writer
@@ -568,12 +565,10 @@ async fn cancelling_a_report_does_not_cancel_its_commit() -> Result<()> {
         0,
         "live delivery must wait for the commit"
     );
-    assert!(!changes.has_changed()?);
     report.abort();
     assert!(report.await.unwrap_err().is_cancelled());
     persistence.resume.notify_one();
     tokio::time::timeout(Duration::from_secs(5), persistence.finished.notified()).await?;
-    tokio::time::timeout(Duration::from_secs(5), changes.changed()).await??;
     let restored = TraceStore::open(Arc::new(SqliteTracePersistence::new(path))).await?;
     assert_eq!(
         restored

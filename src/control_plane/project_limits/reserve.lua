@@ -13,6 +13,6 @@ if tokens < 1 then return {2, math.max(1, math.ceil((1 - tokens) / rate))} end
 redis.call('HSET', KEYS[2], 'tokens', tokens - 1, 'updated', math.max(now, updated))
 redis.call('PEXPIRE', KEYS[2], math.max(1000, math.ceil(burst / rate * 1000)))
 redis.call('SADD', KEYS[1], ARGV[1])
--- Unknown or failed starts stay reserved until a confirmed stop or operator cleanup.
+-- Hosts that never report a stop stay reserved until an operator removes them.
 redis.call('HSET', KEYS[3], 'epoch', 0, 'sequence', 0, 'stopped', 0)
 return {0, 0}

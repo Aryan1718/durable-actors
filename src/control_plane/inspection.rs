@@ -303,8 +303,6 @@ async fn request_events(
     };
     let store = state.inspector.traces;
     let live = store.live.as_ref().map(|feed| feed.subscribe());
-    // Subscribe before reading so a commit between the read and wait is not missed.
-    let changes = store.changes.subscribe();
     let page = store
         .replay(&project, &query)
         .await
@@ -315,7 +313,7 @@ async fn request_events(
             tokio::spawn(live_traces::stream(store, project, live, sender, page));
         }
         None => {
-            tokio::spawn(stream_requests(store, project, changes, sender, page));
+            tokio::spawn(stream_requests(store, project, sender, page));
         }
     }
     Ok((
@@ -332,7 +330,6 @@ async fn request_events(
 async fn stream_requests(
     store: crate::request_traces::TraceStore,
     project: String,
-    mut changes: tokio::sync::watch::Receiver<()>,
     sender: tokio::sync::mpsc::Sender<Result<axum::response::sse::Event, std::convert::Infallible>>,
     mut page: crate::request_traces::TracePage,
 ) {
@@ -340,7 +337,6 @@ async fn stream_requests(
     use axum::response::sse::Event;
     loop {
         let more = page.next_cursor.is_some();
-        let snapshot = page.snapshot;
         let query = ReplayQuery {
             cursor: Some(page.resume_cursor.clone()),
             ..Default::default()
@@ -356,8 +352,7 @@ async fn stream_requests(
         if !more {
             tokio::select! {
                 _ = sender.closed() => return,
-                _ = changes.changed(), if !snapshot => {},
-                _ = tokio::time::sleep(Duration::from_secs(5)) => {},
+                _ = tokio::time::sleep(Duration::from_secs(1)) => {},
             }
         }
         page = match store.replay(&project, &query).await {

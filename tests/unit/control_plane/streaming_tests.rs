@@ -673,7 +673,7 @@ impl Stack {
             endpoint,
             actor.clone(),
             connection.executor(),
-            database,
+            database.clone(),
             local_sockets.clone(),
         ));
         connection
@@ -681,6 +681,7 @@ impl Stack {
                 host.actor().clone(),
                 Some(local_sockets.clone()),
                 Some(source.unwrap_or_else(|| local_sockets.clone())),
+                Some(database.background(host.actor().clone())),
             )
             .await?;
         host.activate().await?;
@@ -928,7 +929,8 @@ impl HostProvisioner for SocketTestProvisioner {
         _actor: &ActorKey,
         _new_actor: bool,
         _owner_hint: Option<&crate::bucket::OwnershipHint>,
-    ) -> Result<(HostLease, u64)> {
+        _: Option<&crate::sandbox::assignment::InitialOperation>,
+    ) -> Result<(HostLease, u64, Option<serde_json::Value>)> {
         anyhow::bail!("fixture host must be active")
     }
     async fn terminate_hosts(

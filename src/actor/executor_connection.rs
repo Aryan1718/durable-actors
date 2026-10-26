@@ -20,15 +20,14 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::{
     ActorDatabase, ActorInvocationFailure, ActorKey, ActorSocketSource, DatabaseCall,
     DatabaseResult,
 };
 
-const ACTOR_EXECUTOR_PROTOCOL_VERSION: u32 = 28;
-const MAX_PENDING_EXECUTOR_COMMANDS: usize = 64;
+const ACTOR_EXECUTOR_PROTOCOL_VERSION: u32 = 30;
 
 #[derive(Debug, Serialize)]
 pub struct ActorMethodInvocation {
@@ -69,7 +68,7 @@ pub enum ActorSocketEvent {
     },
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ActorSocketInvocation {
     pub request_id: String,
     pub actor: ActorKey,
@@ -329,8 +328,11 @@ impl ActorExecutorConnection {
         actor: ActorKey,
         publisher: Option<Arc<dyn ActorSocketPublisher>>,
         sockets: Option<Arc<dyn ActorSocketSource>>,
+        database: Option<Arc<dyn ActorDatabase>>,
     ) -> Result<()> {
-        self.executor.mark_ready(actor, publisher, sockets).await?;
+        self.executor
+            .mark_ready(actor, publisher, sockets, database)
+            .await?;
         info!(
             actor_names = ?self.executor.actor_names,
             "customer JavaScript process attached to actor executor"
@@ -368,7 +370,7 @@ struct JsActorExecutor {
     residency: Residency,
     actor_names: HashSet<String>,
     admission: watch::Sender<()>,
-    commands: mpsc::Sender<ExecutorRequest>,
+    commands: mpsc::UnboundedSender<ExecutorRequest>,
 }
 
 #[async_trait]
@@ -486,7 +488,7 @@ impl JsActorExecutor {
         writer: OwnedWriteHalf,
         actor_names: Vec<String>,
     ) -> (Arc<Self>, JoinHandle<Result<()>>) {
-        let (commands, incoming) = mpsc::channel(MAX_PENDING_EXECUTOR_COMMANDS);
+        let (commands, incoming) = mpsc::unbounded_channel();
         let residency = Arc::new(Mutex::new(None));
         let (changes, _) = watch::channel(());
         let (admission, _) = watch::channel(());
@@ -522,6 +524,7 @@ impl JsActorExecutor {
         actor: ActorKey,
         publisher: Option<Arc<dyn ActorSocketPublisher>>,
         sockets: Option<Arc<dyn ActorSocketSource>>,
+        database: Option<Arc<dyn ActorDatabase>>,
     ) -> Result<()> {
         let (reply, ready) = oneshot::channel();
         self.commands
@@ -530,8 +533,8 @@ impl JsActorExecutor {
                 written: reply,
                 publisher,
                 sockets,
+                database,
             })
-            .await
             .context("actor executor stopped")?;
         ready
             .await
@@ -551,7 +554,6 @@ impl JsActorExecutor {
                 reply,
                 admission_granted: false,
             })))
-            .await
             .context("actor executor stopped")?;
         response
             .await
@@ -562,13 +564,13 @@ impl JsActorExecutor {
 async fn run_executor_connection(
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
-    commands: mpsc::Receiver<ExecutorRequest>,
+    commands: mpsc::UnboundedReceiver<ExecutorRequest>,
     residency: Residency,
     changes: watch::Sender<()>,
     admission: watch::Sender<()>,
 ) -> Result<()> {
-    let (outbound, writes) = mpsc::channel(MAX_PENDING_EXECUTOR_COMMANDS + 1);
-    let (inbound, replies) = mpsc::channel(MAX_PENDING_EXECUTOR_COMMANDS);
+    let (outbound, writes) = mpsc::unbounded_channel();
+    let (inbound, replies) = mpsc::unbounded_channel();
     let driver = ExecutorDriver {
         admission,
         changes,
@@ -578,8 +580,7 @@ async fn run_executor_connection(
         outbound,
         publisher: None,
         sockets: None,
-        publishing: JoinSet::new(),
-        publishing_ids: HashSet::new(),
+        database: None,
         loading_connections: JoinSet::new(),
         connection_lookup_ids: HashSet::new(),
         database_calls: JoinSet::new(),
@@ -599,22 +600,21 @@ struct ExecutorDriver {
     residency: Residency,
     pending: HashMap<u64, PendingCommand>,
     next_message_id: u64,
-    outbound: mpsc::Sender<ExecutorWrite>,
+    outbound: mpsc::UnboundedSender<ExecutorWrite>,
     publisher: Option<Arc<dyn ActorSocketPublisher>>,
     sockets: Option<Arc<dyn ActorSocketSource>>,
-    publishing: JoinSet<(u64, Result<()>)>,
-    publishing_ids: HashSet<u64>,
+    database: Option<Arc<dyn ActorDatabase>>,
     loading_connections: JoinSet<(u64, Result<super::SocketLookup>)>,
     connection_lookup_ids: HashSet<u64>,
-    database_calls: JoinSet<(u64, Result<DatabaseResult>)>,
+    database_calls: JoinSet<(u64, Option<u64>, Result<DatabaseResult>)>,
     database_ids: HashSet<u64>,
 }
 
 impl ExecutorDriver {
     async fn run(
         mut self,
-        mut commands: mpsc::Receiver<ExecutorRequest>,
-        mut replies: mpsc::Receiver<Result<ActorExecutorClientMessage>>,
+        mut commands: mpsc::UnboundedReceiver<ExecutorRequest>,
+        mut replies: mpsc::UnboundedReceiver<Result<ActorExecutorClientMessage>>,
     ) -> Result<()> {
         loop {
             tokio::select! {
@@ -630,35 +630,14 @@ impl ExecutorDriver {
                         ActorExecutorClientMessage::ReadyForInvocation { message_id } => self.allow_next_invocation(message_id)?,
                         ActorExecutorClientMessage::Reply { message_id, reply } => self.deliver(message_id, reply)?,
                         ActorExecutorClientMessage::SocketEffects { message_id, effects } => self.publish(message_id, effects)?,
-                        ActorExecutorClientMessage::DatabaseCall { message_id, call } => self.call_database(message_id, call)?,
+                        ActorExecutorClientMessage::DatabaseCall { call_id, message_id, call } => self.call_database(call_id, message_id, call)?,
                         ActorExecutorClientMessage::GetConnections { message_id, query } => self.load_connections(message_id, query)?,
                         ActorExecutorClientMessage::Warm { .. } | ActorExecutorClientMessage::Attach { .. } => anyhow::bail!("customer actor executor attached more than once"),
                     }
                 }
                 called = self.database_calls.join_next(), if !self.database_calls.is_empty() => {
-                    let (message_id, result) = called.context("actor database call stopped")??;
-                    self.database_ids.remove(&message_id);
-                    let (result, error) = match result {
-                        Ok(result) => (Some(result), None),
-                        Err(error) => (None, Some(format!("{error:#}"))),
-                    };
-                    self.outbound.send(ExecutorWrite {
-                        bytes: encode_server_message(&ActorExecutorServerMessage::DatabaseResult {
-                            message_id, result, error,
-                        })?,
-                        written: None,
-                    }).await.context("actor executor writer stopped")?;
-                }
-                published = self.publishing.join_next(), if !self.publishing.is_empty() => {
-                    let (message_id, result) = published.context("socket publisher stopped")??;
-                    self.publishing_ids.remove(&message_id);
-                    self.outbound.send(ExecutorWrite {
-                        bytes: encode_server_message(&ActorExecutorServerMessage::SocketEffectsPublished {
-                            message_id,
-                            error: result.err().map(|error| format!("{error:#}")),
-                        })?,
-                        written: None,
-                    }).await.context("actor executor writer stopped")?;
+                    let (call_id, message_id, result) = called.context("actor database call stopped")??;
+                    self.database_called(call_id, message_id, result)?;
                 }
                 loaded = self.loading_connections.join_next(), if !self.loading_connections.is_empty() => {
                     let (message_id, result) = loaded.context("connection lookup stopped")??;
@@ -667,14 +646,11 @@ impl ExecutorDriver {
                         Ok(connections) => (connections, None),
                         Err(error) => (super::SocketLookup::Connections(Vec::new()), Some(format!("{error:#}"))),
                     };
-                    self.outbound.send(ExecutorWrite {
-                        bytes: encode_server_message(&ActorExecutorServerMessage::SocketConnections {
-                            message_id, connections, error,
-                        })?,
-                        written: None,
-                    }).await.context("actor executor writer stopped")?;
+                    self.write(encode_server_message(&ActorExecutorServerMessage::SocketConnections {
+                        message_id, connections, error,
+                    })?)?;
                 }
-                command = commands.recv(), if self.pending.len() < MAX_PENDING_EXECUTOR_COMMANDS => match command {
+                command = commands.recv() => match command {
                     Some(command) => self.handle_command(command)?,
                     None => return Ok(()),
                 }
@@ -690,20 +666,20 @@ impl ExecutorDriver {
                 written,
                 publisher,
                 sockets,
+                database,
             } => {
                 self.publisher = publisher;
                 self.sockets = sockets;
+                self.database = database;
                 self.outbound
-                    .try_send(ExecutorWrite {
+                    .send(ExecutorWrite {
                         bytes: encode_server_message(&ActorExecutorServerMessage::Attached {
                             protocol: ACTOR_EXECUTOR_PROTOCOL_VERSION,
                             actor,
                         })?,
                         written: Some(written),
                     })
-                    .map_err(|_| {
-                        anyhow::anyhow!("actor executor writer stopped or filled its queue")
-                    })
+                    .map_err(|_| anyhow::anyhow!("actor executor writer stopped"))
             }
         }
     }
@@ -729,21 +705,53 @@ impl ExecutorDriver {
         Ok(())
     }
 
-    fn call_database(&mut self, message_id: u64, call: DatabaseCall) -> Result<()> {
-        let database = self
-            .pending
-            .get(&message_id)
-            .context("database call has no active invocation")?
-            .database
-            .clone()
-            .context("command has no actor database")?;
-        ensure!(
-            self.database_ids.insert(message_id),
-            "actor sent concurrent database calls"
-        );
-        self.database_calls
-            .spawn(async move { (message_id, database.call(call).await) });
+    fn call_database(
+        &mut self,
+        call_id: u64,
+        message_id: Option<u64>,
+        call: DatabaseCall,
+    ) -> Result<()> {
+        let message_id = message_id.filter(|id| self.pending.contains_key(id));
+        let database = match message_id {
+            Some(id) => self.pending[&id].database.clone(),
+            None => self.database.clone(),
+        };
+        if let Some(id) = message_id {
+            ensure!(
+                self.database_ids.insert(id),
+                "actor sent concurrent database calls"
+            );
+        }
+        self.database_calls.spawn(async move {
+            let result = match database {
+                Some(database) => database.call(call).await,
+                None => Err(anyhow::anyhow!("actor database is unavailable")),
+            };
+            (call_id, message_id, result)
+        });
         Ok(())
+    }
+
+    fn database_called(
+        &mut self,
+        call_id: u64,
+        message_id: Option<u64>,
+        result: Result<DatabaseResult>,
+    ) -> Result<()> {
+        if let Some(id) = message_id {
+            self.database_ids.remove(&id);
+        }
+        let (result, error) = match result {
+            Ok(result) => (Some(result), None),
+            Err(error) => (None, Some(format!("{error:#}"))),
+        };
+        self.write(encode_server_message(
+            &ActorExecutorServerMessage::DatabaseResult {
+                call_id,
+                result,
+                error,
+            },
+        )?)
     }
 
     fn load_connections(&mut self, message_id: u64, query: super::SocketQuery) -> Result<()> {
@@ -773,15 +781,11 @@ impl ExecutorDriver {
         Ok(())
     }
 
-    fn publish(&mut self, message_id: u64, effects: Vec<ActorSocketEffect>) -> Result<()> {
+    fn publish(&self, message_id: u64, effects: Vec<ActorSocketEffect>) -> Result<()> {
         let pending = self
             .pending
             .get(&message_id)
             .context("socket output has no active actor invocation")?;
-        ensure!(
-            self.publishing_ids.insert(message_id),
-            "actor sent concurrent socket publications"
-        );
         let connecting = matches!(
             &pending.command,
             ExecutorCommand::WebsocketEvent {
@@ -790,7 +794,7 @@ impl ExecutorDriver {
             }
         );
         let publisher = self.publisher.clone();
-        self.publishing.spawn(async move {
+        tokio::spawn(async move {
             let result = async {
                 ensure!(
                     !connecting,
@@ -803,7 +807,9 @@ impl ExecutorDriver {
                     .await
             }
             .await;
-            (message_id, result)
+            if let Err(error) = result {
+                warn!(error = %format!("{error:#}"), "actor socket output was not published");
+            }
         });
         Ok(())
     }
@@ -819,15 +825,7 @@ impl ExecutorDriver {
         });
         match bytes {
             Ok(bytes) => {
-                // Each pending command has at most one queued write; readiness has its own extra slot.
-                self.outbound
-                    .try_send(ExecutorWrite {
-                        bytes,
-                        written: None,
-                    })
-                    .map_err(|_| {
-                        anyhow::anyhow!("actor executor writer stopped or filled its queue")
-                    })?;
+                self.write(bytes)?;
                 self.pending.insert(message_id, pending);
             }
             Err(error) => {
@@ -835,6 +833,15 @@ impl ExecutorDriver {
             }
         }
         Ok(())
+    }
+
+    fn write(&self, bytes: Vec<u8>) -> Result<()> {
+        self.outbound
+            .send(ExecutorWrite {
+                bytes,
+                written: None,
+            })
+            .map_err(|_| anyhow::anyhow!("actor executor writer stopped"))
     }
 
     fn deliver(&mut self, message_id: u64, reply: ExecutorReply) -> Result<()> {
@@ -845,10 +852,6 @@ impl ExecutorDriver {
         ensure!(
             !self.connection_lookup_ids.contains(&message_id),
             "actor completed before connection lookup finished"
-        );
-        ensure!(
-            !self.publishing_ids.contains(&message_id),
-            "actor completed before socket output was acknowledged"
         );
         let pending = self
             .pending
@@ -861,7 +864,7 @@ impl ExecutorDriver {
 
 async fn read_executor_messages(
     mut reader: BufReader<OwnedReadHalf>,
-    inbound: mpsc::Sender<Result<ActorExecutorClientMessage>>,
+    inbound: mpsc::UnboundedSender<Result<ActorExecutorClientMessage>>,
 ) -> Result<()> {
     loop {
         let reply = match read_client_message(&mut reader).await {
@@ -874,7 +877,6 @@ async fn read_executor_messages(
         let stopped = reply.is_err();
         inbound
             .send(reply)
-            .await
             .context("actor executor driver stopped")?;
         if stopped {
             return Ok(());
@@ -884,7 +886,7 @@ async fn read_executor_messages(
 
 async fn write_executor_messages(
     mut writer: OwnedWriteHalf,
-    mut writes: mpsc::Receiver<ExecutorWrite>,
+    mut writes: mpsc::UnboundedReceiver<ExecutorWrite>,
 ) -> Result<()> {
     while let Some(write) = writes.recv().await {
         let result = writer
@@ -911,6 +913,7 @@ enum ExecutorRequest {
         written: oneshot::Sender<Result<()>>,
         publisher: Option<Arc<dyn ActorSocketPublisher>>,
         sockets: Option<Arc<dyn ActorSocketSource>>,
+        database: Option<Arc<dyn ActorDatabase>>,
     },
 }
 
@@ -983,7 +986,7 @@ async fn remove_socket(path: &Path) -> Result<()> {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ActorExecutorServerMessage<'a> {
     DatabaseResult {
-        message_id: u64,
+        call_id: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         result: Option<DatabaseResult>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -992,11 +995,6 @@ enum ActorExecutorServerMessage<'a> {
     SocketConnections {
         message_id: u64,
         connections: super::SocketLookup,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-    SocketEffectsPublished {
-        message_id: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
@@ -1014,7 +1012,9 @@ enum ActorExecutorServerMessage<'a> {
 #[serde(tag = "type", rename_all = "snake_case")]
 enum ActorExecutorClientMessage {
     DatabaseCall {
-        message_id: u64,
+        call_id: u64,
+        #[serde(default)]
+        message_id: Option<u64>,
         call: DatabaseCall,
     },
     Warm {

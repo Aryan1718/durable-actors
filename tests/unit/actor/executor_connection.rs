@@ -11,20 +11,20 @@ async fn generic_executor_connects_before_code_and_hydrates_after_assignment() -
     let listener = ActorExecutorListener::bind(&path).await?;
     let peer = tokio::spawn(async move {
         let mut socket = BufReader::new(tokio::net::UnixStream::connect(path).await?);
-        write_json_line(&mut socket, &json!({"type":"warm","protocol":28})).await?;
+        write_json_line(&mut socket, &json!({"type":"warm","protocol":30})).await?;
         let load = read_json_line(&mut socket).await?;
         assert_eq!(load["entrypoint"], "/customer/actors.mjs");
         assert_eq!(load["environment"]["CUSTOMER_KEY"], "value");
         write_json_line(
             &mut socket,
-            &json!({"type":"attach","protocol":28,"actor_names":["counter"]}),
+            &json!({"type":"attach","protocol":30,"actor_names":["counter"]}),
         )
         .await?;
         assert_eq!(
             read_json_line(&mut socket).await?,
             json!({
                 "type": "attached",
-                "protocol": 28,
+                "protocol": 30,
                 "actor": {"project_id": "default", "actor_name": "counter", "actor_id": "one"}
             })
         );
@@ -35,13 +35,13 @@ async fn generic_executor_connects_before_code_and_hydrates_after_assignment() -
         );
         write_json_line(
             &mut socket,
-            &json!({"type":"database_call","message_id":hydrate["message_id"],
+            &json!({"type":"database_call","call_id":1,"message_id":hydrate["message_id"],
                 "call":{"op":"persist_field","name":"resumed","value":true,"immediate":true}}),
         )
         .await?;
         let persisted = read_json_line(&mut socket).await?;
         assert_eq!(persisted["type"], "database_result");
-        assert_eq!(persisted["message_id"], hydrate["message_id"]);
+        assert_eq!(persisted["call_id"], 1);
         assert_eq!(persisted["result"], json!({"type":"done"}));
         write_json_line(
             &mut socket,
@@ -57,7 +57,7 @@ async fn generic_executor_connects_before_code_and_hydrates_after_assignment() -
             &HashMap::from([("CUSTOMER_KEY".into(), "value".into())]),
         )
         .await?;
-    connection.mark_ready(counter(), None, None).await?;
+    connection.mark_ready(counter(), None, None, None).await?;
     let (requested, mut requests) = mpsc::unbounded_channel();
     let database = Arc::new(actor_database::DelayedDatabase {
         requested,
@@ -92,7 +92,7 @@ async fn residency_reports_are_separate_from_invocation_cache_hints() -> Result<
     let mut peer = BufReader::new(UnixStream::connect(&socket).await?);
     write_json_line(
         &mut peer,
-        &json!({"type":"attach", "protocol":28, "actor_names":["Room"]}),
+        &json!({"type":"attach", "protocol":30, "actor_names":["Room"]}),
     )
     .await?;
     let connection = listener.accept().await?;
@@ -103,6 +103,7 @@ async fn residency_reports_are_separate_from_invocation_cache_hints() -> Result<
                 actor_name: "Room".into(),
                 actor_id: "one".into(),
             },
+            None,
             None,
             None,
         )
@@ -166,6 +167,7 @@ async fn connection_lookup_is_scoped_to_its_invocation_and_does_not_block_other_
                 requested,
                 release: release.clone(),
             })),
+            None,
         )
         .await?;
     let peer = async {
@@ -306,14 +308,14 @@ async fn shutdown_does_not_wait_for_a_peer_that_stopped_reading() -> Result<()> 
         let mut stream = BufReader::new(stream);
         write_json_line(
             &mut stream,
-            &json!({"type":"attach", "protocol":28, "actor_names":["counter"]}),
+            &json!({"type":"attach", "protocol":30, "actor_names":["counter"]}),
         )
         .await?;
         let _ = read_json_line(&mut stream).await?;
         std::future::pending::<Result<()>>().await
     });
     let connection = listener.accept().await?;
-    connection.mark_ready(counter(), None, None).await?;
+    connection.mark_ready(counter(), None, None, None).await?;
     let executor = connection.executor();
     let shutdown = CancellationToken::new();
     let mut running = tokio::spawn(connection.run(shutdown.clone()));
@@ -340,7 +342,7 @@ async fn one_javascript_executor_runs_until_host_shutdown() -> Result<()> {
     let customer = tokio::spawn(run_incrementing_customer(socket.clone()));
     let connection = host.accept().await?;
     let executor = connection.executor();
-    connection.mark_ready(counter(), None, None).await?;
+    connection.mark_ready(counter(), None, None, None).await?;
     assert!(executor.supports("counter"));
 
     let shutdown = CancellationToken::new();
@@ -456,13 +458,18 @@ fn eviction_commands_name_no_actor() -> Result<()> {
 #[test]
 fn database_protocol_uses_tagged_sqlite_values() -> Result<()> {
     let request = serde_json::from_value::<ActorExecutorClientMessage>(json!({
-        "type": "database_call", "message_id": 17,
+        "type": "database_call", "call_id": 3, "message_id": 17,
         "call": {"op": "exec", "sql": "SELECT ?", "bindings": [{"type": "integer", "value": "9007199254740993"}, {"type": "blob", "value": "AAE="}], "immediate": true}
     }))?;
-    let ActorExecutorClientMessage::DatabaseCall { message_id, call } = request else {
+    let ActorExecutorClientMessage::DatabaseCall {
+        call_id,
+        message_id,
+        call,
+    } = request
+    else {
         anyhow::bail!("expected database call");
     };
-    assert_eq!(message_id, 17);
+    assert_eq!((call_id, message_id), (3, Some(17)));
     let DatabaseCall::Exec {
         sql,
         bindings,
@@ -481,7 +488,7 @@ fn database_protocol_uses_tagged_sqlite_values() -> Result<()> {
         ]
     );
     let reply = ActorExecutorServerMessage::DatabaseResult {
-        message_id: 17,
+        call_id: 3,
         result: Some(DatabaseResult::Rows {
             columns: vec!["value".into()],
             rows: vec![vec![SqlValue::Real(0.5)]],
@@ -491,15 +498,16 @@ fn database_protocol_uses_tagged_sqlite_values() -> Result<()> {
     assert_eq!(
         serde_json::to_value(reply)?,
         json!({
-            "type": "database_result", "message_id": 17,
+            "type": "database_result", "call_id": 3,
             "result": {"type": "rows", "columns": ["value"], "rows": [[{"type": "real", "value": 0.5}]]}
         })
     );
     let request = serde_json::from_value::<ActorExecutorClientMessage>(json!({
-        "type": "database_call", "message_id": 18,
+        "type": "database_call", "call_id": 4,
         "call": {"op": "replace_fields", "fields": {"count": 1, "nested": {"ready": true}}}
     }))?;
     let ActorExecutorClientMessage::DatabaseCall {
+        message_id: None,
         call: DatabaseCall::ReplaceFields { fields },
         ..
     } = request
@@ -539,7 +547,7 @@ async fn replies_cannot_overtake_their_database_call() -> Result<()> {
     let command = read_json_line(&mut customer).await?;
     write_json_line(
         &mut customer,
-        &json!({"type": "database_call", "message_id": command["message_id"], "call": {"op": "commit"}}),
+        &json!({"type": "database_call", "call_id": 1, "message_id": command["message_id"], "call": {"op": "commit"}}),
     )
     .await?;
     timeout(Duration::from_secs(1), requests.recv()).await?;
@@ -556,12 +564,47 @@ async fn replies_cannot_overtake_their_database_call() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn database_calls_without_a_running_command_use_the_activation_database() -> Result<()> {
+    let (host, customer) = UnixStream::pair()?;
+    let (reader, writer) = host.into_split();
+    let (executor, _running) =
+        JsActorExecutor::start(BufReader::new(reader), writer, vec!["counter".into()]);
+    let (requested, mut requests) = mpsc::unbounded_channel();
+    let activation = Arc::new(actor_database::DelayedDatabase {
+        requested,
+        release: Arc::new(tokio::sync::Semaphore::new(2)),
+        fail: false,
+    });
+    executor
+        .mark_ready(counter(), None, None, Some(activation))
+        .await?;
+    let mut customer = BufReader::new(customer);
+    assert_eq!(read_json_line(&mut customer).await?["type"], "attached");
+    for (call_id, message_id) in [(1, None), (2, Some(99))] {
+        write_json_line(
+            &mut customer,
+            &json!({"type": "database_call", "call_id": call_id, "message_id": message_id,
+                "call": {"op": "delete_alarm", "immediate": true}}),
+        )
+        .await?;
+        let result = read_json_line(&mut customer).await?;
+        assert_eq!(result["call_id"], call_id);
+        assert_eq!(result["result"], json!({"type": "done"}));
+        assert!(matches!(
+            requests.try_recv()?,
+            DatabaseCall::DeleteAlarm { immediate: true }
+        ));
+    }
+    Ok(())
+}
+
 async fn database_call_exchange(fail: bool) -> Result<()> {
     let (host, customer) = UnixStream::pair()?;
     let (reader, writer) = host.into_split();
     let (executor, running) =
         JsActorExecutor::start(BufReader::new(reader), writer, vec!["counter".into()]);
-    executor.mark_ready(counter(), None, None).await?;
+    executor.mark_ready(counter(), None, None, None).await?;
     let (requested, mut requests) = mpsc::unbounded_channel();
     let release = Arc::new(tokio::sync::Semaphore::new(0));
     let database = Arc::new(actor_database::DelayedDatabase {
@@ -575,7 +618,7 @@ async fn database_call_exchange(fail: bool) -> Result<()> {
         let slow = read_json_line(&mut customer).await?;
         write_json_line(
             &mut customer,
-            &json!({"type": "database_call", "message_id": slow["message_id"],
+            &json!({"type": "database_call", "call_id": 1, "message_id": slow["message_id"],
                 "call": {"op": "exec", "sql": "INSERT INTO notes VALUES (?)", "bindings": [{"type": "text", "value": "kept"}], "immediate": true}}),
         )
         .await?;
@@ -588,7 +631,7 @@ async fn database_call_exchange(fail: bool) -> Result<()> {
         .await?;
         let result = read_json_line(&mut customer).await?;
         assert_eq!(result["type"], "database_result");
-        assert_eq!(result["message_id"], slow["message_id"]);
+        assert_eq!(result["call_id"], 1);
         let reply = if fail {
             assert_eq!(result["error"], "storage rejected immediate write");
             assert!(result.get("result").is_none());
@@ -656,13 +699,13 @@ async fn run_incrementing_customer(socket: PathBuf) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     writer
-        .write_all(b"{\"type\":\"attach\",\"protocol\":28,\"actor_names\":[\"counter\"]}\n")
+        .write_all(b"{\"type\":\"attach\",\"protocol\":30,\"actor_names\":[\"counter\"]}\n")
         .await?;
     ensure!(
         read_json_line(&mut reader).await?
             == json!({
                 "type": "attached",
-                "protocol": 28,
+                "protocol": 30,
                 "actor": {"project_id": "default", "actor_name": "counter", "actor_id": "one"}
             })
     );

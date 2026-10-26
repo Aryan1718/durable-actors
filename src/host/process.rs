@@ -35,6 +35,8 @@ const EXECUTOR_STARTUP_TIMEOUT: Duration = RAPID_OPERATION_TIMEOUT.saturating_mu
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct HostReadiness {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub initial_reply: Option<serde_json::Value>,
     pub host_id: super::HostId,
     pub session_id: String,
     pub route: String,
@@ -60,11 +62,13 @@ pub(super) async fn serve_assigned_host(
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<()> {
     let readiness = warm.as_mut().and_then(|warm| warm.readiness.take());
+    let operation = warm.as_mut().and_then(|warm| warm.operation.take());
     let host_id = &config.identity.host_id;
     let prepared = match prepare_actor_host(&config, &mut timings, warm).await {
         Ok(prepared) => prepared,
         Err(error) => {
             log_startup(host_id, &timings, "failed", Some(&error));
+            super::assignment::decline(readiness);
             return Err(error);
         }
     };
@@ -81,6 +85,7 @@ pub(super) async fn serve_assigned_host(
         sockets,
         credentials: _credentials,
         storage,
+        database,
     } = prepared;
     let mut lease_lost = renewal.lease_lost();
     let mut status = host.status();
@@ -90,11 +95,13 @@ pub(super) async fn serve_assigned_host(
         config.identity.session_id.clone(),
         invocation_auth,
         sockets.clone(),
-    )
-    .router();
+    );
+    let mut started = false;
     let initialized = async {
-        let owner_epoch = initialize_executor(&executor_connection, &host, &sockets).await?;
-        let ready = HostReadiness {
+        let owner_epoch =
+            initialize_executor(&executor_connection, &host, &sockets, &database).await?;
+        let mut ready = HostReadiness {
+            initial_reply: None,
             host_id: host_id.clone(),
             session_id: config.identity.session_id.clone(),
             route: route.clone(),
@@ -107,6 +114,18 @@ pub(super) async fn serve_assigned_host(
             tokio::fs::write(&temporary, serde_json::to_vec(&ready)?).await?;
             tokio::fs::rename(temporary, path).await?;
         }
+        ready.initial_reply = match operation {
+            Some(operation) => {
+                started = true;
+                Some(
+                    service
+                        .execute_initial(operation, owner_epoch, timings.elapsed_ms())
+                        .await?,
+                )
+            }
+            None => None,
+        };
+        ready.lease = storage.current_lease()?;
         anyhow::Ok(ready)
     }
     .await;
@@ -116,6 +135,9 @@ pub(super) async fn serve_assigned_host(
             log_startup(host_id, &timings, "failed", Some(&error));
             let _ = lease.unregister().await;
             let _ = renewal.shutdown().await;
+            if !started {
+                super::assignment::decline(readiness);
+            }
             return Err(error);
         }
     };
@@ -127,14 +149,14 @@ pub(super) async fn serve_assigned_host(
         host.status(),
     )?;
     if let Some(readiness) = readiness {
-        let _ = readiness.send(ready);
+        let _ = readiness.send(Ok(ready));
     }
     timings.executor_notified_at_ms = Some(timings.elapsed_ms());
     log_startup(host_id, &timings, "ready", None);
     let executor_stop = CancellationToken::new();
     let server_stop = CancellationToken::new();
     let serving = server_stop.clone();
-    let routes = service;
+    let routes = service.router();
     let mut server = Box::pin(async move {
         axum::serve(listener, routes)
             .with_graceful_shutdown(async move { serving.cancelled().await })
@@ -195,12 +217,14 @@ async fn initialize_executor(
     connection: &ActorExecutorConnection,
     host: &Arc<ActorHost>,
     sockets: &Arc<super::sockets::HostSockets>,
+    database: &Arc<super::HostDatabase>,
 ) -> Result<u64> {
     connection
         .mark_ready(
             host.actor().clone(),
             Some(sockets.clone()),
             Some(sockets.clone()),
+            Some(database.background(host.actor().clone())),
         )
         .await?;
     Ok(host.activate().await?.owner_epoch)
@@ -219,6 +243,7 @@ struct PreparedActorHostResources {
     host: Arc<ActorHost>,
     lease: Arc<HostLeaseMaintainer>,
     renewal: LeaseRenewalTask,
+    database: Arc<super::HostDatabase>,
 }
 
 async fn prepare_actor_host(
@@ -337,7 +362,7 @@ async fn prepare_actor_host(
             endpoint,
             assignment.actor.clone(),
             executor_connection.executor(),
-            database,
+            database.clone(),
             sockets.clone(),
         )
         .with_traces(crate::request_traces::TraceSender::start(
@@ -359,6 +384,7 @@ async fn prepare_actor_host(
         host,
         lease,
         renewal,
+        database,
     })
 }
 

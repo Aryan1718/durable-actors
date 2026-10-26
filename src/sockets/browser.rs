@@ -107,14 +107,10 @@ struct Session {
 
 impl Session {
     async fn run(&mut self, socket: &mut WebSocket) -> Result<Closed, Closed> {
-        let mut authority_checks = tokio::time::interval(Duration::from_secs(1));
         loop {
             tokio::select! {
                 biased;
                 _ = self.state.stop.cancelled() => return Err(Closed::new(1012, "socket gateway stopping")),
-                _ = authority_checks.tick() => {
-                    self.state.dispatcher.ensure_authority().map_err(|_| Closed::new(1012, "socket gateway lost its subscription"))?;
-                }
                 result = async { self.handler.as_mut().unwrap().await }, if self.handler.is_some() => {
                     self.handler.take();
                     if !result.unwrap_or(false) { return Err(Closed::new(4400, "actor socket handler failed")); }
@@ -215,16 +211,10 @@ impl Session {
             .dispatcher
             .ensure_authority()
             .map_err(|_| Closed::new(1012, "socket gateway lost its subscription"))?;
-        let mut authority_checks = tokio::time::interval(Duration::from_secs(1));
-        let send = socket.send(frame);
-        tokio::pin!(send);
-        loop {
-            tokio::select! {
-                biased;
-                _ = self.state.stop.cancelled() => return Err(Closed::new(1012, "socket gateway stopping")),
-                _ = authority_checks.tick() => self.state.dispatcher.ensure_authority().map_err(|_| Closed::new(1012, "socket gateway lost its subscription"))?,
-                result = &mut send => return result.map_err(|_| Closed::new(1006, "transport closed")),
-            }
+        tokio::select! {
+            biased;
+            _ = self.state.stop.cancelled() => Err(Closed::new(1012, "socket gateway stopping")),
+            result = socket.send(frame) => result.map_err(|_| Closed::new(1006, "transport closed")),
         }
     }
 
@@ -309,10 +299,12 @@ async fn dispatch(
             state.registry.activate(&ticket.actor, &connection.id).await;
         }
     }
-    state
-        .dispatcher
-        .deliver(&state.registry, &ticket.actor, effects)
-        .await?;
+    if !effects.is_empty() {
+        state
+            .dispatcher
+            .deliver(&state.registry, &ticket.actor, effects)
+            .await?;
+    }
     state.dispatcher.notify(ticket, &event);
     Ok(())
 }

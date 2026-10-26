@@ -63,6 +63,13 @@
                   "zone"
                 ]
               }
+            },
+            "placement": {
+              "type": "string",
+              "enum": [
+                "all",
+                "nearest"
+              ]
             }
           },
           "required": [

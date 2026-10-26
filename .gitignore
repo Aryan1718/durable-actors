@@ -6,6 +6,7 @@ sdk/.test-dist/
 packages/*/dist/
 sdk/src/generated/
 examples/persistence/cli/generated/
+examples/background/cli/generated/
 examples/pi/pi-cli/generated/
 target/
 dist-runtime/

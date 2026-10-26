@@ -57,6 +57,20 @@ impl ReservationStore for RedisReservations {
         }
     }
 
+    async fn release(&self, activation: &Activation) -> Result<()> {
+        let prefix = self.prefix(&activation.actor.project_id);
+        let member = activation.member()?;
+        let mut command = redis::cmd("EVAL");
+        command
+            .arg(include_str!("release.lua"))
+            .arg(2)
+            .arg(format!("{prefix}:active"))
+            .arg(format!("{prefix}:session:{member}"))
+            .arg(member);
+        let _: i32 = self.redis.run(command).await?;
+        Ok(())
+    }
+
     async fn observe(&self, event: &LifecycleEvent) -> Result<()> {
         let prefix = self.prefix(&event.actor.project_id);
         let member = Activation::new(&event.actor, &event.host_id, &event.session_id).member()?;

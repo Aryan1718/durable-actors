@@ -33,7 +33,7 @@ class Session(Channel):
     async def run(self, entrypoint: str | None, generic: bool) -> None:
         try:
             if generic:
-                await self.send({"type": "warm", "protocol": 28})
+                await self.send({"type": "warm", "protocol": 30})
                 assignment = await self.read()
                 if (
                     assignment.get("type") != "load"
@@ -48,7 +48,7 @@ class Session(Channel):
                 while not path.is_file():
                     await asyncio.sleep(0.01)
             actors = {actor.__name__: actor for actor in load_artifact(path)}
-            await self.send({"type": "attach", "protocol": 28, "actor_names": sorted(actors)})
+            await self.send({"type": "attach", "protocol": 30, "actor_names": sorted(actors)})
             identity = attached_actor(await self.read(), actors)
             database = DatabaseProxy(self.call_database, asyncio.get_running_loop())
             runtime = ActorRuntime(actors[identity["actor_name"]], identity, self, database)
@@ -56,18 +56,12 @@ class Session(Channel):
             while True:
                 message = await self.read()
                 if message["type"] == "command":
-                    if len(self.tasks) >= 512:
-                        raise ValueError("executor command queue is full")
                     validate_command(message)
                     task = asyncio.create_task(self.execute(runtime, message))
                     self.tasks.add(task)
                     task.add_done_callback(self.completed)
-                elif message["type"] in {
-                    "socket_connections",
-                    "socket_effects_published",
-                    "database_result",
-                }:
-                    pending = self.pending.pop((message["type"], message["message_id"]))
+                elif message["type"] in {"socket_connections", "database_result"}:
+                    pending = self.pending.pop((message["type"], reply_id(message)))
                     if pending.cancelled():
                         continue
                     if message.get("error"):
@@ -101,11 +95,15 @@ class Session(Channel):
         # The host accepts one outstanding database call per invocation.
         async with self.database_calls:
             return cast(
-                Document, await self.exchange("database_call", "database_result", call=call)
+                Document,
+                await self.exchange(
+                    "database_call", "database_result", call_id=message_id.get(), call=call
+                ),
             )
 
-    async def publish(self, effects: list[Document]) -> None:
-        await self.exchange("socket_effects", "socket_effects_published", effects=effects)
+    def publish(self, effects: list[Document]) -> None:
+        message = {"type": "socket_effects", "message_id": message_id.get(), "effects": effects}
+        self.writer.write(serialize(message))
 
     async def get_connections(
         self, tag: str | None = None, count_only: bool = False
@@ -153,8 +151,13 @@ class Session(Channel):
         await self.writer.wait_closed()
 
 
+def reply_id(message: Document) -> int:
+    # Python reuses each command's message ID as the ID of its database call.
+    return cast(int, message["call_id" if message["type"] == "database_result" else "message_id"])
+
+
 def attached_actor(message: Document, actor_names: Collection[str]) -> Document:
-    if message.get("type") != "attached" or message.get("protocol") != 28:
+    if message.get("type") != "attached" or message.get("protocol") != 30:
         raise ValueError("unsupported executor protocol")
     actor = cast(Document, message["actor"])
     for field, size in (("project_id", 64), ("actor_name", 255), ("actor_id", 128)):

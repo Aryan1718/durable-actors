@@ -50,6 +50,7 @@ impl RapidSnapshots {
             buckets,
             archive_bucket,
             archive_batch,
+            placement,
         } = config
         else {
             anyhow::bail!("append-log persistence configuration required");
@@ -69,6 +70,7 @@ impl RapidSnapshots {
             archive,
             snapshots,
             zones,
+            *placement,
             *archive_batch,
             Arc::new(crate::litestream::compaction::RustCompactor),
             stop,

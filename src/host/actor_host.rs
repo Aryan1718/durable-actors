@@ -766,11 +766,11 @@ async fn commit_outcome(
         }
         Err(error) => return (Err(error), Recovery::Keep),
     };
-    let result = complete_with_state(version, result, effects, database, publisher).await;
+    let result = complete_with_state(version, result, effects, database, publisher);
     (result, Recovery::Keep)
 }
 
-async fn complete_with_state(
+fn complete_with_state(
     state_version: u64,
     result: Value,
     effects: Vec<ActorSocketEffect>,
@@ -791,12 +791,12 @@ async fn complete_with_state(
             _ => unreachable!(),
         }
     }
-    if !automatic.is_empty()
-        && let Err(error) = publisher.publish(automatic).await
-    {
-        warn!(%error, "committed state notification failed");
-        return Ok(ActorExecutionResult::Failed {
-            failure: ActorInvocationFailure::outcome_unknown_after_execution(),
+    if !automatic.is_empty() {
+        let publisher = publisher.clone();
+        tokio::spawn(async move {
+            if let Err(error) = publisher.publish(automatic).await {
+                warn!(error = %format!("{error:#}"), "committed state notification failed");
+            }
         });
     }
     Ok(ActorExecutionResult::Completed { result, effects })

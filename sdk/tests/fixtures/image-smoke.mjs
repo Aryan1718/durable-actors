@@ -77,14 +77,14 @@ try {
             const { value, done } = await lines.next()
             assert.equal(done, false, "executor closed its connection")
             const message = JSON.parse(value)
-            if (message.type === "database_call") send({ type: "database_result", message_id: message.message_id, result: call(message.call) })
+            if (message.type === "database_call") send({ type: "database_result", call_id: message.call_id, result: call(message.call) })
             else if (message.type !== "residency") return message
         }
     }
-    assert.deepEqual(await receive(), { type: "warm", protocol: 28 })
+    assert.deepEqual(await receive(), { type: "warm", protocol: 30 })
     send({ type: "load", entrypoint, environment: {} })
-    assert.deepEqual(await receive(), { type: "attach", protocol: 28, actor_names: ["Counter"] })
-    send({ type: "attached", protocol: 28, actor: { project_id: "default", actor_name: "Counter", actor_id: "one" } })
+    assert.deepEqual(await receive(), { type: "attach", protocol: 30, actor_names: ["Counter"] })
+    send({ type: "attached", protocol: 30, actor: { project_id: "default", actor_name: "Counter", actor_id: "one" } })
     for (let expected = 1; expected <= 2; expected++) {
         send({
             type: "command",

@@ -247,8 +247,7 @@ test("compiled object schema changes preserve SQLite while adding and removing f
     assert.deepEqual(Reflect.get(read, "result"), { count: 0, rows: [{ value: "retained" }] })
 })
 
-test("database handles cannot write after their invocation completes", async () => {
-    let escaped!: () => void
+test("database handles keep writing after their invocation completes", async () => {
     let release!: () => void
     let pending!: Promise<void>
     const gate = new Promise<void>(resolve => {
@@ -257,17 +256,64 @@ test("database handles cannot write after their invocation completes", async () 
     class DetachedSqlite extends Actor {
         async start() {
             const database = this.db
-            escaped = () => {
+            pending = gate.then(() => {
                 database.exec("CREATE TABLE escaped (id INTEGER)")
-            }
-            pending = gate.then(escaped)
+                database.exec("INSERT INTO escaped VALUES (1)")
+            })
+        }
+
+        async read() {
+            return this.db.exec("SELECT id FROM escaped")
         }
     }
-    const { runtime } = createRuntime(registerActorClass(DetachedSqlite, { actorName: "DetachedSqlite", fields: [] }))
+    const detached = registerActorClass(DetachedSqlite, { actorName: "DetachedSqlite", fields: [] })
+    const { runtime, host } = createRuntime(detached)
     assert.equal((await invoke(runtime, "start", [], "DetachedSqlite")).type, "invoked")
-    assert.throws(escaped, /outside its invocation/)
     release()
-    await assert.rejects(pending, /outside its invocation/)
+    await pending
+    const restored = restore(host, detached)
+    assert.deepEqual(Reflect.get(await invoke(restored.runtime, "read", [], "DetachedSqlite"), "result"), [{ id: 1 }])
+})
+
+test("background SQL is rejected while an @Atomic method holds the transaction", async () => {
+    let releaseBackground!: () => void
+    let releaseAtomic!: () => void
+    let entered!: () => void
+    let rejected!: Promise<unknown>
+    const backgroundGate = new Promise<void>(resolve => {
+        releaseBackground = resolve
+    })
+    const atomicGate = new Promise<void>(resolve => {
+        releaseAtomic = resolve
+    })
+    const holding = new Promise<void>(resolve => {
+        entered = resolve
+    })
+    class AtomicSqlite extends Actor {
+        async start() {
+            const database = this.db
+            rejected = backgroundGate.then(() => database.exec("CREATE TABLE escaped (id INTEGER)"))
+        }
+
+        async hold() {
+            this.db.exec("CREATE TABLE held (id INTEGER)")
+            entered()
+            await atomicGate
+        }
+    }
+    const atomic = registerActorClass(AtomicSqlite, {
+        actorName: "AtomicSqlite",
+        atomicMethods: ["hold"],
+        fields: []
+    })
+    const { runtime } = createRuntime(atomic)
+    assert.equal((await invoke(runtime, "start", [], "AtomicSqlite")).type, "invoked")
+    const held = invoke(runtime, "hold", [], "AtomicSqlite")
+    await holding
+    releaseBackground()
+    await assert.rejects(rejected, /while an @Atomic method runs/)
+    releaseAtomic()
+    assert.equal((await held).type, "invoked")
 })
 
 test("field initializers read the actor identity and SQLite during construction", async () => {

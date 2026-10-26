@@ -39,7 +39,7 @@ async fn signed_route_is_bound_to_the_actor_and_epoch() -> Result<()> {
     )?;
     let authorization = format!("Bearer {}", token.token);
     assert_eq!(
-        gateway.invocation_route(&actor, 7, &authorization)?.0,
+        gateway.invocation_route(&actor, 7, &authorization)?,
         "http://10.1.2.3:7101/"
     );
     assert!(gateway.invocation_route(&actor, 8, &authorization).is_err());
@@ -117,9 +117,7 @@ async fn signed_route_rejects_divergent_principal_actor() -> Result<()> {
         "http://10.1.2.3:7101",
     )?;
     assert_eq!(
-        gateway
-            .invocation_route(&capability_actor, 7, &format!("Bearer {}", control.token))?
-            .0,
+        gateway.invocation_route(&capability_actor, 7, &format!("Bearer {}", control.token))?,
         "http://10.1.2.3:7101/"
     );
 
@@ -456,7 +454,12 @@ impl super::super::service::HostProvisioner for PausedProvisioner {
         actor: &crate::actor::ActorKey,
         new_actor: bool,
         _: Option<&crate::bucket::OwnershipHint>,
-    ) -> Result<(crate::host_leases::HostLease, u64)> {
+        _: Option<&crate::sandbox::assignment::InitialOperation>,
+    ) -> Result<(
+        crate::host_leases::HostLease,
+        u64,
+        Option<serde_json::Value>,
+    )> {
         assert_eq!(region, "north-america-east");
         assert_eq!(actor.actor_id, "one");
         assert!(new_actor);
@@ -481,6 +484,7 @@ impl super::super::service::HostProvisioner for PausedProvisioner {
                 expires_at_ms: u64::MAX,
             },
             7,
+            None,
         ))
     }
 

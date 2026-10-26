@@ -36,6 +36,20 @@ export class PiAgent extends Actor<null, string, Outgoing> {
         }
     }
 
+    // Returns before Pi runs, so every Pi write happens after this invocation ends.
+    async submit(text: string): Promise<void> {
+        await this.agent.root.submit({ type: "input", content: text }, context)
+    }
+
+    async view(): Promise<Unchecked<ConversationView>> {
+        const watch = await this.agent.root.watch(context)
+        try {
+            return unchecked(watch.value)
+        } finally {
+            await watch.stop()
+        }
+    }
+
     async reset() {
         await this.agent.root.reset(undefined, context)
         const watch = await this.agent.root.watch(context)

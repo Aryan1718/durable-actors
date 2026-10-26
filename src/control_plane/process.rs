@@ -194,7 +194,6 @@ async fn control_plane_routes(
     let (traces, lifecycle) = telemetry_stores(
         &config.storage,
         database.clone(),
-        changes.clone(),
         redis.clone(),
         stop.clone(),
     )
@@ -409,7 +408,6 @@ async fn snapshot_store(
 async fn telemetry_stores(
     storage: &ControlPlaneStorageConfig,
     database: PostgresDatabase,
-    changes: crate::postgres::notifications::ChangeFeed,
     redis: Option<Redis>,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<(TraceStore, crate::actor_lifecycle::LifecycleStore)> {
@@ -419,8 +417,7 @@ async fn telemetry_stores(
                 database,
                 storage.trace_retention,
             ));
-            let mut traces = TraceStore::open(persistence.clone()).await?;
-            traces.changes = changes;
+            let traces = TraceStore::open(persistence.clone()).await?;
             persistence.start_retention(stop);
             Ok((traces, Default::default()))
         }
@@ -630,6 +627,7 @@ fn persistence_config(
         "standard" => {
             for name in [
                 "DURABLE_ACTORS_RAPID_BUCKETS",
+                "DURABLE_ACTORS_RAPID_PLACEMENT",
                 "DURABLE_ACTORS_ARCHIVE_BUCKET",
                 "DURABLE_ACTORS_ARCHIVE_BATCH_BYTES",
                 "DURABLE_ACTORS_ARCHIVE_BATCH_INTERVAL_MS",
@@ -664,6 +662,11 @@ fn rapid_persistence(
                 .transpose()
                 .context("DURABLE_ACTORS_ARCHIVE_BATCH_INTERVAL_MS must be an integer")?
                 .unwrap_or(10_000),
+        },
+        placement: match get("DURABLE_ACTORS_RAPID_PLACEMENT").as_deref() {
+            None | Some("all") => crate::bucket::RapidPlacement::All,
+            Some("nearest") => crate::bucket::RapidPlacement::Nearest,
+            Some(_) => anyhow::bail!("DURABLE_ACTORS_RAPID_PLACEMENT must be all or nearest"),
         },
     };
     persistence.validate()?;

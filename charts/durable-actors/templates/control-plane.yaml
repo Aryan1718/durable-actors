@@ -96,6 +96,7 @@ spec:
             {{- if eq .Values.storage.mode "rapid" }}
             - {name: DURABLE_ACTORS_ARCHIVE_BUCKET, value: {{ .Values.storage.bucket | quote }}}
             - {name: DURABLE_ACTORS_RAPID_BUCKETS, value: {{ .Values.storage.rapid.buckets | toJson | quote }}}
+            - {name: DURABLE_ACTORS_RAPID_PLACEMENT, value: {{ .Values.storage.rapid.placement | quote }}}
             {{- end }}
             - {name: DURABLE_ACTORS_SPARE_IDLE, value: {{ .Values.actors.warm | quote }}}
             - {name: DURABLE_ACTORS_HOST_CPU_MILLIS, value: {{ .Values.actors.cpuMillis | quote }}}

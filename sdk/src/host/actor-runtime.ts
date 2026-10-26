@@ -25,8 +25,6 @@ import type { SocketPublisher, SocketSource } from "./types.js"
 class ActorRuntime {
     private instance: AnyActor | undefined
     private readonly schemas: ActorSchemas
-    private serial: Promise<unknown> = Promise.resolve()
-    private completion: Promise<unknown> = Promise.resolve()
     private sequence = 0
     private lastCompletedState: JsonObject | undefined
     private fatal: ActorExecutorReply | undefined
@@ -44,12 +42,26 @@ class ActorRuntime {
     }
 
     async handle(command: ActorWorkerCommand): Promise<ActorExecutorReply> {
-        if (command.type === "hydrate" || command.type === "evict") return this.execute(command)
-        const method = command.type === "invoke" ? command.method : lifecycleMethod(command)
-        const interleave = method !== undefined && (this.definition.state.interleaveMethods?.includes(method) ?? false)
-        const operation = this.serial.then(() => this.execute(command))
-        if (!interleave) this.serial = operation.catch(() => undefined)
-        return operation
+        if (this.fatal !== undefined) return this.fatal
+        try {
+            if (command.type === "hydrate") {
+                await this.prepare(command)
+                return { type: "hydrated" }
+            }
+            if (command.type === "invoke") return await this.atomically(command.method, () => this.invoke(command))
+            if (command.type === "evict") {
+                const isGracefuleShutdown = command.graceful
+                await this.close(isGracefuleShutdown)
+                this.reset()
+                return { type: "evicted" }
+            }
+            return await this.atomically(lifecycleMethod(command), () => this.handleSocketEvent(command))
+        } catch (error) {
+            this.reset()
+            const failure = failedReply("invalid_actor_state", errorMessage(error))
+            if (this.interleaved) this.fatal = failure
+            return failure
+        }
     }
 
     async close(isGracefuleShutdown: boolean): Promise<void> {
@@ -70,27 +82,12 @@ class ActorRuntime {
         })
     }
 
-    private async execute(command: ActorWorkerCommand): Promise<ActorExecutorReply> {
-        if (this.fatal !== undefined) return this.fatal
-        try {
-            if (command.type === "hydrate") {
-                await this.prepare(command)
-                return { type: "hydrated" }
-            }
-            if (command.type === "invoke") return await this.invoke(command)
-            if (command.type === "evict") {
-                const isGracefuleShutdown = command.graceful
-                await this.close(isGracefuleShutdown)
-                this.reset()
-                return { type: "evicted" }
-            }
-            return await this.handleSocketEvent(command)
-        } catch (error) {
-            this.reset()
-            const failure = failedReply("invalid_actor_state", errorMessage(error))
-            if (this.interleaved) this.fatal = failure
-            return failure
-        }
+    private atomically(method: string, operation: () => Promise<ActorExecutorReply>): Promise<ActorExecutorReply> {
+        return this.isAtomic(method) ? this.database.atomically(operation) : operation()
+    }
+
+    private isAtomic(method: string): boolean {
+        return this.definition.state.atomicMethods?.includes(method) ?? false
     }
 
     private get interleaved(): boolean {
@@ -127,27 +124,25 @@ class ActorRuntime {
                 async () =>
                     runWithActorDatabase(
                         instance,
-                        this.definition.state.atomicMethods?.includes(command.method) ? "atomic" : "immediate",
+                        this.isAtomic(command.method) ? "atomic" : "immediate",
                         async () => Reflect.apply(method, instance, command.args) as Promise<unknown>
                     ),
                 this.publish,
                 this.schemas
             )
             const result: JsonValue = execution.value === undefined ? null : cloneJson(execution.value, "actor result")
+            if (this.fatal !== undefined) return this.fatal
+            validateActorState(instance, this.definition.state)
+            const state = this.database.fields()
+            const effects = [...execution.effects, ...this.stateUpdates(before, state)]
+            this.database.commit()
 
-            return await this.completeInOrder(async () => {
-                validateActorState(instance, this.definition.state)
-                const state = this.database.fields()
-                const effects = [...execution.effects, ...this.stateUpdates(before, state)]
-                this.database.commit()
-
-                return {
-                    type: "invoked",
-                    result,
-                    ...this.completionOrder(),
-                    ...(effects.length === 0 ? {} : { effects })
-                }
-            })
+            return {
+                type: "invoked",
+                result,
+                ...this.completionOrder(),
+                ...(effects.length === 0 ? {} : { effects })
+            }
         } catch (error) {
             if (error instanceof DatabaseCommitError) {
                 this.fatal = failedReply("actor_database_failed", errorMessage(error))
@@ -177,7 +172,7 @@ class ActorRuntime {
                         )
                     await runWithActorDatabase(
                         instance,
-                        this.definition.state.atomicMethods?.includes(methodName) ? "atomic" : "immediate",
+                        this.isAtomic(methodName) ? "atomic" : "immediate",
                         async () => Reflect.apply(method, instance, args) as Promise<unknown>
                     )
                 },
@@ -186,25 +181,24 @@ class ActorRuntime {
                 command.connections
             )
 
-            return await this.completeInOrder(async () => {
-                validateActorState(instance, this.definition.state)
-                const state = this.database.fields()
-                const effects = [
-                    ...execution.effects,
-                    ...this.stateUpdates(
-                        before,
-                        state,
-                        command.event.type === "connect" ? command.event.connection.id : undefined
-                    )
-                ]
-                this.database.commit()
+            if (this.fatal !== undefined) return this.fatal
+            validateActorState(instance, this.definition.state)
+            const state = this.database.fields()
+            const effects = [
+                ...execution.effects,
+                ...this.stateUpdates(
+                    before,
+                    state,
+                    command.event.type === "connect" ? command.event.connection.id : undefined
+                )
+            ]
+            this.database.commit()
 
-                return {
-                    type: "websocket_handled",
-                    ...this.completionOrder(),
-                    effects: socketEffects(command, state, effects, this.definition.state)
-                }
-            })
+            return {
+                type: "websocket_handled",
+                ...this.completionOrder(),
+                effects: socketEffects(command, state, effects, this.definition.state)
+            }
         } catch (error) {
             if (error instanceof DatabaseCommitError) {
                 this.fatal = failedReply("actor_database_failed", errorMessage(error))
@@ -222,21 +216,6 @@ class ActorRuntime {
     private async prepare(command: ActorWorkerCommand): Promise<AnyActor> {
         if (this.instance !== undefined) return this.instance
         return await this.createInstance(command.actor, this.database.fields())
-    }
-
-    private completeInOrder(operation: () => Promise<ActorExecutorReply>): Promise<ActorExecutorReply> {
-        const completed = this.completion.then(async () => {
-            if (this.fatal !== undefined) return this.fatal
-            try {
-                return await operation()
-            } catch (error) {
-                if (error instanceof DatabaseCommitError)
-                    this.fatal = failedReply("actor_database_failed", errorMessage(error))
-                throw error
-            }
-        })
-        this.completion = completed.catch(() => undefined)
-        return completed
     }
 
     private async restoreInstance(identity: ActorIdentity): Promise<void> {

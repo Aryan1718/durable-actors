@@ -1,7 +1,7 @@
 import { ActorDefinitionError, ActorValidationError } from "../errors.js"
 
 import type { ActorAlarm, ActorAlarmStorage } from "./alarm.js"
-import type { ActorDatabase, SqliteValue } from "./database.js"
+import type { ActorDatabase } from "./database.js"
 import { isActorInvocation } from "./database.js"
 import { validateActorComponent } from "./identity.js"
 
@@ -22,8 +22,8 @@ class RuntimeActorContext implements ActorContext {
 
     private constructor(actorId: string, database?: ActorDatabase & ActorAlarmStorage) {
         this.actorId = validateActorComponent("actor ID", actorId)
-        this.#database = database && this.guard(database)
-        this.#alarm = database && this.guardAlarm(database)
+        this.#database = database
+        this.#alarm = database && alarm(database)
     }
 
     static runtime(actorId: string, database: ActorDatabase & ActorAlarmStorage): RuntimeActorContext {
@@ -67,35 +67,19 @@ class RuntimeActorContext implements ActorContext {
 
     assertAccess(): void {
         if (this.#constructing || (this.#actor !== undefined && isActorInvocation(this.#actor))) return
-        throw new ActorDefinitionError("actor database is unavailable outside its invocation")
+        throw new ActorDefinitionError("persisted actor fields cannot change outside its invocation")
     }
+}
 
-    private guard(database: ActorDatabase): ActorDatabase {
-        return {
-            exec: <Row extends object>(sql: string, ...bindings: SqliteValue[]): Row[] => {
-                this.assertAccess()
-                return database.exec<Row>(sql, ...bindings)
-            }
-        }
-    }
-
-    private guardAlarm(alarm: ActorAlarmStorage): ActorAlarm {
-        return {
-            get: () => {
-                this.assertAccess()
-                return alarm.getAlarmState().timestampMs
-            },
-            set: timestampMs => {
-                this.assertAccess()
-                if (!Number.isSafeInteger(timestampMs))
-                    throw new ActorValidationError("actor alarm timestamp must be a safe integer")
-                alarm.setAlarm(timestampMs)
-            },
-            delete: () => {
-                this.assertAccess()
-                alarm.deleteAlarm()
-            }
-        }
+function alarm(storage: ActorAlarmStorage): ActorAlarm {
+    return {
+        get: () => storage.getAlarmState().timestampMs,
+        set: timestampMs => {
+            if (!Number.isSafeInteger(timestampMs))
+                throw new ActorValidationError("actor alarm timestamp must be a safe integer")
+            storage.setAlarm(timestampMs)
+        },
+        delete: () => storage.deleteAlarm()
     }
 }
 

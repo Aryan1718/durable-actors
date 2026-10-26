@@ -1883,7 +1883,7 @@ async fn invalid_socket_effects_do_not_commit_actor_state() -> Result<()> {
 }
 
 #[tokio::test]
-async fn publishes_automatic_state_after_commit_before_returning_to_rpc_callers() -> Result<()> {
+async fn publishes_automatic_state_after_commit() -> Result<()> {
     struct Emitter;
     #[async_trait]
     impl ActorExecutor for Emitter {
@@ -1907,7 +1907,7 @@ async fn publishes_automatic_state_after_commit_before_returning_to_rpc_callers(
     }
     struct Publisher {
         state: Arc<FakeStateTransport>,
-        values: Mutex<Vec<Value>>,
+        values: tokio::sync::mpsc::UnboundedSender<Value>,
     }
     #[async_trait]
     impl crate::actor::ActorSocketPublisher for Publisher {
@@ -1921,15 +1921,16 @@ async fn publishes_automatic_state_after_commit_before_returning_to_rpc_callers(
             .state_version;
             let value = serde_json::to_value(effects)?;
             assert_eq!(value[0]["version"], version);
-            self.values.lock().unwrap().push(value);
+            self.values.send(value)?;
             Ok(())
         }
     }
     let authority = Arc::new(FakeAuthority::default());
     let state = Arc::new(FakeStateTransport::default());
+    let (values, mut published) = tokio::sync::mpsc::unbounded_channel();
     let publisher = Arc::new(Publisher {
         state: state.clone(),
-        values: Mutex::new(vec![]),
+        values,
     });
     let host = create_host(
         HostEndpoint {
@@ -1944,18 +1945,19 @@ async fn publishes_automatic_state_after_commit_before_returning_to_rpc_callers(
     );
     assert_eq!(invoke(&host, "one").await?, completed(1));
     assert_eq!(invoke(&host, "two").await?, completed(2));
-    {
-        let values = publisher.values.lock().unwrap();
-        assert_eq!(values.len(), 2);
-        assert_eq!(values[0][0]["changes"]["count"], 1);
-        assert_eq!(values[1][0]["changes"]["count"], 2);
+    let mut counts = Vec::new();
+    for _ in 0..2 {
+        let value = tokio::time::timeout(Duration::from_secs(1), published.recv()).await?;
+        counts.push(value.unwrap()[0]["changes"]["count"].as_u64());
     }
+    counts.sort();
+    assert_eq!(counts, [Some(1), Some(2)]);
     state.failures.store(1, Ordering::SeqCst);
     assert!(matches!(
         invoke(&host, "failed").await?,
         ActorExecutionResult::Failed { .. }
     ));
-    assert_eq!(publisher.values.lock().unwrap().len(), 2);
+    assert!(published.try_recv().is_err());
     Ok(())
 }
 
@@ -2303,6 +2305,114 @@ async fn database_handles_expire_with_their_invocation() -> Result<()> {
     let retained = executor.0.lock().unwrap().clone().unwrap();
     let error = retained.call(DatabaseCall::Fields).await.unwrap_err();
     assert!(error.to_string().contains("no active invocation"));
+    host.drain(Duration::from_secs(1)).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn background_database_writes_outlive_invocations() -> Result<()> {
+    let endpoint = HostEndpoint {
+        id: super::super::HostId::new("host-1"),
+        route: "http://host.invalid/".into(),
+    };
+    let writes = Arc::new(FakeStateTransport::default());
+    let database = HostDatabase::new(
+        endpoint.clone(),
+        Arc::new(FakeAuthority::default()),
+        writes.clone(),
+        replication().await,
+    );
+    let background = database.background(counter());
+    let host = ActorHost::new(
+        endpoint,
+        counter(),
+        Arc::new(IncrementingExecutor {
+            invocations: AtomicU64::new(0),
+        }),
+        database,
+        Arc::new(EmptySocketPublisher),
+    );
+    assert_eq!(invoke(&host, "request-1").await?, completed(1));
+    persist_fields(&*background, json!({"count": 5}), true).await?;
+    assert_eq!(invoke(&host, "request-2").await?, completed(6));
+    let background_writes = writes
+        .writes
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|bytes| StateSnapshot::decode(bytes))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .filter(|snapshot| snapshot.request_id == "background")
+        .count();
+    assert_eq!(background_writes, 1);
+    host.drain(Duration::from_secs(1)).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn background_database_follows_the_owner_epoch_across_activations() -> Result<()> {
+    struct Executor;
+    #[async_trait]
+    impl ActorExecutor for Executor {
+        fn supports(&self, _: &str) -> bool {
+            true
+        }
+        async fn invoke(
+            &self,
+            invocation: ActorMethodInvocation,
+            database: Arc<dyn ActorDatabase>,
+        ) -> Result<ActorMethodOutcome> {
+            if invocation.method == "reset" {
+                return Ok(ActorMethodOutcome::Failed(
+                    crate::actor::ActorInvocationFailure {
+                        code: "actor_worker_failed".into(),
+                        message: "reset".into(),
+                    },
+                ));
+            }
+            increment(&*database).await
+        }
+    }
+    let endpoint = HostEndpoint {
+        id: super::super::HostId::new("host-1"),
+        route: "http://host.invalid/".into(),
+    };
+    let database = HostDatabase::new(
+        endpoint.clone(),
+        Arc::new(FakeAuthority::default()),
+        Arc::new(FakeStateTransport::default()),
+        replication().await,
+    );
+    let background = database.background(counter());
+    let host = ActorHost::new(
+        endpoint,
+        counter(),
+        Arc::new(Executor),
+        database,
+        Arc::new(EmptySocketPublisher),
+    );
+    let call = |method: &'static str, owner_epoch: u64| {
+        host.invoke_actor(
+            ActorInvocation {
+                request_id: method.into(),
+                actor: counter(),
+                method: method.into(),
+                args: Vec::new(),
+            },
+            owner_epoch,
+            HostState::Warm,
+            0.0,
+        )
+    };
+    assert_eq!(call("first", 1).await.0?, completed(1));
+    assert!(matches!(
+        call("reset", 1).await.0?,
+        ActorExecutionResult::Failed { .. }
+    ));
+    assert_eq!(call("second", 2).await.0?, completed(1));
+    persist_fields(&*background, json!({"count": 5}), true).await?;
+    assert_eq!(call("third", 2).await.0?, completed(6));
     host.drain(Duration::from_secs(1)).await?;
     Ok(())
 }

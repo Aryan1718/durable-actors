@@ -42,8 +42,8 @@ async fn s3_image_hosts_bootstrap_and_refresh_without_gcs_artifact_access() -> R
         actor_name: "Counter".into(),
         actor_id: "one".into(),
     };
-    let (lease, epoch) = provisioner
-        .ensure_actor_host(&spec, "north-america-west", &actor, true, None)
+    let (lease, epoch, _) = provisioner
+        .ensure_actor_host(&spec, "north-america-west", &actor, true, None, None)
         .await?;
     assert_eq!(epoch, 1);
     let placements = Arc::new(LocalObjectPlacementStore::default());
@@ -125,6 +125,7 @@ impl SandboxProvider for ImageHost {
             route,
             canonical_region: request.canonical_region.clone(),
             provisioning: None,
+            initial_reply: None,
         })
     }
 

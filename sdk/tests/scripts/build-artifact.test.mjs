@@ -162,12 +162,12 @@ test("built actors run without source, compiler, or TypeScript loader", { timeou
             } catch (error) {
                 reply = { error: error.message }
             }
-            send({ type: "database_result", message_id: message.message_id, ...reply })
+            send({ type: "database_result", call_id: message.call_id, ...reply })
         }
     }
-    assert.deepEqual(await receive(), { type: "attach", protocol: 28, actor_names: ["BuiltCounter"] })
+    assert.deepEqual(await receive(), { type: "attach", protocol: 30, actor_names: ["BuiltCounter"] })
     const send = message => socket.write(JSON.stringify(message) + "\n")
-    send({ type: "attached", protocol: 28, actor: { project_id: "default", actor_name: "BuiltCounter", actor_id: "counter" } })
+    send({ type: "attached", protocol: 30, actor: { project_id: "default", actor_name: "BuiltCounter", actor_id: "counter" } })
     const invoke = messageId =>
         send({
             type: "command",

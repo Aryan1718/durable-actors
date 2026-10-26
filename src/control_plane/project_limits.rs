@@ -111,6 +111,13 @@ impl ActorAdmission {
         reserve.await.context(AdmissionFailure)
     }
 
+    pub async fn release(&self, actor: &ActorKey, host: &HostId, session: &str) {
+        let activation = Activation::new(actor, host.as_str(), session);
+        if let Err(error) = self.reservations.release(&activation).await {
+            tracing::warn!(project_id = %actor.project_id, error = %format!("{error:#}"), "failed launch kept its activation slot");
+        }
+    }
+
     async fn limits(&self, project: &str) -> Result<ProjectLimits> {
         let Some(database) = &self.database else {
             return Ok(self.defaults);
@@ -151,6 +158,7 @@ impl LifecycleObserver for ActorAdmission {
 #[async_trait]
 pub(super) trait ReservationStore: Send + Sync {
     async fn reserve(&self, activation: &Activation, limits: ProjectLimits) -> Result<()>;
+    async fn release(&self, activation: &Activation) -> Result<()>;
     async fn observe(&self, event: &LifecycleEvent) -> Result<()>;
 }
 

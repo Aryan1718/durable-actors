@@ -110,6 +110,7 @@ fn controlled(
             .iter()
             .map(|z| z.clone() as Arc<dyn LogZone>)
             .collect(),
+        f.placement,
         ArchiveBatchConfig { bytes, interval_ms },
         Arc::new(crate::litestream::compaction::RustCompactor),
         CancellationToken::new(),
@@ -803,7 +804,7 @@ async fn archiver_finishes_when_another_worker_archived_and_cleaned_its_backlog(
     let f = Fixture::new()?;
     let threshold = state(1, 1)?.len() + frame::HEADER;
     let (store, archive) = controlled(&f, threshold, 60_000)?;
-    let mut segment = Segment::open(&store.storage, f.stream.clone(), 1)
+    let mut segment = Segment::open(&store.storage, f.stream.clone(), 1, None)
         .await?
         .unwrap();
     let manifest = segment.manifest.clone();

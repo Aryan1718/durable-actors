@@ -53,15 +53,11 @@ impl Gateway {
         actor: &ActorKey,
         epoch: u64,
         authorization: &str,
-    ) -> Result<(String, crate::host::HostId, String)> {
+    ) -> Result<String> {
         let principal = self.invocations.authenticate_authorization(authorization)?;
         let capability = validated_capability(actor, &principal)?;
         ensure!(capability.owner_epoch == epoch, "invalid owner epoch");
-        Ok((
-            backend_origin(&capability.route)?.to_string(),
-            principal.host_id,
-            principal.session_id,
-        ))
+        Ok(backend_origin(&capability.route)?.to_string())
     }
 
     pub fn authorize_publish(&self, actor: &ActorKey, authorization: &str) -> Result<u64> {
@@ -134,16 +130,6 @@ async fn connect(
         .sockets
         .verify(&key)
         .map_err(|_| StatusCode::UNAUTHORIZED)?;
-    service
-        .ensure_project_access(&ticket.actor.project_id)
-        .await
-        .map_err(|error| {
-            if error.is::<super::access::AccessDisabled>() {
-                StatusCode::FORBIDDEN
-            } else {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-        })?;
     let connections = gateway.connections.clone();
     if !connections.accepts_sockets {
         return Err(StatusCode::SERVICE_UNAVAILABLE);

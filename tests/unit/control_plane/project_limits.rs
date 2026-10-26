@@ -98,6 +98,20 @@ async fn reservations_enforce_capacity_until_the_actor_stops() -> Result<()> {
 }
 
 #[tokio::test]
+async fn releasing_a_failed_launch_frees_capacity() -> Result<()> {
+    for store in stores()? {
+        let limits = limits(1, 50, 100);
+        let failed = activation("p", "one", "failed");
+        let next = activation("p", "two", "next");
+        store.reserve(&failed, limits).await?;
+        assert_quota(store.reserve(&next, limits).await, 1);
+        store.release(&failed).await?;
+        store.reserve(&next, limits).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn stopping_frees_capacity_but_waking_again_consumes_another_start_token() -> Result<()> {
     let clock = Arc::new(TestClock(AtomicU64::new(1000)));
     let store = MemoryReservations::new(clock.clone(), RETENTION);

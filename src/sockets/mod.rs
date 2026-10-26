@@ -119,6 +119,17 @@ impl SocketRegistry {
         }
     }
 
+    pub(crate) async fn close_all(&self, code: u16, reason: &str) {
+        for sockets in self.entries.read().await.values() {
+            for entry in sockets.values() {
+                let _ = entry.outbound.send(OutboundMessage::Close {
+                    code,
+                    reason: reason.into(),
+                });
+            }
+        }
+    }
+
     pub(crate) async fn inventory(
         &self,
         project: &str,

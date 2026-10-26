@@ -1,3 +1,7 @@
+<a href="https://useterse.ai/">
+  <img src=".github/assets/terse-logo.svg" alt="Terse logo" width="96">
+</a>
+
 # Durable Actors
 
 > _an open-source alternative to Cloudflare Durable Objects... with no vendor lock-in, memory limits, and observability built in._
