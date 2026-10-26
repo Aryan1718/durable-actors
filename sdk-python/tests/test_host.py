@@ -86,7 +86,7 @@ class Counter(Actor):
                 host = ExecutorHost(reader, writer, database)
                 try:
                     if generic:
-                        assert await host.receive() == {"type": "warm", "protocol": 29}
+                        assert await host.receive() == {"type": "warm", "protocol": 30}
                         host.send(
                             {
                                 "type": "load",
@@ -96,10 +96,10 @@ class Counter(Actor):
                         )
                     assert await host.receive() == {
                         "type": "attach",
-                        "protocol": 29,
+                        "protocol": 30,
                         "actor_names": ["Counter"],
                     }
-                    host.send({"type": "attached", "protocol": 29, "actor": actor})
+                    host.send({"type": "attached", "protocol": 30, "actor": actor})
                     host.send(
                         {
                             "type": "command",
@@ -192,7 +192,7 @@ class Counter(Actor):
                 receive, send = host.receive, host.send
                 assert (await receive())["type"] == "attach"
                 actor = {"project_id": "local", "actor_name": "Counter", "actor_id": "one"}
-                send({"type": "attached", "protocol": 29, "actor": actor})
+                send({"type": "attached", "protocol": 30, "actor": actor})
                 invocation = {
                     "type": "invoke",
                     "request_id": "r1",
@@ -232,7 +232,6 @@ class Counter(Actor):
                         "command": {"type": "evict"},
                     }
                 )
-                send({"type": "socket_effects_published", "message_id": 1})
                 replies = [await receive(), await receive()]
                 outcomes = {reply["message_id"]: reply["reply"] for reply in replies}
                 assert outcomes[1]["code"] == "actor_evicted"

@@ -25,7 +25,7 @@ interface ActorSocket<Metadata = JsonValue, Outgoing = JsonValue, Tag extends st
     metadata: Metadata
     readonly tags: readonly Tag[]
     readonly state: ActorSocketState
-    /** Sends JSON. Throws if closed. Delivery does not confirm saved state. */
+    /** Sends JSON. Throws if closed. Delivery does not confirm saved state, and messages may arrive out of order. */
     send(message: Outgoing): void
     /**
      * @param code - Defaults to 1000; accepts 1000 or application codes 3000–4999.
@@ -110,13 +110,13 @@ async function runWithActorSockets<T>(
     instance: object,
     connections: readonly SocketConnection[] | SocketSource,
     operation: (scope: ActorSocketScope) => Promise<T>,
-    publish?: (effects: readonly SocketEffect[]) => Promise<void>,
+    publish?: (effects: readonly SocketEffect[]) => void,
     schemas: ActorSchemas = {},
     eventConnections: readonly SocketConnection[] = []
 ): Promise<{ readonly value: T; readonly effects: readonly SocketEffect[] }> {
     const effects: SocketEffect[] = []
-    const output = publish === undefined ? undefined : new SocketOutput(publish)
-    const scope = new ActorSocketScope(connections, output ?? effects, schemas, eventConnections)
+    const output = publish === undefined ? effects : publishing(publish)
+    const scope = new ActorSocketScope(connections, output, schemas, eventConnections)
     const context = { instance, scope, active: true }
     return scopes.run(context, async () => {
         try {
@@ -124,7 +124,6 @@ async function runWithActorSockets<T>(
         } finally {
             context.active = false
             await scope.settle()
-            await output?.flush()
         }
     })
 }
@@ -312,38 +311,11 @@ class RuntimeActorSocket<Metadata = JsonValue> implements ActorSocket<Metadata> 
     }
 }
 
-class SocketOutput {
-    private pending: Promise<void> | undefined
-    private queued: SocketEffect[] = []
-    private failure: unknown
-
-    constructor(private readonly publish: (effects: readonly SocketEffect[]) => Promise<void>) {}
-
-    push(...effects: SocketEffect[]): number {
-        if (this.failure !== undefined) throw this.failure
-        this.queued.push(...effects)
-        this.pending ??= this.drain()
-        void this.pending.catch(() => undefined)
-        return this.queued.length
-    }
-
-    async flush(): Promise<void> {
-        await this.pending
-        if (this.failure !== undefined) throw this.failure
-    }
-
-    private async drain(): Promise<void> {
-        try {
-            while (this.queued.length > 0) {
-                const batch = this.queued
-                this.queued = []
-                await this.publish(batch)
-            }
-        } catch (error) {
-            this.failure = error
-            throw error
-        } finally {
-            this.pending = undefined
+function publishing(publish: (effects: readonly SocketEffect[]) => void): Pick<SocketEffect[], "push"> {
+    return {
+        push(...effects) {
+            publish(effects)
+            return effects.length
         }
     }
 }

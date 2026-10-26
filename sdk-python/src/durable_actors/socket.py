@@ -24,7 +24,7 @@ T = TypeVar("T")
 
 
 class Effects(Protocol):
-    async def publish(self, effects: list[Document]) -> None: ...
+    def publish(self, effects: list[Document]) -> None: ...
     async def get_connections(
         self, tag: str | None = None, count_only: bool = False
     ) -> list[Document] | int: ...
@@ -87,7 +87,9 @@ class ActorSocket(Generic[Metadata, Outgoing, Tag]):
         return self._tags
 
     def send(self, message: Outgoing) -> None:
-        """Queue a value matching the actor's outgoing application-message type.
+        """Send a value matching the actor's outgoing application-message type.
+
+        Messages may arrive out of order.
 
         Incoming WebSocket messages are limited to 32 MiB. The top-level message types
         "state" and "state_update" are reserved for emitted state.
@@ -155,8 +157,6 @@ class SocketScope:
         self.live = live
         self.active = True
         self.pending: list[Document] = []
-        self.output: asyncio.Task[None] | None = None
-        self.failure: Exception | None = None
         self.sockets: dict[str, ActorSocket[Any, Any, Any]] = {}
         for connection in connections or []:
             self.socket(connection)
@@ -181,8 +181,6 @@ class SocketScope:
         self.active = False
         for request in self.requests:
             request.cancel()
-        if self.output is not None:
-            self.output.cancel()
 
     async def get_connections(self, tag: str | None = None) -> list[ActorSocket[Any, Any, Any]]:
         self.ensure_active()
@@ -254,31 +252,16 @@ class SocketScope:
             self.blocking(partial(self.enqueue, effect))
             return
         self.ensure_active()
-        if self.failure:
-            raise self.failure
-        self.pending.append(effect)
-        if self.live and self.output is None:
-            self.output = asyncio.create_task(self.drain())
+        if self.live:
+            self.effects.publish([effect])
+        else:
+            self.pending.append(effect)
 
     async def enqueue(self, effect: Document) -> None:
         self.push(effect)
 
-    async def finish(self) -> list[Document]:
-        if self.output is not None:
-            await self.output
-        if self.failure:
-            raise self.failure
+    def finish(self) -> list[Document]:
         return list(self.pending)
-
-    async def drain(self) -> None:
-        try:
-            while self.pending:
-                batch, self.pending = self.pending, []
-                await self.effects.publish(batch)
-        except Exception as error:
-            self.failure = error
-        finally:
-            self.output = None
 
     def ensure_active(self) -> None:
         if not self.active:

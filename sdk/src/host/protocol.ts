@@ -79,16 +79,11 @@ const actorSessionServerMessageSchema = z.discriminatedUnion("type", [
             error: z.string().optional()
         })
         .refine(message => (message.result === undefined) !== (message.error === undefined)),
-    z.object({ type: z.literal("attached"), protocol: z.literal(29), actor: actorIdentitySchema }),
+    z.object({ type: z.literal("attached"), protocol: z.literal(30), actor: actorIdentitySchema }),
     z.object({
         type: z.literal("socket_connections"),
         message_id: z.number().int().nonnegative(),
         connections: z.union([z.array(socketConnectionSchema), z.number().int().nonnegative()]),
-        error: z.string().optional()
-    }),
-    z.object({
-        type: z.literal("socket_effects_published"),
-        message_id: z.number().int().nonnegative(),
         error: z.string().optional()
     }),
     z.object({
@@ -122,7 +117,7 @@ type ActorSessionClientMessage =
 
 interface AttachMessage {
     readonly type: "attach"
-    readonly protocol: 29
+    readonly protocol: 30
     readonly actor_names: readonly string[]
 }
 
@@ -171,7 +166,6 @@ type ActorWorkerRequest =
           readonly messageId: number
           readonly command: ActorWorkerCommand
       }
-    | { readonly type: "socket_effects_published"; readonly messageId: number; readonly error?: string }
     | {
           readonly type: "socket_connections"
           readonly messageId: number

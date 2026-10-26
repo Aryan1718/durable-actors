@@ -11,20 +11,20 @@ async fn generic_executor_connects_before_code_and_hydrates_after_assignment() -
     let listener = ActorExecutorListener::bind(&path).await?;
     let peer = tokio::spawn(async move {
         let mut socket = BufReader::new(tokio::net::UnixStream::connect(path).await?);
-        write_json_line(&mut socket, &json!({"type":"warm","protocol":29})).await?;
+        write_json_line(&mut socket, &json!({"type":"warm","protocol":30})).await?;
         let load = read_json_line(&mut socket).await?;
         assert_eq!(load["entrypoint"], "/customer/actors.mjs");
         assert_eq!(load["environment"]["CUSTOMER_KEY"], "value");
         write_json_line(
             &mut socket,
-            &json!({"type":"attach","protocol":29,"actor_names":["counter"]}),
+            &json!({"type":"attach","protocol":30,"actor_names":["counter"]}),
         )
         .await?;
         assert_eq!(
             read_json_line(&mut socket).await?,
             json!({
                 "type": "attached",
-                "protocol": 29,
+                "protocol": 30,
                 "actor": {"project_id": "default", "actor_name": "counter", "actor_id": "one"}
             })
         );
@@ -92,7 +92,7 @@ async fn residency_reports_are_separate_from_invocation_cache_hints() -> Result<
     let mut peer = BufReader::new(UnixStream::connect(&socket).await?);
     write_json_line(
         &mut peer,
-        &json!({"type":"attach", "protocol":29, "actor_names":["Room"]}),
+        &json!({"type":"attach", "protocol":30, "actor_names":["Room"]}),
     )
     .await?;
     let connection = listener.accept().await?;
@@ -308,7 +308,7 @@ async fn shutdown_does_not_wait_for_a_peer_that_stopped_reading() -> Result<()> 
         let mut stream = BufReader::new(stream);
         write_json_line(
             &mut stream,
-            &json!({"type":"attach", "protocol":29, "actor_names":["counter"]}),
+            &json!({"type":"attach", "protocol":30, "actor_names":["counter"]}),
         )
         .await?;
         let _ = read_json_line(&mut stream).await?;
@@ -699,13 +699,13 @@ async fn run_incrementing_customer(socket: PathBuf) -> Result<()> {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
     writer
-        .write_all(b"{\"type\":\"attach\",\"protocol\":29,\"actor_names\":[\"counter\"]}\n")
+        .write_all(b"{\"type\":\"attach\",\"protocol\":30,\"actor_names\":[\"counter\"]}\n")
         .await?;
     ensure!(
         read_json_line(&mut reader).await?
             == json!({
                 "type": "attached",
-                "protocol": 29,
+                "protocol": 30,
                 "actor": {"project_id": "default", "actor_name": "counter", "actor_id": "one"}
             })
     );

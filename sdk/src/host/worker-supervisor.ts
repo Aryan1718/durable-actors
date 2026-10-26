@@ -1,7 +1,7 @@
 import { Worker } from "node:worker_threads"
 
 import type { ActorIdentity } from "../actor/identity.js"
-import type { SocketEffect, SocketQuery } from "../actor/socketProtocol.js"
+import type { SocketQuery } from "../actor/socketProtocol.js"
 import { errorMessage } from "../errors.js"
 
 import type { DatabaseRequest } from "./database-bridge.js"
@@ -110,7 +110,7 @@ class ActorWorker implements ActorWorkerHandle {
                 void this.loadConnections(message.messageId, message.query)
                 return
             case "socket_effects":
-                void this.publishEffects(message.messageId, message.effects)
+                this.pending.get(message.messageId)?.publish?.(message.effects)
                 return
             case "failed":
                 this.stop(new Error(message.message))
@@ -198,17 +198,6 @@ class ActorWorker implements ActorWorkerHandle {
             completeDatabaseCall(request, { error: errorMessage(error) })
         } finally {
             this.databaseCalls.delete(request)
-        }
-    }
-
-    private async publishEffects(messageId: number, effects: readonly SocketEffect[]): Promise<void> {
-        try {
-            const publish = this.pending.get(messageId)?.publish
-            if (publish === undefined) throw new Error("actor socket publishing is unavailable")
-            await publish(effects)
-            this.post({ type: "socket_effects_published", messageId })
-        } catch (error) {
-            this.post({ type: "socket_effects_published", messageId, error: errorMessage(error) })
         }
     }
 

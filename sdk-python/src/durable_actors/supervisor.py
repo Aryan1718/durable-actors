@@ -50,7 +50,7 @@ class Supervisor(Channel):
 
         try:
             if generic:
-                await self.send({"type": "warm", "protocol": 29})
+                await self.send({"type": "warm", "protocol": 30})
                 load = await self.read()
                 if load.get("type") != "load":
                     raise ValueError("expected actor code assignment")
@@ -63,7 +63,7 @@ class Supervisor(Channel):
             self.entrypoint = entrypoint
             self.worker = await self.create_worker(entrypoint, self.environment)
             self.actor_names = self.worker.actor_names
-            await self.send({"type": "attach", "protocol": 29, "actor_names": self.actor_names})
+            await self.send({"type": "attach", "protocol": 30, "actor_names": self.actor_names})
             self.attached = await self.read()
             attached_actor(self.attached, self.actor_names)
             await self.start_pump()
@@ -135,13 +135,11 @@ class Supervisor(Channel):
                     pending.reply = reply
                     await self.complete(identifier)
                 else:
-                    if kind == "socket_effects":
-                        pending.exchanges.add("socket_effects_published")
-                    elif kind == "database_call":
+                    if kind == "database_call":
                         pending.exchanges.add("database_result")
                     elif kind == "get_connections":
                         pending.exchanges.add("socket_connections")
-                    elif kind != "ready_for_invocation":
+                    elif kind not in {"ready_for_invocation", "socket_effects"}:
                         raise ValueError("unexpected worker message")
                     await self.send(message)
         except (EOFError, ConnectionError, ValueError, KeyError) as error:
@@ -210,7 +208,7 @@ class Worker(Channel):
             worker = cls(reader, writer, process)
             async with asyncio.timeout(60):
                 attach = await worker.read()
-            if attach.get("type") != "attach" or attach.get("protocol") != 29:
+            if attach.get("type") != "attach" or attach.get("protocol") != 30:
                 raise ValueError("worker did not attach")
             worker.actor_names = attach["actor_names"]
             return worker

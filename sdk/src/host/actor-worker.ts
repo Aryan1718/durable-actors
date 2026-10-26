@@ -28,7 +28,6 @@ process.once("exit", () => {
 
 let assigned = false
 const invocation = new AsyncLocalStorage<number>()
-const publishing = new Map<number, { resolve: () => void; reject: (error: Error) => void }>()
 const loadingConnections = new Map<
     number,
     { resolve: (connections: SocketLookup) => void; reject: (error: Error) => void }
@@ -54,13 +53,6 @@ async function initialize(data: ActorWorkerData): Promise<void> {
                 const pending = loadingConnections.get(message.messageId)
                 loadingConnections.delete(message.messageId)
                 if (message.error === undefined) pending?.resolve(message.connections)
-                else pending?.reject(new Error(message.error))
-                return
-            }
-            if (message.type === "socket_effects_published") {
-                const pending = publishing.get(message.messageId)
-                publishing.delete(message.messageId)
-                if (message.error === undefined) pending?.resolve()
                 else pending?.reject(new Error(message.error))
                 return
             }
@@ -117,14 +109,10 @@ function callDatabase(call: DatabaseCall): DatabaseResult {
     return requestDatabaseCall(request => post({ type: "database_call", messageId, call, request }, [request.port]))
 }
 
-function publish(effects: readonly SocketEffect[]): Promise<void> {
-    return new Promise((resolve, reject) => {
-        const messageId = invocation.getStore()
-        if (messageId === undefined) throw new Error("socket output has no active invocation")
-        if (publishing.has(messageId)) throw new Error("actor socket output is already being published")
-        publishing.set(messageId, { resolve, reject })
-        post({ type: "socket_effects", messageId, effects })
-    })
+function publish(effects: readonly SocketEffect[]): void {
+    const messageId = invocation.getStore()
+    if (messageId === undefined) throw new Error("socket output has no active invocation")
+    post({ type: "socket_effects", messageId, effects })
 }
 
 function getConnections(query?: SocketQuery): Promise<SocketLookup> {

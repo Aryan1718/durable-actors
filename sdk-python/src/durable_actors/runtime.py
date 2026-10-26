@@ -143,7 +143,7 @@ class ActorRuntime:
             task = asyncio.current_task()
             if task is not None and task.cancelling():
                 raise asyncio.CancelledError
-            effects = await scope.finish()
+            effects = scope.finish()
             async with self.completion:
                 if self.fatal is not None:
                     return self.fatal
@@ -180,15 +180,7 @@ class ActorRuntime:
             )
         finally:
             scope.active = False
-            try:
-                output = scope.output
-                if output is not None:
-                    task = asyncio.current_task()
-                    if task is not None and task.cancelling():
-                        output.cancel()
-                    await asyncio.gather(output, return_exceptions=True)
-            finally:
-                scope_context.reset(token)
+            scope_context.reset(token)
 
     def state_updates(self, before: Document, after: Document, command: Document) -> list[Document]:
         fields = self.definition.fields

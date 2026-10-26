@@ -10,7 +10,7 @@ interface ActorHostSettings {
     readonly startupTimeoutMs: number
 }
 
-type SocketPublisher = (effects: readonly SocketEffect[]) => Promise<void>
+type SocketPublisher = (effects: readonly SocketEffect[]) => void
 
 type DatabaseRequester = (call: DatabaseCall) => Promise<DatabaseResult>
 

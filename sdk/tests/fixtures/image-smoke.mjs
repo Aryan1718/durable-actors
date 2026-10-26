@@ -81,10 +81,10 @@ try {
             else if (message.type !== "residency") return message
         }
     }
-    assert.deepEqual(await receive(), { type: "warm", protocol: 29 })
+    assert.deepEqual(await receive(), { type: "warm", protocol: 30 })
     send({ type: "load", entrypoint, environment: {} })
-    assert.deepEqual(await receive(), { type: "attach", protocol: 29, actor_names: ["Counter"] })
-    send({ type: "attached", protocol: 29, actor: { project_id: "default", actor_name: "Counter", actor_id: "one" } })
+    assert.deepEqual(await receive(), { type: "attach", protocol: 30, actor_names: ["Counter"] })
+    send({ type: "attached", protocol: 30, actor: { project_id: "default", actor_name: "Counter", actor_id: "one" } })
     for (let expected = 1; expected <= 2; expected++) {
         send({
             type: "command",

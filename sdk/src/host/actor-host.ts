@@ -95,7 +95,6 @@ class ActorSessionConnection {
         { resolve: (result: DatabaseResult) => void; reject: (error: Error) => void }
     >()
     private nextDatabaseCallId = 0
-    private readonly publishing = new Map<number, { resolve: () => void; reject: (error: Error) => void }>()
     private readonly loadingConnections = new Map<
         number,
         { resolve: (connections: SocketLookup) => void; reject: (error: Error) => void }
@@ -114,7 +113,7 @@ class ActorSessionConnection {
         const connection = new ActorSessionConnection(socket, supervisor)
         connection.send({
             type: "attach",
-            protocol: 29,
+            protocol: 30,
             actor_names: actorNames
         })
         await connection.waitUntilAttached(timeoutMs)
@@ -218,15 +217,6 @@ class ActorSessionConnection {
                     else pending.reject(new ActorSessionError(message.error))
                     break
                 }
-                case "socket_effects_published": {
-                    const pending = this.publishing.get(message.message_id)
-                    if (pending === undefined)
-                        throw new ActorProtocolError("Rust host acknowledged unknown socket output")
-                    this.publishing.delete(message.message_id)
-                    if (message.error === undefined) pending.resolve()
-                    else pending.reject(new ActorSessionError(message.error))
-                    break
-                }
                 default:
                     throw message satisfies never
             }
@@ -264,18 +254,8 @@ class ActorSessionConnection {
         })
     }
 
-    private publish(messageId: number, effects: readonly SocketEffect[]): Promise<void> {
-        return new Promise((resolve, reject) => {
-            if (this.publishing.has(messageId))
-                throw new ActorProtocolError("actor socket output is already being published")
-            this.publishing.set(messageId, { resolve, reject })
-            try {
-                this.send({ type: "socket_effects", message_id: messageId, effects })
-            } catch (error) {
-                this.publishing.delete(messageId)
-                reject(sessionError(error))
-            }
-        })
+    private publish(messageId: number, effects: readonly SocketEffect[]): void {
+        this.send({ type: "socket_effects", message_id: messageId, effects })
     }
 
     private getConnections(messageId: number, query?: SocketQuery): Promise<SocketLookup> {
@@ -317,9 +297,6 @@ class ActorSessionConnection {
         for (const pending of this.loadingConnections.values())
             pending.reject(new ActorSessionError("Rust host disconnected while loading connections"))
         this.loadingConnections.clear()
-        for (const pending of this.publishing.values())
-            pending.reject(new ActorSessionError("Rust host disconnected while publishing socket output"))
-        this.publishing.clear()
         this.attachedReject?.(new ActorSessionError("Rust host disconnected from actor session"))
         this.attachedResolve = undefined
         this.attachedReject = undefined

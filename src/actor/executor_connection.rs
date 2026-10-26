@@ -20,14 +20,14 @@ use tokio::{
     task::{JoinHandle, JoinSet},
 };
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use super::{
     ActorDatabase, ActorInvocationFailure, ActorKey, ActorSocketSource, DatabaseCall,
     DatabaseResult,
 };
 
-const ACTOR_EXECUTOR_PROTOCOL_VERSION: u32 = 29;
+const ACTOR_EXECUTOR_PROTOCOL_VERSION: u32 = 30;
 const MAX_PENDING_EXECUTOR_COMMANDS: usize = 64;
 
 #[derive(Debug, Serialize)]
@@ -584,8 +584,6 @@ async fn run_executor_connection(
         publisher: None,
         sockets: None,
         database: None,
-        publishing: JoinSet::new(),
-        publishing_ids: HashSet::new(),
         loading_connections: JoinSet::new(),
         connection_lookup_ids: HashSet::new(),
         database_calls: JoinSet::new(),
@@ -609,8 +607,6 @@ struct ExecutorDriver {
     publisher: Option<Arc<dyn ActorSocketPublisher>>,
     sockets: Option<Arc<dyn ActorSocketSource>>,
     database: Option<Arc<dyn ActorDatabase>>,
-    publishing: JoinSet<(u64, Result<()>)>,
-    publishing_ids: HashSet<u64>,
     loading_connections: JoinSet<(u64, Result<super::SocketLookup>)>,
     connection_lookup_ids: HashSet<u64>,
     database_calls: JoinSet<(u64, Option<u64>, Result<DatabaseResult>)>,
@@ -645,17 +641,6 @@ impl ExecutorDriver {
                 called = self.database_calls.join_next(), if !self.database_calls.is_empty() => {
                     let (call_id, message_id, result) = called.context("actor database call stopped")??;
                     self.database_called(call_id, message_id, result).await?;
-                }
-                published = self.publishing.join_next(), if !self.publishing.is_empty() => {
-                    let (message_id, result) = published.context("socket publisher stopped")??;
-                    self.publishing_ids.remove(&message_id);
-                    self.outbound.send(ExecutorWrite {
-                        bytes: encode_server_message(&ActorExecutorServerMessage::SocketEffectsPublished {
-                            message_id,
-                            error: result.err().map(|error| format!("{error:#}")),
-                        })?,
-                        written: None,
-                    }).await.context("actor executor writer stopped")?;
                 }
                 loaded = self.loading_connections.join_next(), if !self.loading_connections.is_empty() => {
                     let (message_id, result) = loaded.context("connection lookup stopped")??;
@@ -808,15 +793,11 @@ impl ExecutorDriver {
         Ok(())
     }
 
-    fn publish(&mut self, message_id: u64, effects: Vec<ActorSocketEffect>) -> Result<()> {
+    fn publish(&self, message_id: u64, effects: Vec<ActorSocketEffect>) -> Result<()> {
         let pending = self
             .pending
             .get(&message_id)
             .context("socket output has no active actor invocation")?;
-        ensure!(
-            self.publishing_ids.insert(message_id),
-            "actor sent concurrent socket publications"
-        );
         let connecting = matches!(
             &pending.command,
             ExecutorCommand::WebsocketEvent {
@@ -825,7 +806,7 @@ impl ExecutorDriver {
             }
         );
         let publisher = self.publisher.clone();
-        self.publishing.spawn(async move {
+        tokio::spawn(async move {
             let result = async {
                 ensure!(
                     !connecting,
@@ -838,7 +819,9 @@ impl ExecutorDriver {
                     .await
             }
             .await;
-            (message_id, result)
+            if let Err(error) = result {
+                warn!(error = %format!("{error:#}"), "actor socket output was not published");
+            }
         });
         Ok(())
     }
@@ -880,10 +863,6 @@ impl ExecutorDriver {
         ensure!(
             !self.connection_lookup_ids.contains(&message_id),
             "actor completed before connection lookup finished"
-        );
-        ensure!(
-            !self.publishing_ids.contains(&message_id),
-            "actor completed before socket output was acknowledged"
         );
         let pending = self
             .pending
@@ -1028,11 +1007,6 @@ enum ActorExecutorServerMessage<'a> {
     SocketConnections {
         message_id: u64,
         connections: super::SocketLookup,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        error: Option<String>,
-    },
-    SocketEffectsPublished {
-        message_id: u64,
         #[serde(skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
