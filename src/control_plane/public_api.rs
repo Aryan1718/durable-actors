@@ -152,11 +152,6 @@ async fn issue_session(
         )
         .map_err(|_| ApiError::unauthorized("administrative credential is required"))?;
     let project = project_id(path)?;
-    state
-        .invocations
-        .ensure_project_access(&project)
-        .await
-        .map_err(ApiError::access)?;
     let Json(request) = request.map_err(ApiError::json)?;
     let issued = state
         .admin
@@ -196,11 +191,6 @@ async fn find_websocket(
     request: Result<Json<FindWebSocketRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     authorized_admin(&state.admin, &headers)?;
-    state
-        .invocations
-        .ensure_project_access(&path.project_id)
-        .await
-        .map_err(ApiError::access)?;
     let Json(request) = request.map_err(ApiError::json)?;
     state
         .invocations

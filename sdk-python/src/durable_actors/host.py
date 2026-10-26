@@ -56,8 +56,6 @@ class Session(Channel):
             while True:
                 message = await self.read()
                 if message["type"] == "command":
-                    if len(self.tasks) >= 512:
-                        raise ValueError("executor command queue is full")
                     validate_command(message)
                     task = asyncio.create_task(self.execute(runtime, message))
                     self.tasks.add(task)

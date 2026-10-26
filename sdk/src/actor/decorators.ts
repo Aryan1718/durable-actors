@@ -2,7 +2,7 @@ import { ActorDefinitionError } from "../errors.js"
 
 import { ActorResource } from "./resource.js"
 
-/** Marks a method for whole-call transactions. Currently all non-interleaved calls use this behavior. */
+/** Saves all of the method's writes together when it succeeds, or none if it throws. */
 function Atomic(_value: Function, context: ClassMethodDecoratorContext): void {
     if (context.kind !== "method" || context.static || context.private || typeof context.name !== "string")
         throw new ActorDefinitionError("@Atomic requires a public instance async method")
@@ -10,7 +10,7 @@ function Atomic(_value: Function, context: ClassMethodDecoratorContext): void {
 
 /**
  * Lets other calls run during awaits. State may change while waiting.
- * Disables error rollback for the whole actor class. State is saved on successful completion.
+ * Disables error rollback for the whole actor class.
  * @experimental
  */
 function Interleave(_value: Function, context: ClassMethodDecoratorContext): void {
@@ -18,7 +18,7 @@ function Interleave(_value: Function, context: ClassMethodDecoratorContext): voi
         throw new ActorDefinitionError("@Interleave requires a public instance async method")
 }
 
-/** Writes assignments to SQLite; reassign objects and arrays to save changes. Commits after successful calls. */
+/** Saves each assignment; reassign objects and arrays to save changes. `@Atomic` methods save on success. */
 function Persisted(_value: undefined, context: ClassFieldDecoratorContext): void {
     validateField("Persisted", context)
     if (context.private) throw new ActorDefinitionError("@Persisted cannot decorate a JavaScript private field")

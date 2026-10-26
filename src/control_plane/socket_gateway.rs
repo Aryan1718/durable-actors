@@ -114,24 +114,10 @@ impl SocketGateway {
         invocation: &ActorSocketInvocation,
         started: Instant,
     ) -> Result<ActorTarget> {
-        service
-            .ensure_project_access(&ticket.actor.project_id)
-            .await?;
         let route = self.route(&ticket.actor).await;
         let mut cached = route.lock().await;
         let now = crate::clock::Clock::now_ms(&crate::clock::SystemClock)? as i64;
-        if let Some(target) = cached.as_ref().filter(|target| target.expires_at_ms > now)
-            && service
-                .lifecycle
-                .routing(
-                    &ticket.actor.storage_key(),
-                    target.host_id.as_str(),
-                    &target.session_id,
-                    target.owner_epoch,
-                )
-                .await
-                .is_none()
-        {
+        if let Some(target) = cached.as_ref().filter(|target| target.expires_at_ms > now) {
             return Ok(target.clone());
         }
         *cached = None;
@@ -301,7 +287,14 @@ impl SocketDispatcher for GatewaySocketDispatcher {
         actor: &ActorKey,
         effects: Vec<ActorSocketEffect>,
     ) -> Result<()> {
-        self.gateway.bus.publish(actor, effects).await
+        let bus = self.gateway.bus.clone();
+        let actor = actor.clone();
+        tokio::spawn(async move {
+            if let Err(error) = bus.publish(&actor, effects).await {
+                tracing::warn!(actor = %actor.storage_key().as_str(), error = %format!("{error:#}"), "socket effects were not published");
+            }
+        });
+        Ok(())
     }
     fn notify(&self, ticket: &SocketTicket, event: &crate::actor::ActorSocketEvent) {
         self.service

@@ -11,7 +11,7 @@ cp .env.example .env
 
 ## Defining an actor
 
-Each bank account is an actor. An actor has fields and methods. The `@Persisted` property decorator saves a field after each successful method call.
+Each bank account is an actor. An actor has fields and methods. The `@Persisted` property decorator saves a field each time you assign it.
 
 To track a bank balance, define `src/actors.ts`:
 
@@ -316,8 +316,9 @@ export class BankAccount extends Actor {
 }
 ```
 
-- SQL writes and `@Persisted` fields commit together when the method or socket hook succeeds.
-- Assigning a `@Persisted` field writes its JSON value through the same SQL execution path as `this.db.exec()`. Writes still commit at successful method completion.
+- Each SQL write and each `@Persisted` assignment is saved as it happens, so progress survives a crash mid-method. If the method throws, writes made before the error stay saved.
+- Mark a method `@Atomic` to save all of its writes together when it succeeds, or none if it throws.
+- Assigning a `@Persisted` field writes its JSON value through the same SQL execution path as `this.db.exec()`.
 - Reassign objects and arrays to persist changes: `this.messages = [...this.messages, message]`. Nested mutations such as `this.messages.push(message)` only change memory; they are not saved, even at method completion. Assign `undefined` to remove a saved field value rather than using `delete`.
 - Saved fields are restored before persistence tracking begins. Defaults are inserted only for fields missing from SQLite, so adding a persisted property initializes existing actors without replacing their saved values. Initialization does not delete existing rows.
 - Bind values with `?` placeholders. Values can be strings, numbers, bigints, byte arrays, or `null`.

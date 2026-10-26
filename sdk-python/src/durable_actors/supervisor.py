@@ -88,8 +88,8 @@ class Supervisor(Channel):
             await self.fail_pending("actor_evicted", "actor was evicted by the Rust host")
             await self.reply(identifier, {"type": "evicted"})
         else:
-            if len(self.pending) >= 512 or identifier in self.pending:
-                raise ValueError("executor command queue is full or message ID is duplicated")
+            if identifier in self.pending:
+                raise ValueError("executor message ID is duplicated")
             if self.worker is None:
                 self.worker = await self.create_worker(self.entrypoint, self.environment)
                 if self.worker.actor_names != self.actor_names:

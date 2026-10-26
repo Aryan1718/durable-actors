@@ -13,13 +13,10 @@ class Channel:
     def __init__(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         self.reader = reader
         self.writer = writer
-        self.write_lock = asyncio.Lock()
 
     async def send(self, message: Document) -> None:
-        data = serialize(message)
-        async with self.write_lock:
-            self.writer.write(data)
-            await self.writer.drain()
+        self.writer.write(serialize(message))
+        await self.writer.drain()
 
     async def read(self) -> Document:
         line = await self.reader.readline()

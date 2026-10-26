@@ -187,7 +187,6 @@ async fn control_plane_routes(
     let (traces, lifecycle) = telemetry_stores(
         &config.storage,
         database.clone(),
-        changes.clone(),
         redis.clone(),
         stop.clone(),
     )
@@ -353,7 +352,6 @@ async fn snapshot_store(
 async fn telemetry_stores(
     storage: &ControlPlaneStorageConfig,
     database: PostgresDatabase,
-    changes: crate::postgres::notifications::ChangeFeed,
     redis: Option<Redis>,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<(TraceStore, crate::actor_lifecycle::LifecycleStore)> {
@@ -363,8 +361,7 @@ async fn telemetry_stores(
                 database,
                 storage.trace_retention,
             ));
-            let mut traces = TraceStore::open(persistence.clone()).await?;
-            traces.changes = changes;
+            let traces = TraceStore::open(persistence.clone()).await?;
             persistence.start_retention(stop);
             Ok((traces, Default::default()))
         }

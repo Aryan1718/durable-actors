@@ -28,7 +28,6 @@ use super::{
 };
 
 const ACTOR_EXECUTOR_PROTOCOL_VERSION: u32 = 30;
-const MAX_PENDING_EXECUTOR_COMMANDS: usize = 64;
 
 #[derive(Debug, Serialize)]
 pub struct ActorMethodInvocation {
@@ -371,7 +370,7 @@ struct JsActorExecutor {
     residency: Residency,
     actor_names: HashSet<String>,
     admission: watch::Sender<()>,
-    commands: mpsc::Sender<ExecutorRequest>,
+    commands: mpsc::UnboundedSender<ExecutorRequest>,
 }
 
 #[async_trait]
@@ -489,7 +488,7 @@ impl JsActorExecutor {
         writer: OwnedWriteHalf,
         actor_names: Vec<String>,
     ) -> (Arc<Self>, JoinHandle<Result<()>>) {
-        let (commands, incoming) = mpsc::channel(MAX_PENDING_EXECUTOR_COMMANDS);
+        let (commands, incoming) = mpsc::unbounded_channel();
         let residency = Arc::new(Mutex::new(None));
         let (changes, _) = watch::channel(());
         let (admission, _) = watch::channel(());
@@ -536,7 +535,6 @@ impl JsActorExecutor {
                 sockets,
                 database,
             })
-            .await
             .context("actor executor stopped")?;
         ready
             .await
@@ -556,7 +554,6 @@ impl JsActorExecutor {
                 reply,
                 admission_granted: false,
             })))
-            .await
             .context("actor executor stopped")?;
         response
             .await
@@ -567,13 +564,13 @@ impl JsActorExecutor {
 async fn run_executor_connection(
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
-    commands: mpsc::Receiver<ExecutorRequest>,
+    commands: mpsc::UnboundedReceiver<ExecutorRequest>,
     residency: Residency,
     changes: watch::Sender<()>,
     admission: watch::Sender<()>,
 ) -> Result<()> {
-    let (outbound, writes) = mpsc::channel(MAX_PENDING_EXECUTOR_COMMANDS + 1);
-    let (inbound, replies) = mpsc::channel(MAX_PENDING_EXECUTOR_COMMANDS);
+    let (outbound, writes) = mpsc::unbounded_channel();
+    let (inbound, replies) = mpsc::unbounded_channel();
     let driver = ExecutorDriver {
         admission,
         changes,
@@ -603,7 +600,7 @@ struct ExecutorDriver {
     residency: Residency,
     pending: HashMap<u64, PendingCommand>,
     next_message_id: u64,
-    outbound: mpsc::Sender<ExecutorWrite>,
+    outbound: mpsc::UnboundedSender<ExecutorWrite>,
     publisher: Option<Arc<dyn ActorSocketPublisher>>,
     sockets: Option<Arc<dyn ActorSocketSource>>,
     database: Option<Arc<dyn ActorDatabase>>,
@@ -616,8 +613,8 @@ struct ExecutorDriver {
 impl ExecutorDriver {
     async fn run(
         mut self,
-        mut commands: mpsc::Receiver<ExecutorRequest>,
-        mut replies: mpsc::Receiver<Result<ActorExecutorClientMessage>>,
+        mut commands: mpsc::UnboundedReceiver<ExecutorRequest>,
+        mut replies: mpsc::UnboundedReceiver<Result<ActorExecutorClientMessage>>,
     ) -> Result<()> {
         loop {
             tokio::select! {
@@ -640,7 +637,7 @@ impl ExecutorDriver {
                 }
                 called = self.database_calls.join_next(), if !self.database_calls.is_empty() => {
                     let (call_id, message_id, result) = called.context("actor database call stopped")??;
-                    self.database_called(call_id, message_id, result).await?;
+                    self.database_called(call_id, message_id, result)?;
                 }
                 loaded = self.loading_connections.join_next(), if !self.loading_connections.is_empty() => {
                     let (message_id, result) = loaded.context("connection lookup stopped")??;
@@ -649,14 +646,11 @@ impl ExecutorDriver {
                         Ok(connections) => (connections, None),
                         Err(error) => (super::SocketLookup::Connections(Vec::new()), Some(format!("{error:#}"))),
                     };
-                    self.outbound.send(ExecutorWrite {
-                        bytes: encode_server_message(&ActorExecutorServerMessage::SocketConnections {
-                            message_id, connections, error,
-                        })?,
-                        written: None,
-                    }).await.context("actor executor writer stopped")?;
+                    self.write(encode_server_message(&ActorExecutorServerMessage::SocketConnections {
+                        message_id, connections, error,
+                    })?)?;
                 }
-                command = commands.recv(), if self.pending.len() < MAX_PENDING_EXECUTOR_COMMANDS => match command {
+                command = commands.recv() => match command {
                     Some(command) => self.handle_command(command)?,
                     None => return Ok(()),
                 }
@@ -678,16 +672,14 @@ impl ExecutorDriver {
                 self.sockets = sockets;
                 self.database = database;
                 self.outbound
-                    .try_send(ExecutorWrite {
+                    .send(ExecutorWrite {
                         bytes: encode_server_message(&ActorExecutorServerMessage::Attached {
                             protocol: ACTOR_EXECUTOR_PROTOCOL_VERSION,
                             actor,
                         })?,
                         written: Some(written),
                     })
-                    .map_err(|_| {
-                        anyhow::anyhow!("actor executor writer stopped or filled its queue")
-                    })
+                    .map_err(|_| anyhow::anyhow!("actor executor writer stopped"))
             }
         }
     }
@@ -740,7 +732,7 @@ impl ExecutorDriver {
         Ok(())
     }
 
-    async fn database_called(
+    fn database_called(
         &mut self,
         call_id: u64,
         message_id: Option<u64>,
@@ -753,17 +745,13 @@ impl ExecutorDriver {
             Ok(result) => (Some(result), None),
             Err(error) => (None, Some(format!("{error:#}"))),
         };
-        self.outbound
-            .send(ExecutorWrite {
-                bytes: encode_server_message(&ActorExecutorServerMessage::DatabaseResult {
-                    call_id,
-                    result,
-                    error,
-                })?,
-                written: None,
-            })
-            .await
-            .context("actor executor writer stopped")
+        self.write(encode_server_message(
+            &ActorExecutorServerMessage::DatabaseResult {
+                call_id,
+                result,
+                error,
+            },
+        )?)
     }
 
     fn load_connections(&mut self, message_id: u64, query: super::SocketQuery) -> Result<()> {
@@ -837,15 +825,7 @@ impl ExecutorDriver {
         });
         match bytes {
             Ok(bytes) => {
-                // Each pending command has at most one queued write; readiness has its own extra slot.
-                self.outbound
-                    .try_send(ExecutorWrite {
-                        bytes,
-                        written: None,
-                    })
-                    .map_err(|_| {
-                        anyhow::anyhow!("actor executor writer stopped or filled its queue")
-                    })?;
+                self.write(bytes)?;
                 self.pending.insert(message_id, pending);
             }
             Err(error) => {
@@ -853,6 +833,15 @@ impl ExecutorDriver {
             }
         }
         Ok(())
+    }
+
+    fn write(&self, bytes: Vec<u8>) -> Result<()> {
+        self.outbound
+            .send(ExecutorWrite {
+                bytes,
+                written: None,
+            })
+            .map_err(|_| anyhow::anyhow!("actor executor writer stopped"))
     }
 
     fn deliver(&mut self, message_id: u64, reply: ExecutorReply) -> Result<()> {
@@ -875,7 +864,7 @@ impl ExecutorDriver {
 
 async fn read_executor_messages(
     mut reader: BufReader<OwnedReadHalf>,
-    inbound: mpsc::Sender<Result<ActorExecutorClientMessage>>,
+    inbound: mpsc::UnboundedSender<Result<ActorExecutorClientMessage>>,
 ) -> Result<()> {
     loop {
         let reply = match read_client_message(&mut reader).await {
@@ -888,7 +877,6 @@ async fn read_executor_messages(
         let stopped = reply.is_err();
         inbound
             .send(reply)
-            .await
             .context("actor executor driver stopped")?;
         if stopped {
             return Ok(());
@@ -898,7 +886,7 @@ async fn read_executor_messages(
 
 async fn write_executor_messages(
     mut writer: OwnedWriteHalf,
-    mut writes: mpsc::Receiver<ExecutorWrite>,
+    mut writes: mpsc::UnboundedReceiver<ExecutorWrite>,
 ) -> Result<()> {
     while let Some(write) = writes.recv().await {
         let result = writer

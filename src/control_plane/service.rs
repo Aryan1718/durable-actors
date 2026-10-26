@@ -390,8 +390,6 @@ impl ControlPlaneService {
         }
         Ok(ActorTarget {
             initial_reply: target.initial_reply,
-            host_id: target.lease.id,
-            session_id: target.lease.session_id,
             host_state: target.host_state,
             home_region: target.placement.home_region,
             route,
@@ -405,8 +403,6 @@ impl ControlPlaneService {
 #[derive(Clone)]
 pub(super) struct ActorTarget {
     pub initial_reply: Option<Value>,
-    pub host_id: HostId,
-    pub session_id: String,
     pub host_state: HostState,
     pub home_region: String,
     pub route: String,
@@ -458,20 +454,6 @@ impl ActorControlPlaneService for ControlPlaneService {
         let principal = self.auth.authenticate(&request).await?;
         let command = decode_command(request.into_inner())
             .map_err(|error| Status::invalid_argument(format!("invalid command: {error:#}")))?;
-        if !matches!(
-            command,
-            ControlPlaneCommand::Lifecycle { .. } | ControlPlaneCommand::RequestTraces { .. }
-        ) {
-            self.ensure_project_access(&principal.actor.project_id)
-                .await
-                .map_err(|error| {
-                    if error.is::<super::access::AccessDisabled>() {
-                        Status::permission_denied(error.to_string())
-                    } else {
-                        Status::unavailable(error.to_string())
-                    }
-                })?;
-        }
         let reply = match command {
             ControlPlaneCommand::SocketOperation { actor, operation } => {
                 self.authorize_socket_host(&principal, &actor)
@@ -1138,14 +1120,33 @@ impl SandboxHostProvisioner {
     ) -> Result<(HostLease, u64, Option<Value>)> {
         let started_at = Instant::now();
         let mut request = self.request(spec, region, actor)?;
-        if let Some(admission) = &self.admission {
-            admission
-                .reserve(actor, &request.host_id, &request.session_id)
-                .await?;
-        }
         request.initial_operation = operation.cloned();
         request.actor_is_new = new_actor;
         request.owner_hint = owner_hint.map(serde_json::to_string).transpose()?;
+        let Some(admission) = &self.admission else {
+            return self
+                .provision(spec, region, actor, request, started_at)
+                .await;
+        };
+        let (host, session) = (request.host_id.clone(), request.session_id.clone());
+        admission.reserve(actor, &host, &session).await?;
+        let launched = self
+            .provision(spec, region, actor, request, started_at)
+            .await;
+        if launched.is_err() {
+            admission.release(actor, &host, &session).await;
+        }
+        launched
+    }
+
+    async fn provision(
+        &self,
+        spec: &HostLaunchSpec,
+        region: &str,
+        actor: &ActorKey,
+        mut request: EnsureHostRequest,
+        started_at: Instant,
+    ) -> Result<(HostLease, u64, Option<Value>)> {
         let token = async {
             match &self.runtime_access {
                 Some(access) => Ok(Some(

@@ -167,7 +167,6 @@ impl std::error::Error for InvalidTraceQuery {}
 pub(crate) struct TraceStore {
     pending: Arc<tokio::sync::Semaphore>,
     persistence: Arc<dyn TracePersistence>,
-    pub changes: crate::postgres::notifications::ChangeFeed,
     pub live: Option<live::LiveTraceFeed>,
 }
 
@@ -266,7 +265,6 @@ impl TraceStore {
         Self {
             pending: Arc::new(tokio::sync::Semaphore::new(64)),
             persistence,
-            changes: Default::default(),
             live: None,
         }
     }
@@ -294,14 +292,11 @@ impl TraceStore {
         tokio::spawn(async move {
             let _permit = permit;
             let count = events.len();
-            match store.persistence.record(&project, events, dropped).await {
-                Ok(()) => store.changes.notify().await,
-                Err(error) => {
-                    store
-                        .report_persistence_failure(&project, &error, count)
-                        .await?;
-                    return Err(error);
-                }
+            if let Err(error) = store.persistence.record(&project, events, dropped).await {
+                store
+                    .report_persistence_failure(&project, &error, count)
+                    .await?;
+                return Err(error);
             }
             Ok(())
         })
@@ -314,7 +309,6 @@ impl TraceStore {
                 .record_status(project, dropped, false)
                 .await?;
         }
-        self.changes.notify().await;
         Ok(())
     }
 
@@ -326,7 +320,6 @@ impl TraceStore {
     ) -> Result<()> {
         tracing::error!(%error, count, "request trace persistence failed");
         self.persistence.record_status(project, 0, true).await?;
-        self.changes.notify().await;
         Ok(())
     }
 }
@@ -353,37 +346,9 @@ impl TraceSender {
         client: Arc<crate::control_plane::ControlPlaneClient>,
         stop: tokio_util::sync::CancellationToken,
     ) -> Self {
-        let (sender, mut receiver) = mpsc::channel(1024);
+        let (sender, receiver) = mpsc::channel(1024);
         let dropped = Arc::new(AtomicU64::new(0));
-        let lost = dropped.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(200));
-            loop {
-                tokio::select! { _ = stop.cancelled() => break, _ = interval.tick() => {} }
-                let mut batch = Vec::new();
-                while batch.len() < TRACE_BATCH_SIZE {
-                    match receiver.try_recv() {
-                        Ok(trace) => batch.push(trace),
-                        Err(_) => break,
-                    }
-                }
-                let missing = lost.swap(0, Ordering::Relaxed);
-                if batch.is_empty() && missing == 0 {
-                    continue;
-                }
-                let count = batch.len() as u64;
-                if !matches!(
-                    tokio::time::timeout(
-                        Duration::from_secs(3),
-                        client.report_traces(batch, missing)
-                    )
-                    .await,
-                    Ok(Ok(()))
-                ) {
-                    lost.fetch_add(count.saturating_add(missing), Ordering::Relaxed);
-                }
-            }
-        });
+        tokio::spawn(export_traces(client, receiver, dropped.clone(), stop));
         Self { sender, dropped }
     }
 
@@ -392,6 +357,44 @@ impl TraceSender {
             self.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
+}
+
+async fn export_traces(
+    client: Arc<crate::control_plane::ControlPlaneClient>,
+    mut receiver: mpsc::Receiver<RequestTrace>,
+    lost: Arc<AtomicU64>,
+    stop: tokio_util::sync::CancellationToken,
+) {
+    let mut interval = tokio::time::interval(Duration::from_millis(200));
+    loop {
+        tokio::select! { _ = stop.cancelled() => break, _ = interval.tick() => {} }
+        while report_batch(&client, &mut receiver, &lost).await == TRACE_BATCH_SIZE {}
+    }
+}
+
+async fn report_batch(
+    client: &crate::control_plane::ControlPlaneClient,
+    receiver: &mut mpsc::Receiver<RequestTrace>,
+    lost: &AtomicU64,
+) -> usize {
+    let mut batch = Vec::new();
+    while batch.len() < TRACE_BATCH_SIZE {
+        match receiver.try_recv() {
+            Ok(trace) => batch.push(trace),
+            Err(_) => break,
+        }
+    }
+    let count = batch.len();
+    let missing = lost.swap(0, Ordering::Relaxed);
+    if count == 0 && missing == 0 {
+        return 0;
+    }
+    let reported =
+        tokio::time::timeout(Duration::from_secs(3), client.report_traces(batch, missing)).await;
+    if !matches!(reported, Ok(Ok(()))) {
+        lost.fetch_add((count as u64).saturating_add(missing), Ordering::Relaxed);
+    }
+    count
 }
 
 pub(crate) struct TraceRecorder {

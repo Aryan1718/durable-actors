@@ -31,50 +31,19 @@ class ActorRuntime:
         self.fatal: Document | None = None
         self.definition = describe_actor(actor)
         self.instance: ActorBase[Any, Any, Any, Any] | None = None
-        self.lifecycle = asyncio.Lock()
-        self.pending: set[asyncio.Task[Document]] = set()
-        self.serial = asyncio.Lock()
         self.sequence = 0
         self.last_state: Document = {}
 
     async def handle(self, command: Document) -> Document:
-        async with self.lifecycle:
-            if command["type"] == "evict":
-                return await self.evict()
-            task = asyncio.create_task(self.run(command))
-            self.pending.add(task)
-        try:
-            return await task
-        except asyncio.CancelledError:
-            caller = asyncio.current_task()
-            if caller is not None and caller.cancelling():
-                raise
-            return failed("actor_evicted", "actor was evicted by the Rust host")
-        finally:
-            self.pending.discard(task)
-
-    async def evict(self) -> Document:
-        tasks = tuple(self.pending)
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        self.instance = None
-        self.fatal = None
-        return {"type": "evicted"}
-
-    async def run(self, command: Document) -> Document:
-        await self.serial.acquire()
+        if command["type"] == "evict":
+            return self.evict()
         name = command.get("method") or "on_" + command.get("event", {}).get("type", "")
         if name == "onAlarm":
             name = "on_alarm"
-        released = False
 
         def admit() -> None:
-            nonlocal released
             if name in self.definition.reentrant_methods:
                 self.effects.admit()
-                self.serial.release()
-                released = True
 
         try:
             if self.fatal is not None:
@@ -86,9 +55,11 @@ class ActorRuntime:
             if self.definition.reentrant_methods:
                 self.fatal = failure
             return failure
-        finally:
-            if not released:
-                self.serial.release()
+
+    def evict(self) -> Document:
+        self.instance = None
+        self.fatal = None
+        return {"type": "evicted"}
 
     async def execute(self, command: Document, admit: Any) -> Document:
         if self.instance is None:

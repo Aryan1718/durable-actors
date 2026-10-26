@@ -56,6 +56,15 @@ impl ReservationStore for MemoryReservations {
         Ok(())
     }
 
+    async fn release(&self, activation: &Activation) -> Result<()> {
+        let mut projects = self.projects.lock().unwrap();
+        if let Some(project) = projects.get_mut(&activation.actor.project_id) {
+            project.active.remove(activation);
+            project.sessions.remove(activation);
+        }
+        Ok(())
+    }
+
     async fn observe(&self, event: &LifecycleEvent) -> Result<()> {
         let now = self.clock.now_ms()?;
         let activation = Activation::new(&event.actor, &event.host_id, &event.session_id);

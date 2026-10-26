@@ -150,27 +150,9 @@ async fn invoke_cached(
         .gateway
         .as_ref()
         .ok_or_else(|| ApiError::unauthorized("gateway is not configured"))?;
-    let (route, host, session) = gateway
+    let route = gateway
         .invocation_route(&actor, epoch, authorization)
         .map_err(|_| ApiError::unauthorized("actor invocation credential was rejected"))?;
-    state
-        .invocations
-        .ensure_project_access(&actor.project_id)
-        .await
-        .map_err(ApiError::access)?;
-    if state
-        .invocations
-        .lifecycle
-        .routing(&actor.storage_key(), host.as_str(), &session, epoch)
-        .await
-        .is_some()
-    {
-        return Ok((
-            [(header::CACHE_CONTROL, "no-store")],
-            Json(json!({"type":"not_executed", "reason":"host_unavailable"})),
-        )
-            .into_response());
-    }
     let token = authorization
         .strip_prefix("Bearer ")
         .ok_or_else(|| ApiError::unauthorized("bearer token required"))?;
@@ -223,11 +205,6 @@ pub(super) async fn publish(
             "actor invocation credential was rejected",
         ));
     }
-    state
-        .invocations
-        .ensure_project_access(&actor.project_id)
-        .await
-        .map_err(ApiError::access)?;
     crate::actor::validate_socket_effects(&request.effects).map_err(ApiError::bad_request)?;
 
     gateway

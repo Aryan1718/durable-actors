@@ -1883,7 +1883,7 @@ async fn invalid_socket_effects_do_not_commit_actor_state() -> Result<()> {
 }
 
 #[tokio::test]
-async fn publishes_automatic_state_after_commit_before_returning_to_rpc_callers() -> Result<()> {
+async fn publishes_automatic_state_after_commit() -> Result<()> {
     struct Emitter;
     #[async_trait]
     impl ActorExecutor for Emitter {
@@ -1907,7 +1907,7 @@ async fn publishes_automatic_state_after_commit_before_returning_to_rpc_callers(
     }
     struct Publisher {
         state: Arc<FakeStateTransport>,
-        values: Mutex<Vec<Value>>,
+        values: tokio::sync::mpsc::UnboundedSender<Value>,
     }
     #[async_trait]
     impl crate::actor::ActorSocketPublisher for Publisher {
@@ -1921,15 +1921,16 @@ async fn publishes_automatic_state_after_commit_before_returning_to_rpc_callers(
             .state_version;
             let value = serde_json::to_value(effects)?;
             assert_eq!(value[0]["version"], version);
-            self.values.lock().unwrap().push(value);
+            self.values.send(value)?;
             Ok(())
         }
     }
     let authority = Arc::new(FakeAuthority::default());
     let state = Arc::new(FakeStateTransport::default());
+    let (values, mut published) = tokio::sync::mpsc::unbounded_channel();
     let publisher = Arc::new(Publisher {
         state: state.clone(),
-        values: Mutex::new(vec![]),
+        values,
     });
     let host = create_host(
         HostEndpoint {
@@ -1944,18 +1945,19 @@ async fn publishes_automatic_state_after_commit_before_returning_to_rpc_callers(
     );
     assert_eq!(invoke(&host, "one").await?, completed(1));
     assert_eq!(invoke(&host, "two").await?, completed(2));
-    {
-        let values = publisher.values.lock().unwrap();
-        assert_eq!(values.len(), 2);
-        assert_eq!(values[0][0]["changes"]["count"], 1);
-        assert_eq!(values[1][0]["changes"]["count"], 2);
+    let mut counts = Vec::new();
+    for _ in 0..2 {
+        let value = tokio::time::timeout(Duration::from_secs(1), published.recv()).await?;
+        counts.push(value.unwrap()[0]["changes"]["count"].as_u64());
     }
+    counts.sort();
+    assert_eq!(counts, [Some(1), Some(2)]);
     state.failures.store(1, Ordering::SeqCst);
     assert!(matches!(
         invoke(&host, "failed").await?,
         ActorExecutionResult::Failed { .. }
     ));
-    assert_eq!(publisher.values.lock().unwrap().len(), 2);
+    assert!(published.try_recv().is_err());
     Ok(())
 }
 

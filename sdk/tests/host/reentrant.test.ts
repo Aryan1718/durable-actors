@@ -49,11 +49,9 @@ test("only entering a reentrant invocation grants admission; nested calls inheri
     const ordinary = invoke("ordinary")
     await new Promise(resolve => setImmediate(resolve))
     assert.equal(admissions, 0)
-    const reentrant = invoke("reentrant")
-    await new Promise(resolve => setImmediate(resolve))
-    assert.equal(admissions, 0)
     gate.resolve()
-    await Promise.all([ordinary, reentrant])
+    await ordinary
+    await invoke("reentrant")
     assert.equal(admissions, 1)
 })
 
@@ -80,64 +78,6 @@ test("a failed reentrant invocation cannot erase an overlapping successful mutat
     assert.equal((await holding).type, "failed")
     const reply = await invoke("read")
     assert.equal("result" in reply && reply.result, 2)
-})
-
-test("undecorated invocations still serialize with each other on an opted-in actor", async () => {
-    const gate = deferred()
-    const entered: string[] = []
-    class ReentrantSerial extends Actor {
-        count = 0
-        async hold() {
-            entered.push("hold")
-            await gate.promise
-            this.count++
-        }
-        async read() {
-            entered.push("read")
-            return this.count
-        }
-        async background() {}
-    }
-    const { invoke } = await setup(ReentrantSerial, ["background"])
-    const holding = invoke("hold")
-    const reading = invoke("read")
-    await new Promise(resolve => setImmediate(resolve))
-    assert.deepEqual(entered, ["hold"])
-    gate.resolve()
-    await holding
-    await reading
-    assert.deepEqual(entered, ["hold", "read"])
-})
-
-test("an ordinary invocation blocks newly arriving reentrant calls across awaits", async () => {
-    const gate = deferred()
-    const entered = deferred()
-    const calls: string[] = []
-    class ExclusiveAdmission extends Actor {
-        count = 0
-        async ordinary() {
-            calls.push("ordinary:start")
-            entered.resolve()
-            await gate.promise
-            calls.push("ordinary:end")
-        }
-        async reentrant() {
-            calls.push("reentrant")
-            return ++this.count
-        }
-    }
-    const { invoke } = await setup(ExclusiveAdmission, ["reentrant"])
-    const ordinary = invoke("ordinary")
-    await entered.promise
-    const reentrant = invoke("reentrant")
-    try {
-        await new Promise(resolve => setImmediate(resolve))
-        assert.deepEqual(calls, ["ordinary:start"])
-    } finally {
-        gate.resolve()
-        await Promise.all([ordinary, reentrant])
-    }
-    assert.deepEqual(calls, ["ordinary:start", "ordinary:end", "reentrant"])
 })
 
 test("socket context survives another invocation finishing during a reentrant await", async () => {

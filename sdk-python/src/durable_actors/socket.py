@@ -6,7 +6,6 @@ import asyncio
 import json
 from collections.abc import Callable, Coroutine
 from contextvars import ContextVar
-from functools import partial
 from threading import get_ident
 from typing import Any, Generic, Literal, Protocol, TypeVar, cast
 
@@ -248,17 +247,15 @@ class SocketScope:
         return {"type": "text", "data": data}
 
     def push(self, effect: Document) -> None:
-        if get_ident() != self.thread:
-            self.blocking(partial(self.enqueue, effect))
-            return
         self.ensure_active()
+        if get_ident() != self.thread:
+            # call_soon_threadsafe is FIFO, so effects reach the loop before the handler's result.
+            self.loop.call_soon_threadsafe(self.push, effect)
+            return
         if self.live:
             self.effects.publish([effect])
         else:
             self.pending.append(effect)
-
-    async def enqueue(self, effect: Document) -> None:
-        self.push(effect)
 
     def finish(self) -> list[Document]:
         return list(self.pending)

@@ -353,6 +353,9 @@ impl Shared {
                 Err(error) => tracing::warn!(error = %format!("{error:#}"),
                     "socket bus lost its Redis subscription; its sockets close and it reconnects"),
             }
+            self.registry
+                .close_all(1012, "socket gateway lost its subscription")
+                .await;
             tokio::select! {
                 _ = stop.cancelled() => return,
                 _ = tokio::time::sleep(Duration::from_secs(1)) => {}
