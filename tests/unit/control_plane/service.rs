@@ -605,6 +605,9 @@ fn sandbox_resources_override_only_the_configured_fields() -> Result<()> {
             max_starting: 8,
             idle_ttl_seconds: 600,
             refill_interval: Duration::from_secs(1),
+            retire_concurrency: 8,
+            reap_interval: Duration::from_secs(30),
+            pod_reap_interval: Duration::from_secs(1),
             regions: vec!["north-america-east".into()],
             resources: crate::sandbox::ResourceLimits {
                 cpu_millis: 4000,

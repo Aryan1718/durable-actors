@@ -16,5 +16,6 @@ where
                 .with_max_times(8),
         )
         .when(|error| matches!(error, kube::Error::Api(response) if response.code == 429))
+        .notify(|_, delay| tracing::warn!(?delay, "kubernetes request throttled; retrying"))
         .await
 }

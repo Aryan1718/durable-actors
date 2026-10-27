@@ -3,7 +3,9 @@ use std::io::IsTerminal;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use durable_actors::{
-    control_plane::{ControlPlaneProcessConfig, DevOptions, serve_control_plane, serve_local},
+    control_plane::{
+        ControlPlaneProcessConfig, DevOptions, serve_control_plane, serve_local, serve_pool_manager,
+    },
     host::serve_actor_host,
 };
 use tokio::sync::oneshot;
@@ -62,6 +64,9 @@ async fn run(cli: Cli) -> Result<()> {
     {
         "control_plane" => {
             serve_control_plane(ControlPlaneProcessConfig::from_env()?, shutdown).await
+        }
+        "pool_manager" => {
+            serve_pool_manager(ControlPlaneProcessConfig::from_env()?, shutdown).await
         }
         "spare" => durable_actors::host::serve_spare(shutdown).await,
         "host" => serve_actor_host(shutdown).await,

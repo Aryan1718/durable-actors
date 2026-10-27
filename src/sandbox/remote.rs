@@ -91,6 +91,10 @@ impl SandboxProvider for RemoteSandboxProvider {
         self.cluster.stopped_spares(spares).await
     }
 
+    async fn reap_finished(&self) -> Result<()> {
+        self.cluster.reap_finished().await
+    }
+
     async fn ensure_host(&self, request: &EnsureHostRequest) -> Result<ActorHostHandle> {
         let started_at_ms = now_ms()?;
         let reused = request.spare.is_some();
@@ -251,6 +255,9 @@ fn now_ms() -> Result<u64> {
 #[async_trait]
 pub(super) trait SandboxCluster: Send + Sync {
     async fn stopped_spares(&self, spares: &[SpareHandle]) -> Result<Vec<String>>;
+    async fn reap_finished(&self) -> Result<()> {
+        Ok(())
+    }
     async fn create_spare(&self, request: &CreateSpareRequest) -> Result<SpareHandle>;
     async fn retire_spare(&self, spare: &SpareHandle) -> Result<()>;
 }

@@ -24,6 +24,7 @@ const MANAGED: &str = "app.kubernetes.io/managed-by=terse";
 pub(crate) struct GkeConfig {
     pub namespace: String,
     pub zones: BTreeMap<String, Vec<String>>,
+    pub reap_concurrency: usize,
 }
 
 /// Reads pod state from one shared watch so provisioning costs a single API call per pod.
@@ -32,23 +33,20 @@ pub(super) struct Kubernetes {
     observed: Store<Pod>,
     changes: watch::Receiver<()>,
     config: GkeConfig,
-    _tasks: [AbortOnDropHandle<()>; 2],
+    _watch: AbortOnDropHandle<()>,
 }
 impl Kubernetes {
     pub fn new(client: Client, config: GkeConfig) -> Self {
         let pods = Api::namespaced(client, &config.namespace);
         let (observed, writer) = reflector::store();
         let (changed, changes) = watch::channel(());
-        let tasks = [
-            AbortOnDropHandle::new(tokio::spawn(observe(pods.clone(), writer, changed))),
-            AbortOnDropHandle::new(tokio::spawn(reap(pods.clone(), observed.clone()))),
-        ];
+        let watch = AbortOnDropHandle::new(tokio::spawn(observe(pods.clone(), writer, changed)));
         Self {
             pods,
             observed,
             changes,
             config,
-            _tasks: tasks,
+            _watch: watch,
         }
     }
 
@@ -183,6 +181,27 @@ impl SandboxCluster for Kubernetes {
         }
         Ok(stopped)
     }
+
+    // Each finished pod costs one DELETE; finding them in the watched copy makes no API calls.
+    async fn reap_finished(&self) -> Result<()> {
+        let finished = self
+            .observed
+            .state()
+            .into_iter()
+            .filter(|pod| is_terminal(pod) && pod.metadata.deletion_timestamp.is_none());
+        futures_util::stream::iter(finished)
+            .for_each_concurrent(self.config.reap_concurrency, |pod| async move {
+                let deleted = match pod.uid() {
+                    Some(uid) => delete_pod(&self.pods, &pod.name_any(), &uid).await,
+                    None => Err(anyhow::anyhow!("pod UID missing")),
+                };
+                if let Err(error) = deleted {
+                    tracing::warn!(%error, name = %pod.name_any(), "finished pod cleanup failed");
+                }
+            })
+            .await;
+        Ok(())
+    }
 }
 
 async fn observe(pods: Api<Pod>, writer: Writer<Pod>, changed: watch::Sender<()>) {
@@ -203,27 +222,6 @@ async fn observe(pods: Api<Pod>, writer: Writer<Pod>, changed: watch::Sender<()>
             std::future::ready(())
         })
         .await;
-}
-
-async fn reap(pods: Api<Pod>, observed: Store<Pod>) {
-    loop {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        if let Err(error) = reap_completed(&pods, &observed).await {
-            tracing::warn!(%error, "completed pod cleanup failed");
-        }
-    }
-}
-
-async fn reap_completed(pods: &Api<Pod>, observed: &Store<Pod>) -> Result<()> {
-    for pod in observed.state().iter().filter(|pod| is_terminal(pod)) {
-        delete_pod(
-            pods,
-            &pod.name_any(),
-            &pod.uid().context("pod UID missing")?,
-        )
-        .await?;
-    }
-    Ok(())
 }
 
 fn spare_pod(request: &CreateSpareRequest, zones: &[String], token: &str) -> Result<Pod> {

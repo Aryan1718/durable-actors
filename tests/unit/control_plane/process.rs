@@ -149,6 +149,53 @@ fn pool_capacity_is_configurable_and_validated() -> Result<()> {
 }
 
 #[test]
+fn pool_drain_rates_are_configurable_and_validated() -> Result<()> {
+    let mut values = process_environment();
+    values.insert("DURABLE_ACTORS_SANDBOX_PROVIDER", "gke");
+    let parse = |values: &HashMap<&str, &str>| {
+        ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|v| (*v).into()))
+    };
+    let defaults = parse(&values)?;
+    assert_eq!(defaults.sandbox_provider.pool.retire_concurrency, 64);
+    assert_eq!(
+        defaults.sandbox_provider.pool.reap_interval,
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        defaults.sandbox_provider.pool.pod_reap_interval,
+        Duration::from_secs(1)
+    );
+    assert_eq!(gke(&defaults).reap_concurrency, 64);
+    values.extend([
+        ("DURABLE_ACTORS_SPARE_RETIRE_CONCURRENCY", "128"),
+        ("DURABLE_ACTORS_SPARE_REAP_INTERVAL_MS", "2000"),
+        ("DURABLE_ACTORS_SPARE_POD_REAP_INTERVAL_MS", "500"),
+        ("DURABLE_ACTORS_GKE_REAP_CONCURRENCY", "16"),
+    ]);
+    let configured = parse(&values)?;
+    assert_eq!(configured.sandbox_provider.pool.retire_concurrency, 128);
+    assert_eq!(
+        configured.sandbox_provider.pool.reap_interval,
+        Duration::from_secs(2)
+    );
+    assert_eq!(
+        configured.sandbox_provider.pool.pod_reap_interval,
+        Duration::from_millis(500)
+    );
+    assert_eq!(gke(&configured).reap_concurrency, 16);
+    for (name, value) in [
+        ("DURABLE_ACTORS_SPARE_RETIRE_CONCURRENCY", "0"),
+        ("DURABLE_ACTORS_GKE_REAP_CONCURRENCY", "0"),
+        ("DURABLE_ACTORS_SPARE_POD_REAP_INTERVAL_MS", "10"),
+    ] {
+        let mut invalid = values.clone();
+        invalid.insert(name, value);
+        assert!(parse(&invalid).is_err(), "{name}={value}");
+    }
+    Ok(())
+}
+
+#[test]
 fn host_idle_timeout_is_configurable_and_bounded() -> Result<()> {
     for value in ["1", "120000", "86400000"] {
         let mut values = process_environment();

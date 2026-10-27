@@ -320,6 +320,9 @@ fn config(idle: u32) -> PoolConfig {
         max_starting: 8,
         idle_ttl_seconds: 600,
         refill_interval: Duration::from_secs(1),
+        retire_concurrency: 8,
+        reap_interval: Duration::from_secs(30),
+        pod_reap_interval: Duration::from_secs(1),
         regions: vec!["region".into()],
         resources: ResourceLimits::default(),
     }
@@ -335,3 +338,17 @@ pub(super) async fn reserve(store: &PoolStore, key: &str, target: u32) -> Result
 
 #[path = "pool_replenishment.rs"]
 mod replenishment;
+
+#[test]
+fn housekeeping_health_follows_the_loop_heartbeat() -> Result<()> {
+    let pool = SparePool::new(
+        PostgresDatabase::lazy("postgres://localhost/unused")?,
+        Arc::new(crate::sandbox::testing::UnusedSandboxProvider),
+        config(0),
+    );
+    assert!(pool.housekeeping_alive(Duration::from_secs(60)));
+    pool.heartbeat
+        .store(0, std::sync::atomic::Ordering::Relaxed);
+    assert!(!pool.housekeeping_alive(Duration::from_secs(60)));
+    Ok(())
+}

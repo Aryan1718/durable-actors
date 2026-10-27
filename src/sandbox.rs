@@ -206,6 +206,10 @@ pub trait SandboxProvider: Send + Sync {
         anyhow::bail!("provider does not support generic spares")
     }
     async fn stopped_spares(&self, spares: &[SpareHandle]) -> Result<Vec<String>>;
+    /// Deletes finished sandboxes; providers whose sandboxes disappear on exit need nothing.
+    async fn reap_finished(&self) -> Result<()> {
+        Ok(())
+    }
 
     async fn ensure_host(&self, request: &EnsureHostRequest) -> Result<ActorHostHandle>;
     async fn terminate_hosts(&self, request: &TerminateHostsRequest) -> Result<HostTermination>;

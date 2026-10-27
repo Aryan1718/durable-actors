@@ -241,6 +241,55 @@ async fn stopped_spares_reads_the_watch_and_confirms_pods_it_has_not_seen() -> R
     Ok(())
 }
 
+#[tokio::test]
+async fn finished_pods_are_reaped_once_from_the_watch() -> Result<()> {
+    use axum::{
+        Json, Router,
+        extract::{Path, RawQuery},
+        routing::{delete, get},
+    };
+    let mut leaving = pod("leaving", "Succeeded");
+    leaving["metadata"]["deletionTimestamp"] = json!("2026-01-01T00:00:00Z");
+    let items = vec![
+        pod("done", "Succeeded"),
+        pod("crashed", "Failed"),
+        pod("live", "Running"),
+        leaving,
+    ];
+    let deleted = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded = deleted.clone();
+    let routes = Router::new()
+        .route(
+            "/api/v1/namespaces/sandboxes/pods",
+            get(move |RawQuery(query): RawQuery| {
+                let response = pod_collection(query, items.clone(), Vec::new()).0;
+                async move { response }
+            }),
+        )
+        .route(
+            "/api/v1/namespaces/sandboxes/pods/{name}",
+            delete(move |Path(name): Path<String>| async move {
+                recorded.lock().unwrap().push(name);
+                Json(json!({"apiVersion":"v1","kind":"Status","status":"Success"}))
+            }),
+        );
+    let (cluster, _server) = fake_cluster(routes).await?;
+    cluster.observed.wait_until_ready().await?;
+    cluster.reap_finished().await?;
+    let deleted = deleted.lock().unwrap().clone();
+    assert!(
+        deleted.contains(&"done".to_owned()) && deleted.contains(&"crashed".to_owned()),
+        "{deleted:?}"
+    );
+    assert!(
+        !deleted
+            .iter()
+            .any(|name| name == "live" || name == "leaving"),
+        "{deleted:?}"
+    );
+    Ok(())
+}
+
 async fn fake_cluster(
     routes: axum::Router,
 ) -> Result<(Kubernetes, AbortOnDropHandle<std::io::Result<()>>)> {
@@ -255,6 +304,7 @@ async fn fake_cluster(
         GkeConfig {
             namespace: "sandboxes".into(),
             zones: BTreeMap::from([("north-america-west".into(), vec!["us-west4-a".into()])]),
+            reap_concurrency: 4,
         },
     );
     Ok((cluster, server))
