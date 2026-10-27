@@ -711,6 +711,16 @@ fn sandbox_provider_config(
             fleet_maximum,
             max_starting: pool_number(get, "DURABLE_ACTORS_SPARE_MAX_STARTING", 32, 1, u32::MAX)?,
             idle_ttl_seconds: pool_number(get, "DURABLE_ACTORS_SPARE_TTL_SECONDS", 600, 30, 3600)?,
+            refill_interval: Duration::from_millis(
+                pool_number(
+                    get,
+                    "DURABLE_ACTORS_SPARE_REFILL_INTERVAL_MS",
+                    1000,
+                    50,
+                    60_000,
+                )?
+                .into(),
+            ),
             regions,
             resources: host_resources(get)?,
         },

@@ -118,14 +118,17 @@ fn pool_capacity_is_configurable_and_validated() -> Result<()> {
         (defaults.idle, defaults.fleet_maximum, defaults.max_starting),
         (64, 256, 32)
     );
+    assert_eq!(defaults.refill_interval, Duration::from_secs(1));
     values.extend([
         ("DURABLE_ACTORS_SPARE_IDLE", "128"),
         ("DURABLE_ACTORS_SPARE_FLEET_MAX", "512"),
         ("DURABLE_ACTORS_SPARE_MAX_STARTING", "4"),
+        ("DURABLE_ACTORS_SPARE_REFILL_INTERVAL_MS", "250"),
         ("DURABLE_ACTORS_HOST_CPU_MILLIS", "500"),
     ]);
     let configured = parse(&values)?.sandbox_provider.pool;
     assert_eq!(configured.resources.cpu_millis, 500);
+    assert_eq!(configured.refill_interval, Duration::from_millis(250));
     assert_eq!(
         (
             configured.idle,
@@ -138,6 +141,9 @@ fn pool_capacity_is_configurable_and_validated() -> Result<()> {
     assert!(parse(&values).is_err());
     values.insert("DURABLE_ACTORS_SPARE_FLEET_MAX", "512");
     values.insert("DURABLE_ACTORS_SPARE_MAX_STARTING", "0");
+    assert!(parse(&values).is_err());
+    values.insert("DURABLE_ACTORS_SPARE_MAX_STARTING", "4");
+    values.insert("DURABLE_ACTORS_SPARE_REFILL_INTERVAL_MS", "10");
     assert!(parse(&values).is_err());
     Ok(())
 }

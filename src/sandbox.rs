@@ -9,6 +9,7 @@ use crate::host::HostId;
 pub(crate) mod assignment;
 pub(crate) mod connections;
 pub(crate) mod gke;
+mod kube_retry;
 mod local;
 mod local_store;
 pub(crate) mod modal;

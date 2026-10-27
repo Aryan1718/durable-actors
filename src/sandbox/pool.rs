@@ -22,6 +22,7 @@ pub(crate) struct PoolConfig {
     pub fleet_maximum: u32,
     pub max_starting: u32,
     pub idle_ttl_seconds: u32,
+    pub refill_interval: Duration,
     pub regions: Vec<String>,
     pub resources: ResourceLimits,
 }
@@ -151,7 +152,7 @@ impl SparePool {
         let mut reaping = false;
         let mut reap_interval = tokio::time::interval(Duration::from_secs(30));
         reap_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        let mut interval = tokio::time::interval(self.config.refill_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {

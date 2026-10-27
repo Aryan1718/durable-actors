@@ -99,6 +99,8 @@ spec:
             - {name: DURABLE_ACTORS_RAPID_PLACEMENT, value: {{ .Values.storage.rapid.placement | quote }}}
             {{- end }}
             - {name: DURABLE_ACTORS_SPARE_IDLE, value: {{ .Values.actors.warm | quote }}}
+            - {name: DURABLE_ACTORS_SPARE_MAX_STARTING, value: {{ .Values.actors.maxStarting | quote }}}
+            - {name: DURABLE_ACTORS_SPARE_REFILL_INTERVAL_MS, value: {{ .Values.actors.refillIntervalMs | quote }}}
             - {name: DURABLE_ACTORS_HOST_CPU_MILLIS, value: {{ .Values.actors.cpuMillis | quote }}}
             {{- with .Values.actors.cpuLimitMillis }}
             - {name: DURABLE_ACTORS_HOST_CPU_LIMIT_MILLIS, value: {{ . | quote }}}

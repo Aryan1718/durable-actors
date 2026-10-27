@@ -97,17 +97,8 @@ async fn retirement_recovers_a_lost_create_reply_and_uses_a_uid_precondition() -
             },
         ),
     );
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let config = kube::Config::new(format!("http://{}", listener.local_addr()?).parse()?);
-    let server = tokio::spawn(async move { axum::serve(listener, routes).await });
-    let cluster = Kubernetes::new(
-        Client::try_from(config)?,
-        GkeConfig {
-            namespace: "sandboxes".into(),
-            zones: BTreeMap::new(),
-        },
-    );
-    let result = cluster
+    let (cluster, _server) = fake_cluster(routes).await?;
+    cluster
         .retire_spare(&SpareHandle {
             name: "reserved-pod".into(),
             resource_id: String::new(),
@@ -116,9 +107,7 @@ async fn retirement_recovers_a_lost_create_reply_and_uses_a_uid_precondition() -
             control_route: String::new(),
             control_token: String::new(),
         })
-        .await;
-    server.abort();
-    result?;
+        .await?;
     assert_eq!(
         deleted.lock().unwrap().as_ref().unwrap()["preconditions"]["uid"],
         "created-uid"
@@ -127,35 +116,104 @@ async fn retirement_recovers_a_lost_create_reply_and_uses_a_uid_precondition() -
 }
 
 #[tokio::test]
-async fn stopped_spares_identifies_missing_and_completed_pod_identities() -> Result<()> {
-    use axum::{Json, Router, routing::get};
-    let items: Vec<_> = [("live", "Running"), ("pending", "Pending"), ("unknown", "Unknown"), ("done", "Succeeded"), ("crashed", "Failed"), ("replaced", "Running")]
-        .into_iter().map(|(name, phase)| json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":name,"namespace":"sandboxes","uid":format!("{name}-uid")},"status":{"phase":phase}})).collect();
+async fn spares_start_from_one_shared_watch_and_retry_throttled_creates() -> Result<()> {
+    use axum::{
+        Json, Router, extract::RawQuery, http::StatusCode, response::IntoResponse, routing::get,
+    };
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (listed, created) = (requests.clone(), requests.clone());
+    let events = vec![
+        ready_event("warm-a", "10.0.0.1"),
+        ready_event("warm-b", "10.0.0.2"),
+    ];
+    let routes = Router::new().route(
+        "/api/v1/namespaces/sandboxes/pods",
+        get(move |RawQuery(query): RawQuery| {
+            let response = pod_collection(query, Vec::new(), events.clone());
+            listed
+                .lock()
+                .unwrap()
+                .push(if response.1 { "watch" } else { "list" });
+            async move { response.0 }
+        })
+        .post(move |Json(mut pod): Json<serde_json::Value>| async move {
+            let throttled = {
+                let mut requests = created.lock().unwrap();
+                requests.push("create");
+                requests
+                    .iter()
+                    .filter(|request| **request == "create")
+                    .count()
+                    == 1
+            };
+            if throttled {
+                return (
+                    StatusCode::TOO_MANY_REQUESTS,
+                    "Too many requests, please try again later.\n",
+                )
+                    .into_response();
+            }
+            let name = pod["metadata"]["name"].as_str().unwrap().to_owned();
+            pod["metadata"]["namespace"] = json!("sandboxes");
+            pod["metadata"]["uid"] = json!(format!("{name}-uid"));
+            (StatusCode::CREATED, Json(pod)).into_response()
+        }),
+    );
+    let (cluster, _server) = fake_cluster(routes).await?;
+    let (first, second) = futures_util::future::try_join(
+        cluster.create_spare(&spare_request("warm-a")),
+        cluster.create_spare(&spare_request("warm-b")),
+    )
+    .await?;
+    assert_eq!(first.resource_id, "sandboxes/warm-a/warm-a-uid");
+    assert_eq!(first.route, "http://10.0.0.1:7101");
+    assert_eq!(second.control_route, "http://10.0.0.2:7102");
+    let mut requests = requests.lock().unwrap().clone();
+    requests.sort();
+    assert_eq!(requests, ["create", "create", "create", "list", "watch"]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn stopped_spares_reads_the_watch_and_confirms_pods_it_has_not_seen() -> Result<()> {
+    use axum::{
+        Json, Router,
+        extract::{Path, RawQuery},
+        http::StatusCode,
+        response::IntoResponse,
+        routing::get,
+    };
+    let items: Vec<_> = [
+        ("live", "Running"),
+        ("pending", "Pending"),
+        ("unknown", "Unknown"),
+        ("done", "Succeeded"),
+        ("crashed", "Failed"),
+        ("replaced", "Running"),
+    ]
+    .into_iter()
+    .map(|(name, phase)| pod(name, phase))
+    .collect();
     let fail = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let fail_request = fail.clone();
-    let routes = Router::new().route("/api/v1/namespaces/sandboxes/pods", get(move || {
-        let fail = fail_request.clone();
-        let items = items.clone();
-        async move {
-            if fail.load(std::sync::atomic::Ordering::SeqCst) {
-                Err(axum::http::StatusCode::SERVICE_UNAVAILABLE)
-            } else {
-                Ok(Json(json!({"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"10"},"items":items})))
+    let routes = Router::new()
+        .route("/api/v1/namespaces/sandboxes/pods", get(move |RawQuery(query): RawQuery| {
+            let response = pod_collection(query, items.clone(), Vec::new()).0;
+            async move { response }
+        }))
+        .route("/api/v1/namespaces/sandboxes/pods/{name}", get(move |Path(name): Path<String>| {
+            let fail = fail_request.load(std::sync::atomic::Ordering::SeqCst);
+            async move {
+                match name.as_str() {
+                    _ if fail => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+                    "fresh" | "replaced" => Json(pod(&name, "Running")).into_response(),
+                    _ => (StatusCode::NOT_FOUND, Json(json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404}))).into_response(),
+                }
             }
-        }
-    }));
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
-    let config = kube::Config::new(format!("http://{}", listener.local_addr()?).parse()?);
-    let server = tokio::spawn(async move { axum::serve(listener, routes).await });
-    let cluster = Kubernetes::new(
-        Client::try_from(config)?,
-        GkeConfig {
-            namespace: "sandboxes".into(),
-            zones: BTreeMap::new(),
-        },
-    );
+        }));
+    let (cluster, _server) = fake_cluster(routes).await?;
     let spares: Vec<_> = [
-        "live", "pending", "unknown", "done", "crashed", "missing", "replaced",
+        "live", "pending", "unknown", "fresh", "done", "crashed", "missing", "replaced",
     ]
     .into_iter()
     .map(|name| SpareHandle {
@@ -173,15 +231,73 @@ async fn stopped_spares_identifies_missing_and_completed_pod_identities() -> Res
     let stopped = cluster.stopped_spares(&spares).await?;
     assert_eq!(
         stopped,
-        spares[3..]
+        spares[4..]
             .iter()
             .map(|s| s.resource_id.clone())
             .collect::<Vec<_>>()
     );
     fail.store(true, std::sync::atomic::Ordering::SeqCst);
     assert!(cluster.stopped_spares(&spares).await.is_err());
-    server.abort();
     Ok(())
+}
+
+async fn fake_cluster(
+    routes: axum::Router,
+) -> Result<(Kubernetes, AbortOnDropHandle<std::io::Result<()>>)> {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let config = kube::Config::new(format!("http://{}", listener.local_addr()?).parse()?);
+    let server =
+        AbortOnDropHandle::new(tokio::spawn(
+            async move { axum::serve(listener, routes).await },
+        ));
+    let cluster = Kubernetes::new(
+        Client::try_from(config)?,
+        GkeConfig {
+            namespace: "sandboxes".into(),
+            zones: BTreeMap::from([("north-america-west".into(), vec!["us-west4-a".into()])]),
+        },
+    );
+    Ok((cluster, server))
+}
+
+/// Serves a pod list, or a watch that sends `events` and then stays open.
+fn pod_collection(
+    query: Option<String>,
+    items: Vec<serde_json::Value>,
+    events: Vec<serde_json::Value>,
+) -> (axum::response::Response, bool) {
+    use axum::response::IntoResponse;
+    if !query.unwrap_or_default().contains("watch=true") {
+        let list = json!({"apiVersion":"v1","kind":"PodList","metadata":{"resourceVersion":"10"},"items":items});
+        return (axum::Json(list).into_response(), false);
+    }
+    let lines = events
+        .into_iter()
+        .map(|event| Ok::<_, std::io::Error>(bytes::Bytes::from(format!("{event}\n"))));
+    let stream = futures_util::stream::iter(lines).chain(futures_util::stream::pending());
+    (axum::body::Body::from_stream(stream).into_response(), true)
+}
+
+fn pod(name: &str, phase: &str) -> serde_json::Value {
+    json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":name,"namespace":"sandboxes","uid":format!("{name}-uid"),"resourceVersion":"11"},"status":{"phase":phase}})
+}
+
+fn ready_event(name: &str, ip: &str) -> serde_json::Value {
+    let mut pod = pod(name, "Running");
+    pod["status"]["podIP"] = json!(ip);
+    pod["status"]["conditions"] = json!([{"type":"Ready","status":"True"}]);
+    json!({"type":"ADDED","object":pod})
+}
+
+fn spare_request(name: &str) -> CreateSpareRequest {
+    CreateSpareRequest {
+        control_plane_url: Some("http://control:7100".into()),
+        kind: SpareKind::Actor,
+        name: name.into(),
+        image_ref: "runtime@sha256:abc".into(),
+        canonical_region: "north-america-west".into(),
+        resources: ResourceLimits::default(),
+    }
 }
 
 #[test]

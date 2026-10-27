@@ -604,6 +604,7 @@ fn sandbox_resources_override_only_the_configured_fields() -> Result<()> {
             fleet_maximum: 64,
             max_starting: 8,
             idle_ttl_seconds: 600,
+            refill_interval: Duration::from_secs(1),
             regions: vec!["north-america-east".into()],
             resources: crate::sandbox::ResourceLimits {
                 cpu_millis: 4000,

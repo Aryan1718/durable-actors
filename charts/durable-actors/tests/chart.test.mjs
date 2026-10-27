@@ -111,6 +111,12 @@ test("allows extra controllers and a small warm pool", () => {
     assert.match(output, /kind: PodDisruptionBudget/)
 })
 
+test("configures how fast warm pools refill", () => {
+    const output = manifests({ actors: { maxStarting: 128, refillIntervalMs: 250 } })
+    assert.match(output, /DURABLE_ACTORS_SPARE_MAX_STARTING, value: "128"/)
+    assert.match(output, /DURABLE_ACTORS_SPARE_REFILL_INTERVAL_MS, value: "250"/)
+})
+
 for (const [name, overrides] of [
     ["unknown storage mode", { storage: { mode: "standrad" } }],
     ["missing Rapid placements", { storage: { mode: "rapid" } }],
@@ -126,7 +132,8 @@ for (const [name, overrides] of [
     ["insecure public URL", { publicUrl: "http://actors.example.com" }],
     ["shared trust namespace", { sandboxNamespace: "actors" }],
     ["missing ingress certificate", { ingress: { enabled: true } }],
-    ["warm pool above fleet limit", { actors: { warm: 300 } }]
+    ["warm pool above fleet limit", { actors: { warm: 300 } }],
+    ["refill interval below 50 ms", { actors: { refillIntervalMs: 10 } }]
 ]) test(`rejects ${name}`, () => assert.notEqual(render(overrides).status, 0))
 
 test("deploys the control plane separately and configures language-specific actor images", () => {

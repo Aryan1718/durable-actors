@@ -141,6 +141,15 @@
           "minimum": 0,
           "maximum": 256
         },
+        "maxStarting": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "refillIntervalMs": {
+          "type": "integer",
+          "minimum": 50,
+          "maximum": 60000
+        },
         "cpuMillis": {
           "type": "integer",
           "minimum": 1

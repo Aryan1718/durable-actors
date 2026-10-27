@@ -30,6 +30,7 @@ When upgrading from the shared image configuration, replace `image.repository` a
 
 - One controller handles API requests and WebSockets.
 - Actor pods start on demand: `actors.warm: 0`.
+- Warm pools refill every second (`actors.refillIntervalMs`), starting up to 32 spares at once across controllers (`actors.maxStarting`).
 - The controller checks for due alarms every 100 milliseconds; configure `alarms.pollIntervalMs` to change the cadence.
 - Project activation limits default to 500 starting/running hosts, 50 starts per second, and a burst of 100. Operators configure `projectLimits.enabled`, `projectLimits.maxActiveActors`, `projectLimits.actorStartsPerSecond`, and `projectLimits.actorStartBurst`. Configured Redis shares enforcement across replicas; a single controller without Redis uses memory. See [project overrides](../../docs/reference/configuration.md#project-actor-limits) for manual PostgreSQL overrides and missing-stop handling.
 - Each actor requests and is limited to 500 millicores and 256 MiB unless its deployment overrides resources.
