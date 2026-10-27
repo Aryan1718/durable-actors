@@ -314,7 +314,7 @@ fn temporary_storage_is_disk_backed_and_bounded() {
         },
     );
     let resources = &pod["spec"]["containers"][0]["resources"];
-    assert_eq!(resources["requests"]["ephemeral-storage"], "1Gi");
+    assert_eq!(resources["requests"]["ephemeral-storage"], "256Mi");
     assert_eq!(resources["limits"]["ephemeral-storage"], "8Gi");
     for volume in pod["spec"]["volumes"].as_array().unwrap() {
         assert!(volume["emptyDir"]["medium"].is_null());

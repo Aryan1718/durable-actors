@@ -272,7 +272,7 @@ fn container_resources(resources: &ResourceLimits) -> serde_json::Value {
         limits["memory"] = json!(format!("{memory}Mi"));
     }
     json!({
-        "requests":{"ephemeral-storage":"1Gi","cpu":format!("{}m", resources.cpu_millis),"memory":format!("{}Mi", resources.memory_mib)},
+        "requests":{"ephemeral-storage":"256Mi","cpu":format!("{}m", resources.cpu_millis),"memory":format!("{}Mi", resources.memory_mib)},
         "limits":limits
     })
 }
