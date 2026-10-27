@@ -57,7 +57,6 @@ function fixture(invoke: (attempt: number) => Promise<Response>) {
             schedule: () => () => {},
             createTransport: options =>
                 new HttpActorClient(options, {
-                    now: () => now,
                     fetch: async (url, init) => {
                         assert.equal(init?.method, "POST")
                         const authorization = new Headers(init.headers).get("authorization")

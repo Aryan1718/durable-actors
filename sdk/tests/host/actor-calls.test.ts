@@ -27,7 +27,6 @@ class Relay extends Actor {
 
 test("actors invoke, broadcast, and open sockets through the remote client", async () => {
     const events: string[] = []
-    const target = { route: "https://host.test", token: "ticket", ownerEpoch: 1, expiresAtMs: 4_000_000_000_000 }
     const transport = new RemoteActorClient(
         { controlPlaneUrl: "https://control.test", projectId: "test" },
         {
@@ -36,21 +35,16 @@ test("actors invoke, broadcast, and open sockets through the remote client", asy
                 if (String(url).endsWith("/invoke")) {
                     assert.equal(JSON.parse(String(options?.body)).method, "increment")
                     events.push("invoke")
-                    return Response.json({ target, outcome: { type: "completed", result: 3 } })
+                    return Response.json({ outcome: { type: "completed", result: 3 } })
+                }
+                if (String(url).endsWith("/socket-effects")) {
+                    assert.equal(JSON.parse(String(options?.body)).effects.length, 1)
+                    events.push("broadcast")
+                    return new Response(null, { status: 204 })
                 }
                 assert.ok(String(url).endsWith("/find-websocket"))
                 events.push("connect")
                 return Response.json({ websocketUrl: "wss://host.test/socket" })
-            },
-            actorHost: {
-                async invoke() {
-                    return assert.fail("unexpected direct invocation")
-                },
-                async publish(_target, actor, effects) {
-                    assert.equal(actor.actorId, "destination")
-                    assert.equal(effects.length, 1)
-                    events.push("broadcast")
-                }
             },
             connectWebSocket: async (): Promise<ActorConnection> => ({
                 readyState: 1,

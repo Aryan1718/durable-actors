@@ -53,13 +53,6 @@ async fn reconcile_and_correct(
     assert_eq!(estimate.event.event_id, "session:2:estimated");
     assert_eq!(estimate.event.received_at_ms, 46000);
     assert_eq!(estimate.event.report.kind, LifecycleKind::Stopped);
-    let actor = &estimate.event.actor;
-    assert_eq!(
-        first
-            .routing(&actor.storage_key(), "host", "session", 1)
-            .await,
-        None
-    );
     assert_eq!(first.actor_inventory("project").await?.actors[0].unknown, 1);
     assert_eq!(
         persistence.latest("project").await?[0].report.kind,

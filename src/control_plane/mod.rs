@@ -23,6 +23,7 @@ mod project_limits;
 mod protocol;
 mod public_api;
 mod regions;
+mod routes;
 mod service;
 pub(crate) mod session;
 pub(crate) mod socket_ticket;

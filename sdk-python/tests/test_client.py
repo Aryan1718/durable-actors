@@ -9,36 +9,25 @@ import pytest
 from durable_actors.client import ActorInvocationError, Client
 
 
-def test_caches_route_and_retries_only_explicit_non_execution():
+def test_gateway_calls_retry_only_explicit_non_execution():
     calls = []
-    target = {
-        "route": "http://host.test",
-        "token": "ticket",
-        "ownerEpoch": 1,
-        "expiresAtMs": 9999999999999,
-    }
 
     def handle(request):
-        calls.append(request.url.host)
-        if request.url.host == "host.test":
-            return httpx.Response(200, json={"type": "not_executed", "reason": "host_unavailable"})
-        return httpx.Response(
-            200, json={"target": target, "outcome": {"type": "completed", "result": 3}}
+        calls.append(request)
+        outcome = (
+            {"type": "not_executed", "reason": "host_unavailable"}
+            if len(calls) == 2
+            else {"type": "completed", "result": 3}
         )
+        return httpx.Response(200, json={"outcome": outcome})
 
     with httpx.Client(transport=httpx.MockTransport(handle)) as http:
-        with Client("http://control.test", project_id="test", http=http) as client:
+        with Client("http://control.test", project_id="test", api_key="key", http=http) as client:
             assert client.invoke("Counter", "one", "increment", []) == 3
             assert client.invoke("Counter", "one", "increment", []) == 3
-    assert calls == ["control.test", "host.test", "control.test"]
-
-
-TARGET = {
-    "route": "http://host.test",
-    "token": "ticket",
-    "ownerEpoch": 1,
-    "expiresAtMs": 9999999999999,
-}
+    assert [request.url.host for request in calls] == ["control.test"] * 3
+    assert all(request.headers["authorization"] == "Bearer key" for request in calls)
+    assert calls[1].content == calls[2].content
 
 
 def refused():
@@ -75,13 +64,10 @@ def invoke_through(failing_host, failure):
         if request.url.host == failing_host:
             raise failure()
         outcome = {"type": "completed", "result": len(calls)}
-        return httpx.Response(200, json={"target": TARGET, "outcome": outcome})
+        return httpx.Response(200, json={"outcome": outcome})
 
     with httpx.Client(transport=httpx.MockTransport(handle)) as http:
         with Client("http://control.test", project_id="test", http=http) as client:
-            if failing_host == "host.test":
-                client.invoke("Counter", "one", "increment", [])
-                calls.clear()
             try:
                 return client.invoke("Counter", "one", "increment", []), calls
             except ActorInvocationError as error:
@@ -103,19 +89,6 @@ def test_control_plane_request_that_may_have_been_sent_is_not_replayed(failure):
     assert isinstance(error, ActorInvocationError)
     assert error.code == "outcome_unknown"
     assert calls == ["control.test"]
-
-
-@NEVER_SENT
-def test_cached_host_request_that_was_never_sent_retries_through_the_control_plane(failure):
-    assert invoke_through("host.test", failure) == (2, ["host.test", "control.test"])
-
-
-@MAYBE_SENT
-def test_cached_host_request_that_may_have_been_sent_is_not_replayed(failure):
-    error, calls = invoke_through("host.test", failure)
-    assert isinstance(error, ActorInvocationError)
-    assert error.code == "outcome_unknown"
-    assert calls == ["host.test"]
 
 
 def test_default_client_shares_its_pool_and_closes_it_at_process_exit(tmp_path):

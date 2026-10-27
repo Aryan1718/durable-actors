@@ -905,10 +905,6 @@ struct SocketTestProvisioner;
 
 #[async_trait]
 impl HostProvisioner for SocketTestProvisioner {
-    fn host_idle_timeout_ms(&self) -> u64 {
-        10_000
-    }
-
     async fn prepare_deployment(
         &self,
         source: &HostLaunchSpec,
@@ -974,8 +970,19 @@ async fn http_invocations_and_socket_delivery_are_actor_bound() -> Result<()> {
         .await?;
     let route = &stack.host_route;
     let gateway = &stack.gateway;
-    let token = target["token"].as_str().context("token missing")?;
-    let epoch = target["ownerEpoch"].as_u64().context("epoch missing")?;
+    assert_eq!(target, serde_json::json!({"homeRegion":"us-east"}));
+    let epoch = 1;
+    let ticket = stack.issuer.issue_invocation_target(
+        &stack.actor,
+        &stack.host_id,
+        "00000000-0000-4000-8000-000000000001",
+        "revision",
+        "us-east",
+        epoch,
+        None,
+        route,
+    )?;
+    let token = &ticket.token;
     let url = format!("{route}/v1/projects/default/actors/Counter/counter-1");
     let invocation = serde_json::json!({"requestId":"http-change", "ownerEpoch":epoch, "routingMs":0.0, "method":"change", "args":[]});
     assert_eq!(
@@ -998,12 +1005,12 @@ async fn http_invocations_and_socket_delivery_are_actor_bound() -> Result<()> {
     assert_completed_invocation(reply, serde_json::Value::Null);
     let update = receive(&mut socket).await?;
     assert_eq!(update["changes"]["count"], 2);
-    let command = serde_json::json!({"ownerEpoch":epoch, "effects":[{"type":"broadcast", "message":{"type":"text", "data":"{\"notice\":\"hello\"}"}, "except_connection_ids":[], "tags":[]}]});
+    let command = serde_json::json!({"effects":[{"type":"broadcast", "message":{"type":"text", "data":"{\"notice\":\"hello\"}"}, "except_connection_ids":[], "tags":[]}]});
     assert_eq!(
         http.post(format!(
             "{gateway}/v1/projects/default/actors/Counter/counter-1/socket-effects"
         ))
-        .bearer_auth(token)
+        .bearer_auth("test-api-key")
         .json(&command)
         .send()
         .await?
@@ -1078,7 +1085,8 @@ async fn delegated_http_invocations_enforce_methods_and_socket_boundaries() -> R
         "{}/v1/projects/default/actors/Counter/counter-1",
         stack.host_route
     );
-    let epoch = target["ownerEpoch"].as_u64().unwrap();
+    assert_eq!(target, serde_json::json!({"homeRegion":"us-east"}));
+    let epoch = 1;
     let expiry = crate::control_plane::auth::unix_seconds()? + 60;
     let ticket = stack
         .issuer
@@ -1146,11 +1154,11 @@ async fn combined_invocation_commits_a_real_actor_call_and_returns_its_result() 
     let warm: serde_json::Value = reqwest::Client::new()
         .post(format!(
             "{}/v1/projects/default/actors/Counter/counter-1/invoke",
-            reply["target"]["route"].as_str().unwrap()
+            stack.gateway
         ))
-        .bearer_auth(reply["target"]["token"].as_str().unwrap())
+        .bearer_auth("test-api-key")
         .json(&serde_json::json!({
-            "requestId":"warm-call", "ownerEpoch":reply["target"]["ownerEpoch"],
+            "requestId":"warm-call",
             "method":"readHistory", "args":[]
         }))
         .send()
@@ -1158,7 +1166,7 @@ async fn combined_invocation_commits_a_real_actor_call_and_returns_its_result() 
         .error_for_status()?
         .json()
         .await?;
-    assert_completed_invocation(warm, serde_json::json!("saved"));
+    assert_completed_invocation(warm["outcome"].clone(), serde_json::json!("saved"));
     stack.child.kill().await?;
     Ok(())
 }

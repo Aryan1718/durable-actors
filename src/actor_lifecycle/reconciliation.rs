@@ -132,10 +132,11 @@ impl UsageSessions for RedisUsageSessions {
 }
 
 fn session_key(event: &LifecycleEvent) -> String {
-    super::routing::session_key(
-        &event.actor.storage_key(),
+    serde_json::to_string(&(
+        event.actor.storage_key(),
         &event.host_id,
         &event.session_id,
         event.report.owner_epoch,
-    )
+    ))
+    .expect("serializable actor session")
 }

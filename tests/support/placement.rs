@@ -1,4 +1,10 @@
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering},
+    },
+};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -8,6 +14,7 @@ use crate::{actor_state::ActorStorageKey, host_leases::HostLease};
 
 #[derive(Default)]
 pub(crate) struct LocalObjectPlacementStore {
+    reads: AtomicUsize,
     placements: Mutex<HashMap<ActorStorageKey, ObjectPlacement>>,
 }
 
@@ -20,6 +27,7 @@ impl ObjectPlacementStore for LocalObjectPlacementStore {
         Option<ObjectPlacement>,
         Option<crate::bucket::OwnershipHint>,
     )> {
+        self.reads.fetch_add(1, Ordering::SeqCst);
         Ok((self.get(object).await?, None))
     }
 
@@ -34,26 +42,36 @@ impl ObjectPlacementStore for LocalObjectPlacementStore {
 }
 
 impl LocalObjectPlacementStore {
+    pub fn reads(&self) -> usize {
+        self.reads.load(Ordering::SeqCst)
+    }
+
     pub fn set_owner(
         &self,
         object: &ActorStorageKey,
         lease: HostLease,
         home_region: &str,
-    ) -> Result<()> {
+    ) -> Result<u64> {
         validate_region(home_region)?;
-        self.placements.lock().unwrap().insert(
+        let mut placements = self.placements.lock().unwrap();
+        let owner_epoch = match placements.get(object) {
+            Some(current) if current.lease.session_id == lease.session_id => current.owner_epoch,
+            Some(current) => current.owner_epoch + 1,
+            None => 1,
+        };
+        placements.insert(
             object.clone(),
             ObjectPlacement {
                 owner: lease.id.clone(),
                 lease,
                 object: object.clone(),
-                owner_epoch: 1,
+                owner_epoch,
                 home_region: home_region.into(),
                 state_version: 0,
                 state_object: None,
                 last_request_id: None,
             },
         );
-        Ok(())
+        Ok(owner_epoch)
     }
 }

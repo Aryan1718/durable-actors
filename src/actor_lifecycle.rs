@@ -21,7 +21,6 @@ const STALE_AFTER_MS: u64 = 35_000;
 
 mod pubsub;
 pub(crate) mod reconciliation;
-pub(crate) mod routing;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -116,7 +115,6 @@ pub(crate) trait LifecycleObserver: Send + Sync {
 #[derive(Clone)]
 pub(crate) struct LifecycleStore {
     persistence: Arc<dyn LifecyclePersistence>,
-    routing: Arc<dyn routing::RoutingHints>,
     usage: Option<Arc<dyn UsagePublisher>>,
     usage_sessions: Arc<dyn reconciliation::UsageSessions>,
     observer: Option<Arc<dyn LifecycleObserver>>,
@@ -135,15 +133,7 @@ impl LifecycleStore {
             usage: None,
             observer: None,
             usage_sessions: Arc::new(reconciliation::MemoryUsageSessions::default()),
-            routing: Arc::new(routing::MemoryRoutingHints::new(Duration::from_secs(
-                86_460,
-            ))),
         }
-    }
-
-    pub(crate) fn with_routing(mut self, routing: Arc<dyn routing::RoutingHints>) -> Self {
-        self.routing = routing;
-        self
     }
 
     pub(crate) fn with_observer(mut self, observer: Arc<dyn LifecycleObserver>) -> Self {
@@ -181,9 +171,8 @@ impl LifecycleStore {
             event.report.occurred_at_ms >= event.report.started_at_ms,
             "invalid lifecycle time range"
         );
-        let (persisted, (), (), observed) = tokio::join!(
+        let (persisted, (), observed) = tokio::join!(
             self.persistence.record(&event),
-            self.record_routing(&event),
             self.record_usage(&event),
             async {
                 match &self.observer {
@@ -214,26 +203,6 @@ impl LifecycleStore {
             };
             tokio::select! { _ = stop.cancelled() => {}, _ = work => {} }
         });
-    }
-
-    pub(crate) async fn routing(
-        &self,
-        actor: &crate::actor_state::ActorStorageKey,
-        host: &str,
-        session: &str,
-        epoch: u64,
-    ) -> Option<LifecycleKind> {
-        match self
-            .routing
-            .get(&routing::session_key(actor, host, session, epoch))
-            .await
-        {
-            Ok(hint) => hint,
-            Err(error) => {
-                tracing::warn!(%error, "shutdown hint unavailable; routing with ownership lease");
-                None
-            }
-        }
     }
 
     async fn record_usage(&self, event: &LifecycleEvent) {
@@ -275,24 +244,6 @@ impl LifecycleStore {
                 tracing::warn!(event_id = update.event.event_id, %error, "usage publication failed");
             }
         });
-    }
-
-    async fn record_routing(&self, event: &LifecycleEvent) {
-        if !matches!(
-            event.report.kind,
-            LifecycleKind::Draining | LifecycleKind::Stopped
-        ) {
-            return;
-        }
-        let key = routing::session_key(
-            &event.actor.storage_key(),
-            &event.host_id,
-            &event.session_id,
-            event.report.owner_epoch,
-        );
-        if let Err(error) = self.routing.record(&key, event.report.kind).await {
-            tracing::warn!(%error, "host shutdown hint could not be recorded");
-        }
     }
 }
 

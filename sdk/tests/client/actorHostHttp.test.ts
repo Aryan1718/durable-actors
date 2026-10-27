@@ -1,39 +1,8 @@
 import assert from "node:assert/strict"
 import { test } from "node:test"
 
-import { HttpActorHostTransport } from "../../src/client-runtime/http.js"
+import { connectionRefused, parseActorHostReply } from "../../src/client-runtime/http.js"
 import { ActorProtocolError } from "../../src/errors.js"
-
-const target = { route: "https://host.example", token: "ticket", ownerEpoch: 3, expiresAtMs: 4000000000000 }
-const invocation = {
-    projectId: "team",
-    actorName: "Counter",
-    actorId: "one",
-    requestId: "request-1",
-    method: "increment",
-    args: [2]
-}
-
-test("HTTP invocation sends its ticket, epoch, method and arguments in one POST", async () => {
-    const methods: string[] = []
-    const transport = new HttpActorHostTransport(async (url, init) => {
-        assert.equal(url, "https://host.example/v1/projects/team/actors/Counter/one/invoke")
-        assert.ok(init?.method)
-        methods.push(init.method)
-        assert.equal(init?.method, "POST")
-        assert.equal(new Headers(init?.headers).get("authorization"), "Bearer ticket")
-        assert.equal(init?.redirect, "manual")
-        assert.deepEqual(JSON.parse(String(init?.body)), {
-            requestId: "request-1",
-            ownerEpoch: 3,
-            method: "increment",
-            args: [2]
-        })
-        return Response.json({ type: "completed", result: 7 })
-    })
-    assert.deepEqual(await transport.invoke(target, invocation), { type: "completed", result: 7 })
-    assert.deepEqual(methods, ["POST"])
-})
 
 test("HTTP replies preserve host latency metadata for every outcome", async () => {
     for (const outcome of [
@@ -50,8 +19,7 @@ test("HTTP replies preserve host latency metadata for every outcome", async () =
                 hostState: outcome.type === "completed" ? "cold" : "warm"
             }
         }
-        const transport = new HttpActorHostTransport(async () => Response.json(reply))
-        assert.deepEqual(await transport.invoke(target, invocation), reply)
+        assert.deepEqual(parseActorHostReply(reply), reply)
     }
 })
 
@@ -71,22 +39,8 @@ test("HTTP replies reject invalid host latency metadata", async () => {
         { routingMs: 500, durationMs: 12, queueWaitMs: 2, hostState: true },
         { routingMs: 500, durationMs: 12, queueWaitMs: 2 }
     ]) {
-        const transport = new HttpActorHostTransport(async () =>
-            Response.json({ type: "completed", result: 7, metadata })
-        )
-        await assert.rejects(transport.invoke(target, invocation), ActorProtocolError)
+        assert.throws(() => parseActorHostReply({ type: "completed", result: 7, metadata }), ActorProtocolError)
     }
-})
-
-test("only a pre-dispatch HTTP 401 is an authentication refresh signal", async () => {
-    for (const status of [401, 403, 500, 503, 504]) {
-        const transport = new HttpActorHostTransport(async () => new Response("rejected", { status }))
-        if (status === 401) assert.deepEqual(await transport.invoke(target, invocation), { type: "unauthenticated" })
-        else await assert.rejects(transport.invoke(target, invocation))
-    }
-    const failure = { type: "failed", code: "unauthenticated", message: "method failed" }
-    const transport = new HttpActorHostTransport(async () => Response.json(failure))
-    assert.deepEqual(await transport.invoke(target, invocation), failure)
 })
 
 test("HTTP replies require an explicit valid outcome", async () => {
@@ -100,8 +54,7 @@ test("HTTP replies require an explicit valid outcome", async () => {
         { type: "not_executed", reason: "unknown" },
         { type: "not_executed", reason: 1 }
     ]) {
-        const transport = new HttpActorHostTransport(async () => Response.json(document))
-        await assert.rejects(transport.invoke(target, invocation), ActorProtocolError)
+        assert.throws(() => parseActorHostReply(document), ActorProtocolError)
     }
 })
 
@@ -112,13 +65,7 @@ test("connection refusals identify requests that were never dispatched", async (
         new TypeError("fetch failed", { cause: refused() }),
         new TypeError("fetch failed", { cause: new AggregateError([refused(), refused()]) })
     ]) {
-        const transport = new HttpActorHostTransport(async () => {
-            throw error
-        })
-        assert.deepEqual(await transport.invoke(target, invocation), {
-            type: "not_executed",
-            reason: "upstream_not_reached"
-        })
+        assert.equal(connectionRefused(error), true)
     }
 })
 
@@ -137,30 +84,13 @@ test("unproven transport failures preserve ambiguity", async () => {
         new AggregateError([]),
         cyclic
     ]) {
-        const transport = new HttpActorHostTransport(async () => {
-            throw error
-        })
-        await assert.rejects(transport.invoke(target, invocation), failure => failure === error)
+        assert.equal(connectionRefused(error), false)
     }
-})
-
-test("socket broadcasts use actor-scoped HTTP with the same ownership ticket", async () => {
-    const effects = [
-        { type: "broadcast", message: { type: "text", data: "hello" }, except_connection_ids: [], tags: [] }
-    ]
-    const transport = new HttpActorHostTransport(async (url, init) => {
-        assert.equal(url, "https://host.example/v1/projects/team/actors/Counter/one/socket-effects")
-        assert.equal(new Headers(init?.headers).get("authorization"), "Bearer ticket")
-        assert.deepEqual(JSON.parse(String(init?.body)), { ownerEpoch: 3, effects })
-        return new Response(null, { status: 204 })
-    })
-    await transport.publish(target, invocation, effects)
 })
 
 test("explicit pre-execution rejections preserve their reason", async () => {
     for (const reason of ["host_unavailable", "upstream_not_reached"]) {
         const reply = { type: "not_executed", reason }
-        const transport = new HttpActorHostTransport(async () => Response.json(reply))
-        assert.deepEqual(await transport.invoke(target, invocation), reply)
+        assert.deepEqual(parseActorHostReply(reply), reply)
     }
 })

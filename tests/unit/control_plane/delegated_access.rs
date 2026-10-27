@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 #[tokio::test]
 async fn project_sessions_discover_all_published_actors_but_never_grant_admin_access() -> Result<()>
 {
-    let (service, admin, expiry, verifier) = fixture(Some("admin-secret")).await?;
+    let (service, admin, expiry, _verifier) = fixture(Some("admin-secret")).await?;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let origin = format!("http://{}", listener.local_addr()?);
     let router = super::super::super::public_api::router(service, admin);
@@ -48,17 +48,7 @@ async fn project_sessions_discover_all_published_actors_but_never_grant_admin_ac
             .error_for_status()?
             .json()
             .await?;
-        assert!(reply["expiresAtMs"].as_i64().unwrap() <= expiry * 1000);
-        let principal = verifier
-            .authenticate_authorization(&format!("Bearer {}", reply["token"].as_str().unwrap()))?;
-        let capability = principal.invocation.unwrap();
-        assert_eq!(capability.actor.project_id, "default");
-        assert_eq!(capability.actor.actor_name, actor_name);
-        assert_eq!(capability.actor.actor_id, actor_id);
-        let grant = capability.grant.unwrap();
-        assert_eq!(grant.subject, "terse-credential");
-        assert_eq!(grant.expires_at, expiry);
-        assert_eq!(grant.methods, vec!["clear", "sendMessage"]);
+        assert_eq!(reply, json!({"homeRegion":"north-america-central"}));
     }
     assert_eq!(
         client

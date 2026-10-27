@@ -1,4 +1,3 @@
-use crate::request_tracking::HostState;
 use axum::{
     Json, Router,
     extract::{DefaultBodyLimit, Path, State, rejection::JsonRejection},
@@ -359,7 +358,11 @@ async fn find_actor(
     request: Result<Json<FindActorRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let target = resolve_actor_target(&state, &path.into_actor(), &headers, request, None).await?;
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(target)).into_response())
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(serde_json::json!({"homeRegion": target.home_region})),
+    )
+        .into_response())
 }
 
 pub(super) async fn resolve_actor_target(
@@ -368,7 +371,7 @@ pub(super) async fn resolve_actor_target(
     headers: &HeaderMap,
     request: Result<Json<FindActorRequest>, JsonRejection>,
     invocation: Option<&crate::actor::ActorInvocation>,
-) -> Result<ActorTargetReply, ApiError> {
+) -> Result<super::service::ActorTarget, ApiError> {
     let mut timings = TargetResolutionTimings::new();
     let request_id = headers
         .get("x-request-id")
@@ -391,7 +394,7 @@ pub(super) async fn resolve_actor_target(
         .invocations
         .validate_home_region(request.home_region.as_deref())
         .map_err(ApiError::assignment)?;
-    let result: Result<ActorTargetReply, ApiError> = async {
+    let result: Result<super::service::ActorTarget, ApiError> = async {
         actor.validate().map_err(ApiError::bad_request)?;
         timings.request_validated_at_ms = Some(timings.elapsed_ms());
         timings.client_authenticated_at_ms = Some(timings.elapsed_ms());
@@ -446,21 +449,7 @@ pub(super) async fn resolve_actor_target(
             )
             .await
             .map_err(ApiError::routing)?;
-        Ok(ActorTargetReply {
-            initial_reply: target.initial_reply,
-            host_state: target.host_state,
-            home_region: target.home_region,
-            backend_route: target.route.clone(),
-            route: state
-                .invocations
-                .gateway
-                .as_ref()
-                .map_or(target.route, |gateway| gateway.origin.clone()),
-            token: target.token,
-            owner_epoch: target.owner_epoch,
-
-            expires_at_ms: target.expires_at_ms,
-        })
+        Ok(target)
     }
     .await;
     let completed_at_ms = timings.elapsed_ms();
@@ -591,23 +580,6 @@ struct CurrentDeployment {
 #[serde(rename_all = "camelCase")]
 struct DeploymentReply {
     changed: bool,
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(super) struct ActorTargetReply {
-    #[serde(skip)]
-    pub initial_reply: Option<Value>,
-    #[serde(skip)]
-    pub host_state: HostState,
-    #[serde(skip)]
-    pub backend_route: String,
-    home_region: String,
-    pub route: String,
-    pub token: String,
-    pub owner_epoch: u64,
-
-    expires_at_ms: i64,
 }
 
 pub(super) struct ApiError {

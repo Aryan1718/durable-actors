@@ -23,7 +23,6 @@ from .client import (
     document,
     invocation_outcome,
     invocation_response,
-    validate_target,
 )
 from .guards import is_document
 
@@ -147,10 +146,7 @@ class AsyncClient(ClientConfiguration):
             raise ValueError("state and state_update messages are reserved")
         data = json.dumps(message, separators=(",", ":"), allow_nan=False)
         request_id = str(uuid.uuid4())
-        key = actor_name, actor_id
-        target = await self._target(key, path, request_id)
         payload: dict[str, Any] = {
-            "ownerEpoch": target["ownerEpoch"],
             "effects": [
                 {
                     "type": "broadcast",
@@ -162,14 +158,20 @@ class AsyncClient(ClientConfiguration):
         }
         try:
             response = await self._http.post(
-                target["route"] + path + "/socket-effects",
-                headers={"authorization": f"Bearer {target['token']}", "x-request-id": request_id},
+                self.origin + path + "/socket-effects",
+                headers={**self.headers, "x-request-id": request_id},
                 json=payload,
                 follow_redirects=False,
             )
             response.raise_for_status()
         except httpx.HTTPError as error:
-            self._targets.pop(key, None)
+            if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in {
+                401,
+                403,
+            }:
+                raise ActorInvocationError(
+                    "unauthenticated", request_id, "application credential rejected"
+                ) from error
             raise ActorInvocationError(
                 "outcome_unknown", request_id, "broadcast delivery could not be confirmed"
             ) from error
@@ -197,47 +199,23 @@ class AsyncClient(ClientConfiguration):
         path = self.actor_path(actor_name, actor_id)
         component(method, 255)
         json.dumps(args, allow_nan=False)
-        key = actor_name, actor_id
         for attempt in range(2):
-            target = self._targets.get(key)
-            if target is not None and target["expiresAtMs"] <= time.time() * 1000:
-                target = None
-                self._targets.pop(key, None)
             try:
-                reply = await self._invoke_attempt(path, request_id, method, args, target, key)
+                reply = await self._invoke_attempt(path, request_id, method, args)
             except httpx.TransportError as error:
-                self._targets.pop(key, None)
                 if not isinstance(error, NEVER_SENT):
                     raise ActorInvocationError(
                         "outcome_unknown",
                         request_id,
                         "invocation response was lost; execution may have occurred",
                     ) from error
-                if target is None:
-                    raise ActorInvocationError(
-                        "unavailable", request_id, f"could not connect to {self.origin}: {error}"
-                    ) from error
-                reply = {"type": "not_executed", "reason": "upstream_not_reached"}
+                raise ActorInvocationError(
+                    "unavailable", request_id, f"could not connect to {self.origin}: {error}"
+                ) from error
             completed, result = invocation_outcome(reply, request_id, attempt)
             if completed:
                 return result
-            self._targets.pop(key, None)
         raise AssertionError("unreachable")
-
-    async def _target(self, key: tuple[str, str], path: str, request_id: str) -> dict[str, Any]:
-        target = self._targets.get(key)
-        if target is not None and target["expiresAtMs"] > time.time() * 1000 + 5000:
-            return target
-        response = await self._http.post(
-            self.origin + path + "/find",
-            headers={**self.headers, "x-request-id": request_id},
-            json={"homeRegion": self.home_region} if self.home_region else {},
-            follow_redirects=False,
-        )
-        response.raise_for_status()
-        target = validate_target(document(response))
-        self._targets[key] = target
-        return target
 
     async def _invoke_attempt(
         self,
@@ -245,28 +223,17 @@ class AsyncClient(ClientConfiguration):
         request_id: str,
         method: str,
         args: list[Any],
-        target: dict[str, Any] | None,
-        key: tuple[str, str],
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"requestId": request_id, "method": method, "args": args}
-        headers = self.headers
-        origin = self.origin
-        if target is not None:
-            body["ownerEpoch"] = target["ownerEpoch"]
-            origin = target["route"]
-            headers = {"authorization": f"Bearer {target['token']}"}
-        elif self.home_region:
+        if self.home_region:
             body["homeRegion"] = self.home_region
         response = await self._http.post(
-            origin + path + "/invoke",
-            headers={**headers, "x-request-id": request_id},
+            self.origin + path + "/invoke",
+            headers={**self.headers, "x-request-id": request_id},
             json=body,
             follow_redirects=False,
         )
-        reply, discovered = invocation_response(response, request_id, target)
-        if discovered is not None:
-            self._targets[key] = discovered
-        return reply
+        return invocation_response(response, request_id)
 
 
 class _DefaultTransport:

@@ -68,13 +68,6 @@ async fn lifecycle_reports_use_authenticated_identity_without_reading_ownership(
         assert_eq!(event.event_id, format!("{session}:{sequence}"));
         assert_eq!(event.report.kind, kind);
         assert!(event.received_at_ms > 0);
-        assert_eq!(
-            service
-                .lifecycle
-                .routing(&actor.storage_key(), host.as_str(), &session, 1)
-                .await,
-            (kind != LifecycleKind::Started).then_some(kind),
-        );
     }
     Ok(())
 }
