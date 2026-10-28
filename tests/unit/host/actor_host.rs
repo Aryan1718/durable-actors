@@ -1331,6 +1331,66 @@ async fn activation_services_immediate_writes_during_hydration() -> Result<()> {
 }
 
 #[tokio::test]
+async fn activation_tolerates_immediate_writes_that_leave_sqlite_unchanged() -> Result<()> {
+    struct UpsertingExecutor;
+
+    #[async_trait]
+    impl ActorExecutor for UpsertingExecutor {
+        fn supports(&self, _: &str) -> bool {
+            true
+        }
+
+        async fn hydrate(&self, _: String, database: Arc<dyn ActorDatabase>) -> Result<()> {
+            let upsert = |value: &str| DatabaseCall::Exec {
+                sql: "INSERT INTO kv (key, value) VALUES ('sandbox', ?) \
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+                    .into(),
+                bindings: vec![SqlValue::Text(value.into())],
+                immediate: true,
+            };
+            database
+                .call(DatabaseCall::Exec {
+                    sql: "CREATE TABLE kv (key TEXT PRIMARY KEY, value TEXT NOT NULL)".into(),
+                    bindings: vec![],
+                    immediate: true,
+                })
+                .await?;
+            database.call(upsert("sb-1")).await?;
+            database.call(upsert("sb-1")).await?;
+            database.call(upsert("sb-2")).await?;
+            Ok(())
+        }
+
+        async fn invoke(
+            &self,
+            _: ActorMethodInvocation,
+            _: Arc<dyn ActorDatabase>,
+        ) -> Result<ActorMethodOutcome> {
+            unreachable!("the test only activates")
+        }
+    }
+
+    let state = Arc::new(FakeStateTransport::default());
+    let host = create_host(
+        HostEndpoint {
+            id: super::super::HostId::new("host-1"),
+            route: "http://host".into(),
+        },
+        Arc::new(UpsertingExecutor),
+        Arc::new(FakeAuthority::default()),
+        state.clone(),
+        Arc::new(EmptySocketPublisher),
+        replication().await,
+    );
+
+    let activation = tokio::time::timeout(Duration::from_secs(1), host.activate()).await??;
+    assert_eq!(activation.state_version, 3);
+    assert_eq!(state.writes.lock().unwrap().len(), 3);
+    host.drain(Duration::from_secs(1)).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn activation_reuses_recovered_bytes_and_publishes_readiness_without_a_write_ticket()
 -> Result<()> {
     let snapshot = StateSnapshot::new(

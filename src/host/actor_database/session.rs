@@ -158,11 +158,13 @@ impl DatabaseSession {
             Err(error) => return Ok(DatabaseReply::Rejected(error)),
         };
         if executed.committed {
+            let previous = cached.synced;
             cached.synced = self.replication.sync(&cached.sqlite.path()).await?;
-        }
-        if immediate && executed.committed {
-            self.publish_immediate(invocation, owner_epoch, cached, origin)
-                .await?;
+            // SQLite counts a row rewritten with identical bytes as a change but appends no WAL frames.
+            if immediate && cached.synced > previous {
+                self.publish_immediate(invocation, owner_epoch, cached, origin)
+                    .await?;
+            }
         }
         Ok(DatabaseReply::Executed {
             result: executed.result,
