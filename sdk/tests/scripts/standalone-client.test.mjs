@@ -84,11 +84,12 @@ async function checkServerCalls(t, directory) {
         requests.length = 0
         await invokeClient(directory, origin, format)
         assert.deepEqual(calls, ["sendMessage", "clear", "sendMessage"])
+        const invoke = "/v1/projects/team-a/actors/ChatRoom/lobby/invoke"
         assert.deepEqual(
             requests.map(request => request.url),
-            ["/v1/projects/team-a/actors/ChatRoom/lobby/invoke", "/v1/projects/team-a/actors/ChatRoom/lobby/find-websocket"]
+            [invoke, invoke, invoke, "/v1/projects/team-a/actors/ChatRoom/lobby/find-websocket"]
         )
-        assert.deepEqual(requests[1].body, { metadata: { userId: "alice" } })
+        assert.deepEqual(requests[3].body, { metadata: { userId: "alice" } })
     }
 }
 
@@ -109,7 +110,7 @@ async function controlPlaneServer(t, calls, requests) {
     t.after(() => host.close())
     host.listen(0, "127.0.0.1")
     await once(host, "listening")
-    const target = { route: `http://127.0.0.1:${host.address().port}`, token: "host-ticket", ownerEpoch: 3, expiresAtMs: Date.now() + 60_000 }
+    const route = `http://127.0.0.1:${host.address().port}`
     const controlPlane = createServer(async (request, response) => {
         assert.equal(request.method, "POST")
         assert.equal(request.headers.authorization, "Bearer app-key")
@@ -119,12 +120,12 @@ async function controlPlaneServer(t, calls, requests) {
         if (request.url.endsWith("/invoke")) {
             assert.ok(body.requestId)
             assert.equal(body.ownerEpoch, undefined)
-            const invoked = await fetch(`${target.route}${request.url}`, {
+            const invoked = await fetch(`${route}${request.url}`, {
                 method: "POST",
                 headers: { "content-type": "application/json", authorization: "Bearer host-ticket" },
-                body: JSON.stringify({ ...body, ownerEpoch: target.ownerEpoch })
+                body: JSON.stringify({ ...body, ownerEpoch: 3 })
             })
-            response.end(JSON.stringify({ target, outcome: await invoked.json() }))
+            response.end(JSON.stringify({ outcome: await invoked.json() }))
         } else {
             response.end(JSON.stringify({ websocketUrl: "wss://example.com/socket?key=ticket", homeRegion: "us-east", connectByMs: 1000 }))
         }

@@ -35,14 +35,11 @@ pub(crate) enum SocketEventReply {
     Failed { message: String },
 }
 
-type ActorRoute = Arc<tokio::sync::Mutex<Option<ActorTarget>>>;
-
 pub(super) struct SocketGateway {
     pub registry: SocketRegistry,
     pub stop: CancellationToken,
     pub(super) bus: Arc<dyn SocketBus>,
     pub(super) accepts_sockets: bool,
-    routes: moka::future::Cache<ActorKey, ActorRoute>,
     pub(super) http: reqwest::Client,
 }
 
@@ -58,10 +55,6 @@ impl SocketGateway {
             bus,
             accepts_sockets,
             stop,
-            routes: moka::future::Cache::builder()
-                .max_capacity(100_000)
-                .time_to_idle(Duration::from_secs(300))
-                .build(),
             http,
         }))
     }
@@ -114,20 +107,13 @@ impl SocketGateway {
         invocation: &ActorSocketInvocation,
         started: Instant,
     ) -> Result<ActorTarget> {
-        let route = self.route(&ticket.actor).await;
-        let mut cached = route.lock().await;
-        let now = crate::clock::Clock::now_ms(&crate::clock::SystemClock)? as i64;
-        if let Some(target) = cached.as_ref().filter(|target| target.expires_at_ms > now) {
-            return Ok(target.clone());
-        }
-        *cached = None;
         let operation = crate::sandbox::assignment::InitialOperation {
             request: crate::sandbox::assignment::InitialRequest::Socket {
                 invocation: invocation.clone(),
             },
             routing_ms: started.elapsed().as_secs_f64() * 1000.0,
         };
-        let target = service
+        service
             .resolve_actor_route(
                 &ticket.actor,
                 ticket.home_region.as_deref(),
@@ -135,28 +121,16 @@ impl SocketGateway {
                 None,
                 Some(&operation),
             )
-            .await?;
-        let mut cached_target = target.clone();
-        cached_target.host_state = HostState::Warm;
-        cached_target.initial_reply = None;
-        *cached = Some(cached_target);
-        Ok(target)
-    }
-
-    async fn route(&self, actor: &ActorKey) -> ActorRoute {
-        self.routes
-            .get_with(actor.clone(), async { Arc::default() })
             .await
     }
 
-    async fn invalidate(&self, actor: &ActorKey, target: &ActorTarget) {
-        let route = self.route(actor).await;
-        let mut cached = route.lock().await;
-        if cached.as_ref().is_some_and(|current| {
-            current.owner_epoch == target.owner_epoch && current.route == target.route
-        }) {
-            *cached = None;
-        }
+    async fn invalidate(
+        &self,
+        service: &ControlPlaneService,
+        actor: &ActorKey,
+        target: &ActorTarget,
+    ) {
+        service.routes.remove(actor, &target.identity).await;
     }
 
     async fn dispatch(
@@ -216,11 +190,12 @@ impl SocketGateway {
                     .await;
                 match reply {
                     Err(error) if error.is_connect() => {
-                        self.invalidate(actor, &target).await;
+                        self.invalidate(service, actor, &target).await;
                         self.wait_to_retry().await?;
                         continue;
                     }
                     Err(error) => {
+                        self.invalidate(service, actor, &target).await;
                         return Err(error)
                             .context("socket event outcome unknown; event was not replayed");
                     }
@@ -230,16 +205,28 @@ impl SocketGateway {
                             StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
                         ) =>
                     {
-                        self.invalidate(actor, &target).await;
+                        self.invalidate(service, actor, &target).await;
                         self.wait_to_retry().await?;
                         continue;
                     }
-                    Ok(reply) => reply.error_for_status()?.json::<SocketEventReply>().await?,
+                    Ok(reply) => {
+                        match async { reply.error_for_status()?.json::<SocketEventReply>().await }
+                            .await
+                        {
+                            Ok(reply) => reply,
+                            Err(error) => {
+                                self.invalidate(service, actor, &target).await;
+                                return Err(error).context(
+                                    "socket event outcome unknown; event was not replayed",
+                                );
+                            }
+                        }
+                    }
                 }
             };
             match reply {
                 SocketEventReply::Completed { effects } => return Ok(effects),
-                SocketEventReply::NotExecuted => self.invalidate(actor, &target).await,
+                SocketEventReply::NotExecuted => self.invalidate(service, actor, &target).await,
                 SocketEventReply::Failed { message } => {
                     anyhow::bail!("socket handler failed: {message}")
                 }

@@ -22,6 +22,10 @@ pub(crate) struct PoolConfig {
     pub fleet_maximum: u32,
     pub max_starting: u32,
     pub idle_ttl_seconds: u32,
+    pub refill_interval: Duration,
+    pub retire_concurrency: usize,
+    pub reap_interval: Duration,
+    pub pod_reap_interval: Duration,
     pub regions: Vec<String>,
     pub resources: ResourceLimits,
 }
@@ -31,6 +35,7 @@ pub(crate) struct SparePool {
     provider: Arc<dyn SandboxProvider>,
     pub config: PoolConfig,
     runtime_images: Option<crate::control_plane::RuntimeImages>,
+    heartbeat: std::sync::atomic::AtomicU64,
 }
 
 impl SparePool {
@@ -54,6 +59,7 @@ impl SparePool {
             provider,
             config,
             runtime_images,
+            heartbeat: now_ms().into(),
         })
     }
 
@@ -136,22 +142,31 @@ impl SparePool {
                 ids.push(serde_json::from_str::<SpareHandle>(&handle)?.resource_id);
             }
         }
-        self.cleanup().await?;
         Ok(ids)
     }
 
-    pub fn start(self: &Arc<Self>, registry: Arc<dyn AdminRegistry>, stop: CancellationToken) {
-        tokio::spawn(self.clone().prewarm(stop.child_token()));
-        tokio::spawn(self.clone().run(registry, stop));
+    /// Whether the housekeeping loop finished a pass within `stale_after`; a hung loop fails this.
+    pub fn housekeeping_alive(&self, stale_after: Duration) -> bool {
+        let last = self.heartbeat.load(std::sync::atomic::Ordering::Relaxed);
+        now_ms().saturating_sub(last) <= stale_after.as_millis() as u64
     }
 
-    async fn run(self: Arc<Self>, registry: Arc<dyn AdminRegistry>, stop: CancellationToken) {
+    /// Keeps this replica's connections to ready spares warm; every serving replica needs this.
+    pub fn start(self: &Arc<Self>, stop: CancellationToken) {
+        tokio::spawn(self.clone().prewarm(stop));
+    }
+
+    /// Fills, trims and cleans up the pool. Only the single pool manager runs this.
+    pub async fn run(self: Arc<Self>, registry: Arc<dyn AdminRegistry>, stop: CancellationToken) {
         let mut jobs = tokio::task::JoinSet::new();
         let mut cleaning = false;
         let mut reaping = false;
-        let mut reap_interval = tokio::time::interval(Duration::from_secs(30));
+        let mut reaping_pods = false;
+        let mut reap_interval = tokio::time::interval(self.config.reap_interval);
         reap_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
+        let mut pod_reap_interval = tokio::time::interval(self.config.pod_reap_interval);
+        pod_reap_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        let mut interval = tokio::time::interval(self.config.refill_interval);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -166,6 +181,10 @@ impl SparePool {
                             reaping = false;
                             report(result);
                         }
+                        Ok(Background::PodReap(result)) => {
+                            reaping_pods = false;
+                            report(result);
+                        }
                         Ok(Background::Cleanup(result)) => {
                             cleaning = false;
                             report(result);
@@ -178,6 +197,12 @@ impl SparePool {
                     reaping = true;
                     let pool = self.clone();
                     jobs.spawn(async move { Background::Reap(pool.forget_stopped().await) });
+                    continue;
+                }
+                _ = pod_reap_interval.tick(), if !reaping_pods => {
+                    reaping_pods = true;
+                    let pool = self.clone();
+                    jobs.spawn(async move { Background::PodReap(pool.provider.reap_finished().await) });
                     continue;
                 }
                 _ = interval.tick() => {},
@@ -205,6 +230,8 @@ impl SparePool {
                 let pool = self.clone();
                 jobs.spawn(async move { Background::Cleanup(pool.cleanup().await) });
             }
+            self.heartbeat
+                .store(now_ms(), std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -317,7 +344,7 @@ impl SparePool {
         use futures_util::StreamExt;
         let results = futures_util::stream::iter(self.store.retiring().await?)
             .map(|handle| self.retire(handle))
-            .buffer_unordered(8)
+            .buffer_unordered(self.config.retire_concurrency)
             .collect::<Vec<_>>()
             .await;
         for result in results {
@@ -355,8 +382,15 @@ struct Build {
 
 enum Background {
     Reap(Result<()>),
+    PodReap(Result<()>),
     Build(Result<()>),
     Cleanup(Result<()>),
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_millis() as u64)
 }
 
 fn report(result: Result<()>) {

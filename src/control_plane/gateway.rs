@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, ensure};
+use anyhow::{Result, ensure};
 use axum::{
     Router,
     extract::{
@@ -13,12 +13,10 @@ use serde::Deserialize;
 use std::sync::Arc;
 
 use super::{
-    ActorJwtVerifier, auth::ActorInvocationCapability, issuer::ActorJwtIssuer,
-    service::ControlPlaneService, socket_gateway::SocketGateway,
+    issuer::ActorJwtIssuer, service::ControlPlaneService, socket_gateway::SocketGateway,
     socket_ticket::SocketTicketVerifier,
 };
 use crate::{
-    actor::ActorKey,
     control_plane::socket_gateway::GatewaySocketDispatcher,
     sockets::{
         MAX_MESSAGE_BYTES, READ_BUFFER_BYTES, WRITE_BUFFER_BYTES,
@@ -29,7 +27,6 @@ use crate::{
 #[derive(Clone)]
 pub(super) struct Gateway {
     pub origin: String,
-    invocations: ActorJwtVerifier,
     sockets: SocketTicketVerifier,
     pub(super) connections: Arc<SocketGateway>,
 }
@@ -43,30 +40,8 @@ impl Gateway {
         Ok(Self {
             origin,
             connections,
-            invocations: issuer.invocation_verifier()?,
             sockets: issuer.socket_verifier()?,
         })
-    }
-
-    pub fn invocation_route(
-        &self,
-        actor: &ActorKey,
-        epoch: u64,
-        authorization: &str,
-    ) -> Result<String> {
-        let principal = self.invocations.authenticate_authorization(authorization)?;
-        let capability = validated_capability(actor, &principal)?;
-        ensure!(capability.owner_epoch == epoch, "invalid owner epoch");
-        Ok(backend_origin(&capability.route)?.to_string())
-    }
-
-    pub fn authorize_publish(&self, actor: &ActorKey, authorization: &str) -> Result<u64> {
-        let capability = self.capability(actor, authorization)?;
-        ensure!(
-            capability.grant.is_none(),
-            "delegated tickets cannot publish socket effects"
-        );
-        Ok(capability.owner_epoch)
     }
 
     pub fn router(self, service: ControlPlaneService) -> Router {
@@ -74,30 +49,6 @@ impl Gateway {
             .route("/v1/socket", get(connect))
             .with_state((self, service))
     }
-
-    fn capability(
-        &self,
-        actor: &ActorKey,
-        authorization: &str,
-    ) -> Result<ActorInvocationCapability> {
-        let principal = self.invocations.authenticate_authorization(authorization)?;
-        Ok(validated_capability(actor, &principal)?.clone())
-    }
-}
-
-fn validated_capability<'a>(
-    actor: &ActorKey,
-    principal: &'a super::auth::ActorPrincipal,
-) -> Result<&'a ActorInvocationCapability> {
-    let capability = principal
-        .invocation
-        .as_ref()
-        .context("invocation capability missing")?;
-    ensure!(
-        principal.actor == *actor && capability.actor == *actor,
-        "invocation target mismatch"
-    );
-    Ok(capability)
 }
 
 pub(super) fn backend_origin(route: &str) -> Result<reqwest::Url> {

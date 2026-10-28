@@ -2,5 +2,5 @@ apiVersion: v2
 name: durable-actors-eks
 description: Durable Actors on EKS with Standard S3 persistence
 type: application
-version: 0.12.3
-appVersion: "0.12.3"
+version: 0.14.0
+appVersion: "0.14.0"

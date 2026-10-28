@@ -18,6 +18,14 @@ ingress:
 replicaCount: 1
 actors:
   warm: 0
+  # Spares starting at once across controllers, and how often each controller refills pools.
+  maxStarting: 32
+  refillIntervalMs: 1000
+  # How fast each controller deletes retired spares and finished pods, and forgets stopped sandboxes.
+  retireConcurrency: 64
+  podReapIntervalMs: 1000
+  reapConcurrency: 64
+  registryReapIntervalMs: 2000
   cpuMillis: 250
   # Unset leaves actor CPU uncapped.
   cpuLimitMillis: null

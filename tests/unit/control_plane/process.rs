@@ -118,14 +118,17 @@ fn pool_capacity_is_configurable_and_validated() -> Result<()> {
         (defaults.idle, defaults.fleet_maximum, defaults.max_starting),
         (64, 256, 32)
     );
+    assert_eq!(defaults.refill_interval, Duration::from_secs(1));
     values.extend([
         ("DURABLE_ACTORS_SPARE_IDLE", "128"),
         ("DURABLE_ACTORS_SPARE_FLEET_MAX", "512"),
         ("DURABLE_ACTORS_SPARE_MAX_STARTING", "4"),
+        ("DURABLE_ACTORS_SPARE_REFILL_INTERVAL_MS", "250"),
         ("DURABLE_ACTORS_HOST_CPU_MILLIS", "500"),
     ]);
     let configured = parse(&values)?.sandbox_provider.pool;
     assert_eq!(configured.resources.cpu_millis, 500);
+    assert_eq!(configured.refill_interval, Duration::from_millis(250));
     assert_eq!(
         (
             configured.idle,
@@ -139,6 +142,56 @@ fn pool_capacity_is_configurable_and_validated() -> Result<()> {
     values.insert("DURABLE_ACTORS_SPARE_FLEET_MAX", "512");
     values.insert("DURABLE_ACTORS_SPARE_MAX_STARTING", "0");
     assert!(parse(&values).is_err());
+    values.insert("DURABLE_ACTORS_SPARE_MAX_STARTING", "4");
+    values.insert("DURABLE_ACTORS_SPARE_REFILL_INTERVAL_MS", "10");
+    assert!(parse(&values).is_err());
+    Ok(())
+}
+
+#[test]
+fn pool_drain_rates_are_configurable_and_validated() -> Result<()> {
+    let mut values = process_environment();
+    values.insert("DURABLE_ACTORS_SANDBOX_PROVIDER", "gke");
+    let parse = |values: &HashMap<&str, &str>| {
+        ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|v| (*v).into()))
+    };
+    let defaults = parse(&values)?;
+    assert_eq!(defaults.sandbox_provider.pool.retire_concurrency, 64);
+    assert_eq!(
+        defaults.sandbox_provider.pool.reap_interval,
+        Duration::from_secs(30)
+    );
+    assert_eq!(
+        defaults.sandbox_provider.pool.pod_reap_interval,
+        Duration::from_secs(1)
+    );
+    assert_eq!(gke(&defaults).reap_concurrency, 64);
+    values.extend([
+        ("DURABLE_ACTORS_SPARE_RETIRE_CONCURRENCY", "128"),
+        ("DURABLE_ACTORS_SPARE_REAP_INTERVAL_MS", "2000"),
+        ("DURABLE_ACTORS_SPARE_POD_REAP_INTERVAL_MS", "500"),
+        ("DURABLE_ACTORS_GKE_REAP_CONCURRENCY", "16"),
+    ]);
+    let configured = parse(&values)?;
+    assert_eq!(configured.sandbox_provider.pool.retire_concurrency, 128);
+    assert_eq!(
+        configured.sandbox_provider.pool.reap_interval,
+        Duration::from_secs(2)
+    );
+    assert_eq!(
+        configured.sandbox_provider.pool.pod_reap_interval,
+        Duration::from_millis(500)
+    );
+    assert_eq!(gke(&configured).reap_concurrency, 16);
+    for (name, value) in [
+        ("DURABLE_ACTORS_SPARE_RETIRE_CONCURRENCY", "0"),
+        ("DURABLE_ACTORS_GKE_REAP_CONCURRENCY", "0"),
+        ("DURABLE_ACTORS_SPARE_POD_REAP_INTERVAL_MS", "10"),
+    ] {
+        let mut invalid = values.clone();
+        invalid.insert(name, value);
+        assert!(parse(&invalid).is_err(), "{name}={value}");
+    }
     Ok(())
 }
 
@@ -476,6 +529,7 @@ fn standard_s3_selects_aws_without_changing_the_code_bucket() -> Result<()> {
         "arn:aws:iam::123456789012:role/actor",
     );
     values.insert("DURABLE_ACTORS_PERSISTENCE", "standard");
+    values.insert("DURABLE_ACTORS_SPARE_IDLE", "0");
     values.remove("DURABLE_ACTORS_ARCHIVE_BUCKET");
     values.remove("DURABLE_ACTORS_RAPID_BUCKETS");
     let config = ControlPlaneProcessConfig::from_lookup(|name| {
@@ -494,7 +548,7 @@ fn standard_s3_selects_aws_without_changing_the_code_bucket() -> Result<()> {
 }
 
 #[test]
-fn s3_rejects_rapid_and_missing_region() {
+fn s3_rejects_rapid_spares_and_missing_aws_settings() {
     let parse = |values: &HashMap<&str, &str>| {
         ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|value| (*value).into()))
     };
@@ -507,6 +561,13 @@ fn s3_rejects_rapid_and_missing_region() {
         "DURABLE_ACTORS_AWS_ACTOR_ROLE_ARN",
         "arn:aws:iam::123456789012:role/actor",
     );
+    assert!(parse(&values).is_err());
+    values.insert("DURABLE_ACTORS_PERSISTENCE", "standard");
+    values.remove("DURABLE_ACTORS_ARCHIVE_BUCKET");
+    values.remove("DURABLE_ACTORS_RAPID_BUCKETS");
+    assert!(parse(&values).is_err());
+    values.insert("DURABLE_ACTORS_SPARE_IDLE", "0");
+    assert!(parse(&values).is_ok());
 }
 
 #[test]

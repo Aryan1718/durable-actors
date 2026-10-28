@@ -141,6 +141,35 @@
           "minimum": 0,
           "maximum": 256
         },
+        "maxStarting": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "refillIntervalMs": {
+          "type": "integer",
+          "minimum": 50,
+          "maximum": 60000
+        },
+        "retireConcurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "podReapIntervalMs": {
+          "type": "integer",
+          "minimum": 100,
+          "maximum": 60000
+        },
+        "reapConcurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "registryReapIntervalMs": {
+          "type": "integer",
+          "minimum": 500,
+          "maximum": 600000
+        },
         "cpuMillis": {
           "type": "integer",
           "minimum": 1

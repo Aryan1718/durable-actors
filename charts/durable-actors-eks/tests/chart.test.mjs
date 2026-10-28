@@ -35,6 +35,13 @@ test("stores state and code in one S3 bucket with actor-scoped AWS credentials",
     assert.doesNotMatch(output, /iam\.gke\.io|DURABLE_ACTORS_RAPID|DURABLE_ACTORS_USAGE_TOPIC/)
 })
 
+test("runs one pool manager that reaps finished pods without building spares", () => {
+    const output = manifests()
+    assert.match(output, /name: actors-durable-actors-pool-manager\n/)
+    assert.match(output, /DURABLE_ACTORS_PROCESS_ROLE, value: pool_manager/)
+    assert.equal(output.match(/DURABLE_ACTORS_SPARE_IDLE, value: "0"/g).length, 2)
+})
+
 test("isolates sandboxes in a release-specific namespace with constrained credentials and network access", () => {
     const output = manifests()
     assert.match(output, /namespace: actors-actors/)

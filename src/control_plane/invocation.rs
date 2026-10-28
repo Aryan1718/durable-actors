@@ -10,8 +10,9 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::public_api::{
-    ActorPath, ActorTargetReply, ApiError, FindActorRequest, PublicApiState, resolve_actor_target,
+    ActorPath, ApiError, FindActorRequest, PublicApiState, resolve_actor_target,
 };
+use super::service::ActorTarget;
 use crate::actor::ActorInvocation;
 
 pub(super) async fn invoke_alarm(
@@ -31,10 +32,9 @@ pub(super) async fn invoke_alarm(
         args: vec![],
     };
     let outcome = dispatch(
+        service,
         client,
-        &target.route,
-        &target.token,
-        target.owner_epoch,
+        &target,
         &invocation,
         target.host_state,
         started.elapsed().as_secs_f64() * 1000.0,
@@ -55,19 +55,6 @@ pub(super) async fn invoke(
 ) -> Result<Response, ApiError> {
     let actor = path.into_actor();
     let Json(request) = body.map_err(ApiError::json)?;
-    if let Some(epoch) = request.owner_epoch {
-        return invoke_cached(&state, actor, &headers, request, epoch).await;
-    }
-    state
-        .admin
-        .authorize_discovery(
-            headers
-                .get(header::AUTHORIZATION)
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or(""),
-            &actor.project_id,
-        )
-        .map_err(|_| ApiError::unauthorized("actor invocation credential was rejected"))?;
     let invocation = ActorInvocation {
         actor,
         request_id: request.request_id,
@@ -75,11 +62,10 @@ pub(super) async fn invoke(
         args: request.args,
     };
     invocation.validate().map_err(ApiError::bad_request)?;
-    let (target, outcome) =
-        resolve_and_dispatch(&state, &headers, request.home_region, &invocation).await?;
+    let outcome = resolve_and_dispatch(&state, &headers, request.home_region, &invocation).await?;
     Ok((
         [(header::CACHE_CONTROL, "no-store")],
-        Json(json!({"target": target, "outcome": outcome})),
+        Json(json!({"outcome": outcome})),
     )
         .into_response())
 }
@@ -89,7 +75,7 @@ async fn resolve_and_dispatch(
     headers: &HeaderMap,
     home_region: Option<String>,
     invocation: &ActorInvocation,
-) -> Result<(ActorTargetReply, Value), ApiError> {
+) -> Result<Value, ApiError> {
     let started = tokio::time::Instant::now();
     let deadline = started + super::CONTROL_PLANE_REQUEST_TIMEOUT;
     let mut host_state = HostState::Warm;
@@ -108,13 +94,25 @@ async fn resolve_and_dispatch(
             host_state = HostState::Cold;
         }
         let outcome = match target.initial_reply.take() {
-            Some(reply) => validate_reply(reply)?,
+            Some(reply) => {
+                let result = validate_reply(reply);
+                if result
+                    .as_ref()
+                    .map_or(true, |reply| reply["type"] == "not_executed")
+                {
+                    state
+                        .invocations
+                        .routes
+                        .remove(&invocation.actor, &target.identity)
+                        .await;
+                }
+                result?
+            }
             None => {
                 dispatch(
+                    &state.invocations,
                     &state.hosts,
-                    &target.backend_route,
-                    &target.token,
-                    target.owner_epoch,
+                    &target,
                     invocation,
                     host_state,
                     started.elapsed().as_secs_f64() * 1000.0,
@@ -127,53 +125,10 @@ async fn resolve_and_dispatch(
             Some("not_executed" | "unauthenticated")
         ) || tokio::time::Instant::now() >= deadline
         {
-            return Ok((target, outcome));
+            return Ok(outcome);
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-}
-
-async fn invoke_cached(
-    state: &PublicApiState,
-    actor: crate::actor::ActorKey,
-    headers: &HeaderMap,
-    request: InvokeRequest,
-    epoch: u64,
-) -> Result<Response, ApiError> {
-    let started = tokio::time::Instant::now();
-    let authorization = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
-    let gateway = state
-        .invocations
-        .gateway
-        .as_ref()
-        .ok_or_else(|| ApiError::unauthorized("gateway is not configured"))?;
-    let route = gateway
-        .invocation_route(&actor, epoch, authorization)
-        .map_err(|_| ApiError::unauthorized("actor invocation credential was rejected"))?;
-    let token = authorization
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| ApiError::unauthorized("bearer token required"))?;
-    let invocation = ActorInvocation {
-        actor,
-        request_id: request.request_id,
-        method: request.method,
-        args: request.args,
-    };
-    invocation.validate().map_err(ApiError::bad_request)?;
-    let outcome = dispatch(
-        &state.hosts,
-        &route,
-        token,
-        epoch,
-        &invocation,
-        HostState::Warm,
-        started.elapsed().as_secs_f64() * 1000.0,
-    )
-    .await?;
-    Ok(([(header::CACHE_CONTROL, "no-store")], Json(outcome)).into_response())
 }
 
 pub(super) async fn publish(
@@ -183,28 +138,19 @@ pub(super) async fn publish(
     body: Result<Json<PublishRequest>, JsonRejection>,
 ) -> Result<Response, ApiError> {
     let actor = path.into_actor();
-    let authorization = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or("");
+    super::public_api::authorized_admin(&state.admin, &headers)?;
+    actor.validate().map_err(ApiError::bad_request)?;
+    state
+        .invocations
+        .ensure_project_access(&actor.project_id)
+        .await
+        .map_err(ApiError::access)?;
     let gateway = state
         .invocations
         .gateway
         .as_ref()
         .ok_or_else(|| ApiError::unauthorized("gateway is not configured"))?;
-    if authorization.is_empty() {
-        return Err(ApiError::unauthorized("bearer token required"));
-    }
     let Json(request) = body.map_err(ApiError::json)?;
-
-    let owner_epoch = gateway
-        .authorize_publish(&actor, authorization)
-        .map_err(|_| ApiError::unauthorized("actor invocation credential was rejected"))?;
-    if owner_epoch != request.owner_epoch {
-        return Err(ApiError::unauthorized(
-            "actor invocation credential was rejected",
-        ));
-    }
     crate::actor::validate_socket_effects(&request.effects).map_err(ApiError::bad_request)?;
 
     gateway
@@ -230,15 +176,35 @@ pub(super) async fn publish(
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct PublishRequest {
-    owner_epoch: u64,
     effects: Vec<crate::actor::ActorSocketEffect>,
 }
 
 async fn dispatch(
+    service: &super::ControlPlaneService,
     client: &reqwest::Client,
-    route: &str,
-    token: &str,
-    owner_epoch: u64,
+    target: &ActorTarget,
+    invocation: &ActorInvocation,
+    host_state: HostState,
+    routing_ms: f64,
+) -> Result<Value, ApiError> {
+    let result = send_invocation(client, target, invocation, host_state, routing_ms).await;
+    if result.as_ref().map_or(true, |reply| {
+        matches!(
+            reply["type"].as_str(),
+            Some("not_executed" | "unauthenticated")
+        )
+    }) {
+        service
+            .routes
+            .remove(&invocation.actor, &target.identity)
+            .await;
+    }
+    result
+}
+
+async fn send_invocation(
+    client: &reqwest::Client,
+    target: &ActorTarget,
     invocation: &ActorInvocation,
     host_state: HostState,
     routing_ms: f64,
@@ -246,16 +212,16 @@ async fn dispatch(
     let actor = &invocation.actor;
     let url = format!(
         "{}/v1/projects/{}/actors/{}/{}/invoke",
-        route.trim_end_matches('/'),
+        target.route.trim_end_matches('/'),
         actor.project_id,
         actor.actor_name,
         actor.actor_id
     );
     let response = client
         .post(url)
-        .bearer_auth(token)
+        .bearer_auth(&target.token)
         .json(&json!({
-            "requestId":invocation.request_id, "ownerEpoch":owner_epoch,
+            "requestId":invocation.request_id, "ownerEpoch":target.owner_epoch,
             "method":invocation.method, "args":invocation.args, "hostState":host_state, "routingMs":routing_ms,
         }))
         .send()
@@ -314,7 +280,6 @@ fn outcome_unknown() -> ApiError {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct InvokeRequest {
     request_id: String,
-    owner_epoch: Option<u64>,
     method: String,
     args: Vec<Value>,
     home_region: Option<String>,

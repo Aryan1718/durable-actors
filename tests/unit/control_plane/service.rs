@@ -39,10 +39,6 @@ struct UnavailableProvisioner;
 
 #[async_trait]
 impl HostProvisioner for UnavailableProvisioner {
-    fn host_idle_timeout_ms(&self) -> u64 {
-        10_000
-    }
-
     async fn prepare_deployment(
         &self,
         source: &HostLaunchSpec,
@@ -83,10 +79,6 @@ struct FakeRetiringProvisioner {
 
 #[async_trait]
 impl HostProvisioner for FakeRetiringProvisioner {
-    fn host_idle_timeout_ms(&self) -> u64 {
-        10_000
-    }
-
     async fn prepare_deployment(
         &self,
         source: &HostLaunchSpec,
@@ -134,10 +126,6 @@ async fn gcs_routes_use_the_hosts_epoch_without_claiming_or_preparing_in_the_con
     struct Provisioner(HostLease);
     #[async_trait]
     impl HostProvisioner for Provisioner {
-        fn host_idle_timeout_ms(&self) -> u64 {
-            10_000
-        }
-
         async fn prepare_deployment(
             &self,
             source: &HostLaunchSpec,
@@ -215,7 +203,7 @@ async fn gcs_routes_use_the_hosts_epoch_without_claiming_or_preparing_in_the_con
             id: HostId::new("host.v3.revision.host"),
             session_id: uuid::Uuid::new_v4().to_string(),
             route: route.clone(),
-            expires_at_ms: u64::MAX,
+            expires_at_ms: crate::clock::Clock::now_ms(&crate::clock::SystemClock)? + 10,
         })),
     );
     let actor = ActorKey {
@@ -229,9 +217,17 @@ async fn gcs_routes_use_the_hosts_epoch_without_claiming_or_preparing_in_the_con
     assert_eq!(target.route, route);
     assert_eq!(target.owner_epoch, 42);
     assert!(placements.get(&actor.storage_key()).await?.is_none());
-    service
+    let ownership_reads = placements.reads();
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    let warm = service
         .resolve_actor_route(&actor, None, None, None, None)
         .await?;
+    assert_eq!(warm.host_state, crate::request_tracking::HostState::Warm);
+    assert_eq!(
+        placements.reads(),
+        ownership_reads,
+        "warm routing must not read ownership"
+    );
     assert_eq!(
         requests.load(std::sync::atomic::Ordering::SeqCst),
         0,
@@ -611,6 +607,10 @@ fn sandbox_resources_override_only_the_configured_fields() -> Result<()> {
             fleet_maximum: 64,
             max_starting: 8,
             idle_ttl_seconds: 600,
+            refill_interval: Duration::from_secs(1),
+            retire_concurrency: 8,
+            reap_interval: Duration::from_secs(30),
+            pod_reap_interval: Duration::from_secs(1),
             regions: vec!["north-america-east".into()],
             resources: crate::sandbox::ResourceLimits {
                 cpu_millis: 4000,
@@ -661,10 +661,6 @@ struct LosingActivation {
 
 #[async_trait]
 impl HostProvisioner for LosingActivation {
-    fn host_idle_timeout_ms(&self) -> u64 {
-        10_000
-    }
-
     async fn prepare_deployment(
         &self,
         source: &HostLaunchSpec,
@@ -742,7 +738,7 @@ async fn a_losing_activation_routes_to_the_ready_winner() -> Result<()> {
     let target = service
         .route_actor(&actor, "north-america-east", None, None, None)
         .await?;
-    assert_eq!(target.lease.route, "https://winner.example.com");
+    assert_eq!(target.placement.lease.route, "https://winner.example.com");
     assert!(provisioner.waited.load(std::sync::atomic::Ordering::SeqCst));
     Ok(())
 }
@@ -754,10 +750,6 @@ struct FakeRoutingProvisioner {
 
 #[async_trait]
 impl HostProvisioner for FakeRoutingProvisioner {
-    fn host_idle_timeout_ms(&self) -> u64 {
-        10_000
-    }
-
     async fn prepare_deployment(
         &self,
         source: &HostLaunchSpec,
@@ -1250,14 +1242,9 @@ async fn actor_discovery_authenticates_and_validates_each_request_contract() -> 
         .error_for_status()?;
     assert_eq!(response.headers().get("cache-control").unwrap(), "no-store");
     let target: serde_json::Value = response.json().await?;
-    assert_eq!(target["homeRegion"], "north-america-east");
-    assert_eq!(target["route"], "https://host.example.com");
-    assert!(target["ownerEpoch"].is_u64());
-    assert!(target["expiresAtMs"].is_i64());
-    assert!(
-        target["token"]
-            .as_str()
-            .is_some_and(|token| !token.is_empty())
+    assert_eq!(
+        target,
+        serde_json::json!({"homeRegion":"north-america-east"})
     );
     for (suffix, body) in [
         ("find-actor", serde_json::json!({"metadata":{}})),
@@ -1282,7 +1269,6 @@ async fn actor_discovery_authenticates_and_validates_each_request_contract() -> 
             "invalid_request"
         );
     }
-    assert_ne!(target["token"], "api-key");
     server.abort();
     Ok(())
 }

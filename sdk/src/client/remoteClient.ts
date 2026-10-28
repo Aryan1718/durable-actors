@@ -9,7 +9,7 @@ import { socketMetadata } from "../actor/socketValidation.js"
 import type { ActorSchemas } from "../actor/socketValidation.js"
 import { HttpActorClient } from "../client-runtime/client.js"
 import type { DurableActorsClientOptions, HttpActorClientDependencies } from "../client-runtime/client.js"
-import type { ActorHostTarget, ActorInvocation } from "../client-runtime/http.js"
+import type { ActorInvocation } from "../client-runtime/http.js"
 import { ActorInvocationError } from "../errors.js"
 
 import { authorizationHeaders } from "./clientSettings.js"
@@ -70,9 +70,7 @@ class RemoteActorClient extends HttpActorClient {
             actorName: validateActorComponent("actor name", actorName),
             actorId: validateActorComponent("actor ID", actorId)
         }
-        const target = await this.target(actor, new LatencyTimeline(this.monotonicNow))
         await this.deliverSocketEffects(
-            target,
             actor,
             [{ type: "broadcast", message: socketMessage(message), except_connection_ids: [], tags: [] }],
             "actor socket broadcast"
@@ -115,15 +113,29 @@ class RemoteActorClient extends HttpActorClient {
     }
 
     private async deliverSocketEffects(
-        target: ActorHostTarget,
         actor: ActorAddress,
         effects: readonly SocketEffect[],
         context: string
     ): Promise<void> {
         try {
-            await this.actorHost.publish(target, actor, effects)
+            const response = await this.fetchRequest(
+                `${this.settings.controlPlaneUrl}${projectActorPath(actor.projectId, actor.actorName, actor.actorId)}/socket-effects`,
+                {
+                    method: "POST",
+                    redirect: "manual",
+                    headers: {
+                        ...authorizationHeaders(this.settings.credential),
+                        "content-type": "application/json",
+                        "x-request-id": actor.requestId
+                    },
+                    body: JSON.stringify({ effects })
+                }
+            )
+            if (response.status === 401 || response.status === 403)
+                throw new ActorInvocationError("unauthenticated", actor.requestId, "application credential rejected")
+            if (!response.ok) throw new Error(`socket effects returned HTTP ${response.status}`)
         } catch (error) {
-            this.targets.delete(`${actor.actorName}\u001f${actor.actorId}`)
+            if (error instanceof ActorInvocationError) throw error
             const message = error instanceof Error ? error.message : String(error)
             throw new ActorInvocationError(
                 "outcome_unknown",

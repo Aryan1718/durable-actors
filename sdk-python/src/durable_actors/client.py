@@ -123,7 +123,6 @@ class ClientConfiguration:
             component(self.home_region, 255)
         self._telemetry = telemetry or stderr_telemetry
         self._closed = False
-        self._targets: dict[tuple[str, str], dict[str, Any]] = {}
 
     def actor_path(self, actor_name: str, actor_id: str) -> str:
         """Return the validated project-scoped actor path."""
@@ -286,10 +285,7 @@ class Client(ClientConfiguration):
             raise ValueError("state and state_update messages are reserved")
         data = json.dumps(message, separators=(",", ":"), allow_nan=False)
         request_id = str(uuid.uuid4())
-        key = actor_name, actor_id
-        target = self._target(key, path, request_id)
         payload: dict[str, Any] = {
-            "ownerEpoch": target["ownerEpoch"],
             "effects": [
                 {
                     "type": "broadcast",
@@ -301,14 +297,20 @@ class Client(ClientConfiguration):
         }
         try:
             response = self._http.post(
-                target["route"] + path + "/socket-effects",
-                headers={"authorization": f"Bearer {target['token']}", "x-request-id": request_id},
+                self.origin + path + "/socket-effects",
+                headers={**self.headers, "x-request-id": request_id},
                 json=payload,
                 follow_redirects=False,
             )
             response.raise_for_status()
         except httpx.HTTPError as error:
-            self._targets.pop(key, None)
+            if isinstance(error, httpx.HTTPStatusError) and error.response.status_code in {
+                401,
+                403,
+            }:
+                raise ActorInvocationError(
+                    "unauthenticated", request_id, "application credential rejected"
+                ) from error
             raise ActorInvocationError(
                 "outcome_unknown", request_id, "broadcast delivery could not be confirmed"
             ) from error
@@ -337,47 +339,23 @@ class Client(ClientConfiguration):
         path = self.actor_path(actor_name, actor_id)
         component(method, 255)
         json.dumps(args, allow_nan=False)
-        key = actor_name, actor_id
         for attempt in range(2):
-            target = self._targets.get(key)
-            if target is not None and target["expiresAtMs"] <= time.time() * 1000:
-                target = None
-                self._targets.pop(key, None)
             try:
-                reply = self._invoke_attempt(path, request_id, method, args, target, key)
+                reply = self._invoke_attempt(path, request_id, method, args)
             except httpx.TransportError as error:
-                self._targets.pop(key, None)
                 if not isinstance(error, NEVER_SENT):
                     raise ActorInvocationError(
                         "outcome_unknown",
                         request_id,
                         "invocation response was lost; execution may have occurred",
                     ) from error
-                if target is None:
-                    raise ActorInvocationError(
-                        "unavailable", request_id, f"could not connect to {self.origin}: {error}"
-                    ) from error
-                reply = {"type": "not_executed", "reason": "upstream_not_reached"}
+                raise ActorInvocationError(
+                    "unavailable", request_id, f"could not connect to {self.origin}: {error}"
+                ) from error
             completed, result = invocation_outcome(reply, request_id, attempt)
             if completed:
                 return result
-            self._targets.pop(key, None)
         raise AssertionError("unreachable")
-
-    def _target(self, key: tuple[str, str], path: str, request_id: str) -> dict[str, Any]:
-        target = self._targets.get(key)
-        if target is not None and target["expiresAtMs"] > time.time() * 1000 + 5000:
-            return target
-        response = self._http.post(
-            self.origin + path + "/find",
-            headers={**self.headers, "x-request-id": request_id},
-            json={"homeRegion": self.home_region} if self.home_region else {},
-            follow_redirects=False,
-        )
-        response.raise_for_status()
-        target = validate_target(document(response))
-        self._targets[key] = target
-        return target
 
     def _invoke_attempt(
         self,
@@ -385,28 +363,17 @@ class Client(ClientConfiguration):
         request_id: str,
         method: str,
         args: list[Any],
-        target: dict[str, Any] | None,
-        key: tuple[str, str],
     ) -> dict[str, Any]:
         body: dict[str, Any] = {"requestId": request_id, "method": method, "args": args}
-        headers = self.headers
-        origin = self.origin
-        if target is not None:
-            body["ownerEpoch"] = target["ownerEpoch"]
-            origin = target["route"]
-            headers = {"authorization": f"Bearer {target['token']}"}
-        elif self.home_region:
+        if self.home_region:
             body["homeRegion"] = self.home_region
         response = self._http.post(
-            origin + path + "/invoke",
-            headers={**headers, "x-request-id": request_id},
+            self.origin + path + "/invoke",
+            headers={**self.headers, "x-request-id": request_id},
             json=body,
             follow_redirects=False,
         )
-        reply, discovered = invocation_response(response, request_id, target)
-        if discovered is not None:
-            self._targets[key] = discovered
-        return reply
+        return invocation_response(response, request_id)
 
 
 _shared_client: Client | None = None
@@ -441,18 +408,6 @@ def validate_origin(value: str) -> str:
     ):
         raise ValueError("expected an HTTP or HTTPS origin")
     return value.rstrip("/")
-
-
-def validate_target(value: Any) -> dict[str, Any]:
-    if not is_document(value):
-        raise ActorProtocolError("invalid actor target")
-    if not isinstance(value.get("token"), str) or not value["token"].strip():
-        raise ActorProtocolError("invalid actor target")
-    for key in ("ownerEpoch", "expiresAtMs"):
-        if type(value.get(key)) is not int or not 0 < value[key] <= 2**53 - 1:
-            raise ActorProtocolError("invalid actor target")
-    validate_origin(value["route"])
-    return value
 
 
 def document(response: httpx.Response) -> dict[str, Any]:
@@ -494,11 +449,7 @@ def invocation_outcome(reply: dict[str, Any], request_id: str, attempt: int) -> 
     return False, None
 
 
-def invocation_response(
-    response: httpx.Response, request_id: str, target: dict[str, Any] | None
-) -> tuple[dict[str, Any], dict[str, Any] | None]:
-    if target is not None and response.status_code == 401:
-        return {"type": "unauthenticated"}, None
+def invocation_response(response: httpx.Response, request_id: str) -> dict[str, Any]:
     value = document(response)
     if not response.is_success:
         error = value.get("error", {})
@@ -512,11 +463,8 @@ def invocation_response(
         if not isinstance(error.get("code"), str) or not isinstance(error.get("message"), str):
             raise ActorProtocolError(f"invalid HTTP {response.status_code} error")
         raise ActorInvocationError(error["code"], request_id, error["message"])
-    if target is not None:
-        return value, None
-    target = validate_target(value.get("target"))
     reply = value.get("outcome")
     if not isinstance(reply, dict):
         raise ActorProtocolError("missing invocation outcome")
     reply = cast(dict[str, Any], reply)
-    return reply, target if reply.get("type") in {"completed", "failed"} else None
+    return reply

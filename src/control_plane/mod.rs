@@ -23,6 +23,7 @@ mod project_limits;
 mod protocol;
 mod public_api;
 mod regions;
+mod routes;
 mod service;
 pub(crate) mod session;
 pub(crate) mod socket_ticket;
@@ -40,7 +41,7 @@ pub use project_limits::ProjectLimits;
 pub(crate) use self::auth::ActorInvocationCapability;
 pub use self::process::{
     AnalyticsBackend, ControlPlaneProcessConfig, ControlPlaneStorageConfig, StorageProviderConfig,
-    serve_control_plane,
+    serve_control_plane, serve_pool_manager,
 };
 pub(crate) use self::{
     admin::PostgresAdminRegistry,

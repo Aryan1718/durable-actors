@@ -126,10 +126,6 @@ impl RuntimeAccess {
         self
     }
 
-    pub(crate) fn supports_spares(&self) -> bool {
-        !matches!(self.location, BucketLocation::S3 { .. })
-    }
-
     pub(crate) fn validate_code(&self, code: &crate::bundle::ArtifactBundle) -> Result<()> {
         match (&self.location, code) {
             (

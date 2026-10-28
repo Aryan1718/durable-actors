@@ -39,8 +39,12 @@ impl SecretResolver for KubernetesSecrets {
                     .map(|client| Api::namespaced(client, &self.namespace))
             })
             .await?;
-        let loaded =
-            futures_util::future::try_join_all(names.iter().map(|name| secrets.get(name))).await?;
+        let loaded = futures_util::future::try_join_all(
+            names
+                .iter()
+                .map(|name| super::kube_retry::retry_throttled(|| secrets.get(name))),
+        )
+        .await?;
         customer_environment(loaded)
     }
 }

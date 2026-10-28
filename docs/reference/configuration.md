@@ -44,6 +44,11 @@ Configuration uses environment variables. Precedence is to use exported variable
 | `DURABLE_ACTORS_SPARE_IDLE`             | `64`    | Ready actor sandboxes per image and configured compute region; must not exceed the fleet budget. Zero creates hosts on demand. Control-plane replicas must share pool settings. Customer secrets are installed at assignment.                                                               |
 | `DURABLE_ACTORS_SPARE_FLEET_MAX`        | `256`   | Maximum unassigned spares across pools. Active actors do not count against this budget.                                                                                                                                                                                                     |
 | `DURABLE_ACTORS_SPARE_MAX_STARTING`     | `32`    | Maximum simultaneous spare starts across control-plane replicas.                                                                                                                                                                                                                            |
+| `DURABLE_ACTORS_SPARE_REFILL_INTERVAL_MS` | `1000` | How often the pool manager refills spare pools; 50–60000 ms. Shorter intervals replace claimed spares sooner and query PostgreSQL more often. |
+| `DURABLE_ACTORS_SPARE_RETIRE_CONCURRENCY` | `64` | Retired spares the pool manager deletes at once; 1–1024. Retiring spares count against the fleet maximum until deleted. |
+| `DURABLE_ACTORS_SPARE_REAP_INTERVAL_MS` | `30000` | How often the pool manager drops stopped spares and hosts from the registry; 500–600000 ms. Each pass inspects every registered sandbox: a Modal API call, but only a local read on GKE. |
+| `DURABLE_ACTORS_SPARE_POD_REAP_INTERVAL_MS` | `1000` | How often the pool manager deletes finished sandboxes; 100–60000 ms. On GKE each pass reads the shared pod watch and only finished pods cost an API call; Modal sandboxes end on their own. |
+| `DURABLE_ACTORS_GKE_REAP_CONCURRENCY` | `64` | Finished GKE pods the pool manager deletes at once; 1–1024. |
 | `DURABLE_ACTORS_SPARE_TTL_SECONDS`      | `600`   | Unassigned host lifetime; 30–3600 seconds.                                                                                                                                                                                                                                                  |
 | `DURABLE_ACTORS_HOST_CPU_MILLIS`        | `250`   | Default actor CPU request in millicores; spares use it.                                                                                                                                                                                                                                     |
 | `DURABLE_ACTORS_HOST_CPU_LIMIT_MILLIS`  | Unset   | Default actor CPU limit; at least the request. Unset leaves CPU uncapped.                                                                                                                                                                                                                   |
@@ -100,7 +105,7 @@ Use the [self-hosting guide](../self-hosting.md) and [Helm chart](../../charts/d
 
 | Variable | Description |
 | --- | --- |
-| `DURABLE_ACTORS_PROCESS_ROLE` | `control_plane` for the server; the provider assigns actor/spare roles. |
+| `DURABLE_ACTORS_PROCESS_ROLE` | `control_plane` serves the API; `pool_manager` fills, trims and cleans up the warm pool with the same settings and must run as exactly one replica. The provider assigns actor/spare roles. |
 | `DURABLE_ACTORS_CONTROL_PLANE_BIND` | Listen address, `0.0.0.0:7100` in the chart. |
 | `DURABLE_ACTORS_ALARM_POLL_INTERVAL_MS` | Interval for checking due alarms, default `100` milliseconds. The chart sets it from `alarms.pollIntervalMs`. Shorter intervals reduce polling delay and increase database load. |
 | `DURABLE_ACTORS_CONTROL_PLANE_URL` | Private Kubernetes Service origin reachable from sandboxes. |

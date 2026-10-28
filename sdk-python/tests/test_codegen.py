@@ -9,7 +9,6 @@ import httpx
 import pytest
 from fixtures.typecheck import checker_command
 from test_authoring import Chat, Message
-from test_client import TARGET
 
 from durable_actors import AsyncActor, AsyncClient
 from durable_actors.codegen import generate_client
@@ -560,7 +559,7 @@ async def test_generated_async_client_invokes_and_decodes_shared_models(tmp_path
         await asyncio.sleep(0)
         return httpx.Response(
             200,
-            json={"target": TARGET, "outcome": {"type": "completed", "result": body["args"][0]}},
+            json={"outcome": {"type": "completed", "result": body["args"][0]}},
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(handle)) as http:

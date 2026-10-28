@@ -107,7 +107,6 @@ async fn s3_bootstrap_and_refresh_without_code_issue_state_credentials() -> Resu
     assert!(config.tokens.is_none());
     assert!(config.aws.as_ref().unwrap().artifacts.is_empty());
     assert!(access.issue(&actor(), None).await?.aws.is_some());
-    assert!(!access.supports_spares());
     Ok(())
 }
 

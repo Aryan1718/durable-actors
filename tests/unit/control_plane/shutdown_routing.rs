@@ -1,16 +1,14 @@
 use super::*;
-use crate::actor_lifecycle::{
-    LifecycleKind, LifecycleReport,
-    routing::{RedisRoutingHints, RoutingHints},
-};
+use crate::actor_lifecycle::{LifecycleKind, LifecycleReport};
+use crate::control_plane::routes::{RedisRoutes, RouteEntry, RouteStore};
 
 #[tokio::test]
-async fn shutdown_hints_hold_discovery_until_the_host_stops() -> Result<()> {
+async fn shutdown_reports_hold_discovery_until_the_host_stops() -> Result<()> {
     handoff(None).await
 }
 
 #[tokio::test]
-async fn redis_shutdown_hints_reach_another_control_plane() -> Result<()> {
+async fn redis_shutdown_reports_reach_another_control_plane() -> Result<()> {
     let Ok(url) = std::env::var("DURABLE_ACTORS_TEST_REDIS_URL") else {
         return Ok(());
     };
@@ -18,16 +16,15 @@ async fn redis_shutdown_hints_reach_another_control_plane() -> Result<()> {
         url,
         ca_cert: None,
     })?;
-    handoff(Some(Arc::new(RedisRoutingHints::new(
+    handoff(Some(Arc::new(RedisRoutes::new(
         redis,
-        &format!("test:shutdown:{}", uuid::Uuid::new_v4()),
-        Duration::from_secs(60),
+        &format!("test:routes:{}", uuid::Uuid::new_v4()),
     ))))
     .await
 }
 
-async fn handoff(routing: Option<Arc<dyn RoutingHints>>) -> Result<()> {
-    let fixture = Fixture::start_with_routing(vec![], true, routing).await?;
+async fn handoff(routes: Option<Arc<dyn RouteStore>>) -> Result<()> {
+    let fixture = Fixture::start_with_routes(vec![], true, routes).await?;
     let target = fixture.find_actor().await?;
     let token = target["token"].as_str().unwrap();
     let principal = fixture
@@ -65,48 +62,19 @@ async fn handoff(routing: Option<Arc<dyn RoutingHints>>) -> Result<()> {
         .error_for_status()?
         .json()
         .await?;
-    let next = fixture.verifier.authenticate_authorization(&format!(
-        "Bearer {}",
-        replacement["token"].as_str().unwrap()
-    ))?;
+    assert_eq!(replacement, json!({"homeRegion":"north-america-east"}));
+    let target = fixture.find_actor().await?;
+    let next = fixture
+        .verifier
+        .authenticate_authorization(&format!("Bearer {}", target["token"].as_str().unwrap()))?;
     assert_ne!(principal.session_id, next.session_id);
 
     report(&fixture, &principal, LifecycleKind::Heartbeat, 1).await?;
     report(&fixture, &principal, LifecycleKind::Draining, 1).await?;
-    let lifecycle = &fixture.service.lifecycle;
-    assert_eq!(
-        lifecycle
-            .routing(&key, principal.host_id.as_str(), &principal.session_id, 1)
-            .await,
-        Some(LifecycleKind::Stopped)
-    );
-    assert_eq!(
-        lifecycle
-            .routing(&key, next.host_id.as_str(), &next.session_id, 1)
-            .await,
-        None
-    );
-    assert_eq!(
-        lifecycle
-            .routing(&key, principal.host_id.as_str(), &principal.session_id, 2)
-            .await,
-        None
-    );
-    let other = ActorKey {
-        project_id: "other-project".into(),
-        ..principal.actor.clone()
-    };
-    assert_eq!(
-        lifecycle
-            .routing(
-                &other.storage_key(),
-                principal.host_id.as_str(),
-                &principal.session_id,
-                1
-            )
-            .await,
-        None
-    );
+    assert!(matches!(
+        fixture.service.routes.get(&principal.actor).await,
+        Some(RouteEntry::Active(route)) if route.placement.lease.session_id == next.session_id
+    ));
     Ok(())
 }
 

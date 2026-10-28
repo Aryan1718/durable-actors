@@ -1,66 +1,98 @@
 use std::collections::BTreeMap;
 
+use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
     Api, Client, ResourceExt,
-    api::{DeleteParams, ListParams, PostParams, Preconditions},
-    runtime::wait::await_condition,
+    api::{DeleteParams, PostParams, Preconditions},
+    runtime::{
+        WatchStreamExt,
+        reflector::{self, ObjectRef, Store, store::Writer},
+        watcher,
+    },
 };
 use serde_json::json;
+use tokio::sync::watch;
+use tokio_util::task::AbortOnDropHandle;
 
 use super::*;
+use crate::sandbox::kube_retry::retry_throttled;
+
+const MANAGED: &str = "app.kubernetes.io/managed-by=terse";
 
 #[derive(Clone, Debug)]
 pub(crate) struct GkeConfig {
     pub namespace: String,
     pub zones: BTreeMap<String, Vec<String>>,
+    pub reap_concurrency: usize,
 }
 
+/// Reads pod state from one shared watch so provisioning costs a single API call per pod.
 pub(super) struct Kubernetes {
     pods: Api<Pod>,
+    observed: Store<Pod>,
+    changes: watch::Receiver<()>,
     config: GkeConfig,
-    _cleanup: tokio_util::task::AbortOnDropHandle<()>,
+    _watch: AbortOnDropHandle<()>,
 }
 impl Kubernetes {
     pub fn new(client: Client, config: GkeConfig) -> Self {
         let pods = Api::namespaced(client, &config.namespace);
-        let cleanup_pods = pods.clone();
-        let cleanup = tokio_util::task::AbortOnDropHandle::new(tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(60)).await;
-                if let Err(error) = reap_completed(&cleanup_pods).await {
-                    tracing::warn!(%error, "completed pod cleanup failed");
-                }
-            }
-        }));
+        let (observed, writer) = reflector::store();
+        let (changed, changes) = watch::channel(());
+        let watch = AbortOnDropHandle::new(tokio::spawn(observe(pods.clone(), writer, changed)));
         Self {
             pods,
+            observed,
+            changes,
             config,
-            _cleanup: cleanup,
+            _watch: watch,
         }
     }
 
-    async fn start(&self, pod: Pod) -> Result<Pod> {
-        let created = self.pods.create(&PostParams::default(), &pod).await?;
+    async fn start(&self, pod: Pod) -> Result<Arc<Pod>> {
+        let params = PostParams::default();
+        let created = retry_throttled(|| self.pods.create(&params, &pod)).await?;
         let mut cleanup = PodCleanup::new(self.pods.clone(), &created)?;
-        let ready = tokio::time::timeout(
-            Duration::from_secs(120),
-            await_condition(
-                self.pods.clone(),
-                &created.name_any(),
-                |pod: Option<&Pod>| pod.is_none_or(terminal_or_ready),
-            ),
-        )
-        .await
-        .context("sandbox pod readiness timed out")??
-        .context("sandbox pod disappeared")?;
-        ensure!(
-            ready.uid() == created.uid(),
-            "sandbox pod was replaced during startup"
-        );
+        let ready = tokio::time::timeout(Duration::from_secs(120), self.settled(&created))
+            .await
+            .context("sandbox pod readiness timed out")??;
         ensure!(is_ready(&ready), "sandbox pod failed: {:?}", ready.status);
         cleanup.disarm();
         Ok(ready)
+    }
+
+    async fn settled(&self, created: &Pod) -> Result<Arc<Pod>> {
+        let mut changes = self.changes.clone();
+        let mut seen = false;
+        loop {
+            match self.observed_pod(&created.name_any(), created.uid().as_deref()) {
+                Some(pod) if terminal_or_ready(&pod) => return Ok(pod),
+                Some(_) => seen = true,
+                None => ensure!(!seen, "sandbox pod disappeared"),
+            }
+            changes
+                .changed()
+                .await
+                .context("sandbox pod watch stopped")?;
+        }
+    }
+
+    async fn is_live(&self, name: &str, uid: &str) -> Result<bool> {
+        let pod = match self.observed_pod(name, Some(uid)) {
+            Some(pod) => Some(pod),
+            // The watch can trail a pod another controller just registered.
+            None => retry_throttled(|| self.pods.get_opt(name))
+                .await?
+                .map(Arc::new),
+        };
+        Ok(pod.is_some_and(|pod| pod.uid().as_deref() == Some(uid) && !is_terminal(&pod)))
+    }
+
+    fn observed_pod(&self, name: &str, uid: Option<&str>) -> Option<Arc<Pod>> {
+        self.observed
+            .get(&ObjectRef::new(name).within(&self.config.namespace))
+            .filter(|pod| pod.uid().as_deref() == uid)
     }
 
     fn zones(&self, region: &str) -> Result<&[String]> {
@@ -110,7 +142,7 @@ impl SandboxCluster for Kubernetes {
 
     async fn retire_spare(&self, spare: &SpareHandle) -> Result<()> {
         if spare.resource_id.is_empty() {
-            let Some(pod) = self.pods.get_opt(&spare.name).await? else {
+            let Some(pod) = retry_throttled(|| self.pods.get_opt(&spare.name)).await? else {
                 return Ok(());
             };
             ensure!(
@@ -135,14 +167,7 @@ impl SandboxCluster for Kubernetes {
     }
 
     async fn stopped_spares(&self, spares: &[SpareHandle]) -> Result<Vec<String>> {
-        let pods: HashMap<_, _> = self
-            .pods
-            .list(&ListParams::default())
-            .await?
-            .items
-            .into_iter()
-            .map(|pod| (pod.name_any(), pod))
-            .collect();
+        self.observed.wait_until_ready().await?;
         let mut stopped = Vec::new();
         for spare in spares {
             let (namespace, name, uid) = resource_identity(&spare.resource_id)?;
@@ -150,37 +175,53 @@ impl SandboxCluster for Kubernetes {
                 namespace == self.config.namespace && name == spare.name,
                 "sandbox resource identity mismatch"
             );
-            let live = pods.get(name).is_some_and(|pod| {
-                pod.uid().as_deref() == Some(uid)
-                    && !pod
-                        .status
-                        .as_ref()
-                        .and_then(|status| status.phase.as_deref())
-                        .is_some_and(|phase| matches!(phase, "Failed" | "Succeeded"))
-            });
-            if !live {
+            if !self.is_live(name, uid).await? {
                 stopped.push(spare.resource_id.clone());
             }
         }
         Ok(stopped)
     }
+
+    // Each finished pod costs one DELETE; finding them in the watched copy makes no API calls.
+    async fn reap_finished(&self) -> Result<()> {
+        let finished = self
+            .observed
+            .state()
+            .into_iter()
+            .filter(|pod| is_terminal(pod) && pod.metadata.deletion_timestamp.is_none());
+        futures_util::stream::iter(finished)
+            .for_each_concurrent(self.config.reap_concurrency, |pod| async move {
+                let deleted = match pod.uid() {
+                    Some(uid) => delete_pod(&self.pods, &pod.name_any(), &uid).await,
+                    None => Err(anyhow::anyhow!("pod UID missing")),
+                };
+                if let Err(error) = deleted {
+                    tracing::warn!(%error, name = %pod.name_any(), "finished pod cleanup failed");
+                }
+            })
+            .await;
+        Ok(())
+    }
 }
 
-async fn reap_completed(pods: &Api<Pod>) -> Result<()> {
-    for phase in ["Failed", "Succeeded"] {
-        let params = ListParams::default()
-            .labels("app.kubernetes.io/managed-by=terse")
-            .fields(&format!("status.phase={phase}"));
-        for pod in pods.list(&params).await? {
-            delete_pod(
-                pods,
-                &pod.name_any(),
-                &pod.uid().context("pod UID missing")?,
-            )
-            .await?;
-        }
-    }
-    Ok(())
+async fn observe(pods: Api<Pod>, writer: Writer<Pod>, changed: watch::Sender<()>) {
+    watcher(pods, watcher::Config::default().labels(MANAGED))
+        .default_backoff()
+        .modify(|pod| {
+            pod.managed_fields_mut().clear();
+            pod.spec = None;
+        })
+        .reflect(writer)
+        .for_each(|event| {
+            match event {
+                Ok(_) => {
+                    changed.send_replace(());
+                }
+                Err(error) => tracing::warn!(%error, "sandbox pod watch failed"),
+            }
+            std::future::ready(())
+        })
+        .await;
 }
 
 fn spare_pod(request: &CreateSpareRequest, zones: &[String], token: &str) -> Result<Pod> {
@@ -229,18 +270,19 @@ fn container_resources(resources: &ResourceLimits) -> serde_json::Value {
         limits["memory"] = json!(format!("{memory}Mi"));
     }
     json!({
-        "requests":{"ephemeral-storage":"1Gi","cpu":format!("{}m", resources.cpu_millis),"memory":format!("{}Mi", resources.memory_mib)},
+        "requests":{"ephemeral-storage":"256Mi","cpu":format!("{}m", resources.cpu_millis),"memory":format!("{}Mi", resources.memory_mib)},
         "limits":limits
     })
 }
 
 fn terminal_or_ready(pod: &Pod) -> bool {
-    is_ready(pod)
-        || pod
-            .status
-            .as_ref()
-            .and_then(|status| status.phase.as_deref())
-            .is_some_and(|phase| matches!(phase, "Failed" | "Succeeded"))
+    is_ready(pod) || is_terminal(pod)
+}
+fn is_terminal(pod: &Pod) -> bool {
+    pod.status
+        .as_ref()
+        .and_then(|status| status.phase.as_deref())
+        .is_some_and(|phase| matches!(phase, "Failed" | "Succeeded"))
 }
 fn is_ready(pod: &Pod) -> bool {
     pod.status
@@ -271,7 +313,7 @@ async fn delete_pod(pods: &Api<Pod>, name: &str, uid: &str) -> Result<()> {
         }),
         ..DeleteParams::default()
     };
-    match pods.delete(name, &params).await {
+    match retry_throttled(|| pods.delete(name, &params)).await {
         Ok(_) => Ok(()),
         Err(kube::Error::Api(error)) if error.code == 404 => Ok(()),
         Err(error) => Err(error.into()),

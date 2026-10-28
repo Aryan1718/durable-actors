@@ -65,7 +65,7 @@ test("actor calls read environment settings lazily without a setup function", ()
             await assert.rejects(counter.broadcast("hello"), error => error instanceof ActorInvocationError && error.code === "unauthenticated");
             assert.deepEqual(requests, [
                 "https://control.example.com/v1/projects/default/actors/Counter/one/invoke",
-                "https://control.example.com/v1/projects/default/actors/Counter/one/find-actor"
+                "https://control.example.com/v1/projects/default/actors/Counter/one/socket-effects"
             ]);
         `
         ])

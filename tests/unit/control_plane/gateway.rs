@@ -1,134 +1,7 @@
 use super::*;
-use crate::request_tracking::HostState;
+use crate::{control_plane::ActorJwtVerifier, request_tracking::HostState};
 use futures_util::{SinkExt, StreamExt};
 use tokio_tungstenite::tungstenite::Message as UpstreamMessage;
-
-#[tokio::test]
-async fn signed_route_is_bound_to_the_actor_and_epoch() -> Result<()> {
-    use base64::Engine;
-    let key = aws_lc_rs::signature::Ed25519KeyPair::generate_pkcs8(
-        &aws_lc_rs::rand::SystemRandom::new(),
-    )?;
-    let issuer = ActorJwtIssuer::from_base64_pkcs8(
-        &base64::engine::general_purpose::STANDARD.encode(key.as_ref()),
-        "test",
-        "issuer",
-        "authority",
-        "invoke",
-        std::time::Duration::from_secs(60),
-    )?;
-    let gateway = test_gateway(
-        &issuer,
-        "http://127.0.0.1:7100".into(),
-        &super::super::socket_bus::MemorySocketHub::default(),
-    )?;
-    let actor = crate::actor::ActorKey {
-        project_id: "test".into(),
-        actor_name: "Counter".into(),
-        actor_id: "one".into(),
-    };
-    let token = issuer.issue_invocation_target(
-        &actor,
-        &crate::host::HostId::new("host.v3.test.one"),
-        "00000000-0000-4000-8000-000000000001",
-        "test",
-        "north-america-west",
-        7,
-        None,
-        "http://10.1.2.3:7101",
-    )?;
-    let authorization = format!("Bearer {}", token.token);
-    assert_eq!(
-        gateway.invocation_route(&actor, 7, &authorization)?,
-        "http://10.1.2.3:7101/"
-    );
-    assert!(gateway.invocation_route(&actor, 8, &authorization).is_err());
-    let other = crate::actor::ActorKey {
-        actor_id: "other".into(),
-        ..actor
-    };
-    assert!(gateway.invocation_route(&other, 7, &authorization).is_err());
-    assert!(
-        gateway
-            .invocation_route(&other, 7, "Bearer unsigned")
-            .is_err()
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn signed_route_rejects_divergent_principal_actor() -> Result<()> {
-    use base64::Engine;
-    let key = aws_lc_rs::signature::Ed25519KeyPair::generate_pkcs8(
-        &aws_lc_rs::rand::SystemRandom::new(),
-    )?;
-    let issuer = ActorJwtIssuer::from_base64_pkcs8(
-        &base64::engine::general_purpose::STANDARD.encode(key.as_ref()),
-        "test",
-        "issuer",
-        "authority",
-        "invoke",
-        std::time::Duration::from_secs(60),
-    )?;
-    let gateway = test_gateway(
-        &issuer,
-        "http://127.0.0.1:7100".into(),
-        &super::super::socket_bus::MemorySocketHub::default(),
-    )?;
-    let principal_actor = crate::actor::ActorKey {
-        project_id: "test".into(),
-        actor_name: "Counter".into(),
-        actor_id: "one".into(),
-    };
-    let capability_actor = crate::actor::ActorKey {
-        project_id: "test".into(),
-        actor_name: "Counter".into(),
-        actor_id: "other".into(),
-    };
-    let token = issuer.issue_invocation_target_with_principal(
-        &principal_actor,
-        &capability_actor,
-        &crate::host::HostId::new("host.v3.test.one"),
-        "00000000-0000-4000-8000-000000000001",
-        "test",
-        "north-america-west",
-        7,
-        "http://10.1.2.3:7101",
-    )?;
-    let authorization = format!("Bearer {}", token.token);
-    assert!(
-        gateway
-            .invocation_route(&capability_actor, 7, &authorization)
-            .is_err()
-    );
-    assert!(
-        gateway
-            .invocation_route(&principal_actor, 7, &authorization)
-            .is_err()
-    );
-    let control = issuer.issue_invocation_target(
-        &capability_actor,
-        &crate::host::HostId::new("host.v3.test.one"),
-        "00000000-0000-4000-8000-000000000001",
-        "test",
-        "north-america-west",
-        7,
-        None,
-        "http://10.1.2.3:7101",
-    )?;
-    assert_eq!(
-        gateway.invocation_route(&capability_actor, 7, &format!("Bearer {}", control.token))?,
-        "http://10.1.2.3:7101/"
-    );
-
-    assert!(
-        gateway
-            .authorize_publish(&capability_actor, &authorization)
-            .is_err()
-    );
-
-    Ok(())
-}
 
 fn test_gateway(
     issuer: &ActorJwtIssuer,
@@ -387,9 +260,6 @@ async fn gateways_keep_connections_and_metadata_when_the_actor_host_changes() ->
                 Some(UpstreamMessage::Text("2".into()))
             );
         }
-        // Known non-execution retries through the handoff: five resolutions for the
-        // first gateway's socket, as before, plus one for the second gateway's.
-        assert_eq!(provisioner.started.available_permits(), 6);
         assert_eq!(provisioner.unavailable.load(Ordering::SeqCst), 0);
         sockets[0]
             .send(UpstreamMessage::Text("uncertain".into()))
@@ -431,10 +301,6 @@ struct PausedProvisioner {
 
 #[async_trait::async_trait]
 impl super::super::service::HostProvisioner for PausedProvisioner {
-    fn host_idle_timeout_ms(&self) -> u64 {
-        300_000
-    }
-
     async fn prepare_deployment(
         &self,
         _: &super::super::admin::HostLaunchSpec,

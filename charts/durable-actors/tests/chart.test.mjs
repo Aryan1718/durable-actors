@@ -43,14 +43,14 @@ test("configures ClickHouse analytics with a password from the credentials secre
     assert.match(output, /name: DURABLE_ACTORS_CLICKHOUSE_PASSWORD\n\s+valueFrom:\n\s+secretKeyRef: \{name: "actors-credentials", key: "clickhouse-password"\}/)
 })
 
-test("starts one controller and creates actor pods on demand using one Standard bucket", () => {
+test("starts one controller and one pool manager using one Standard bucket", () => {
     const output = manifests()
     assert.match(output, /replicas: 1\b/)
     assert.match(output, /DURABLE_ACTORS_PERSISTENCE, value: "standard"/)
     for (const name of ["BUCKET", "ARTIFACT_BUCKET"]) assert.match(output, new RegExp(`DURABLE_ACTORS_${name}, value: "test-state"`))
     assert.match(output, /DURABLE_ACTORS_SPARE_IDLE, value: "0"/)
     assert.match(output, /kind: Service\b/)
-    assert.equal(output.match(/kind: Deployment\n/g).length, 1)
+    assert.equal(output.match(/kind: Deployment\n/g).length, 2)
 })
 
 test("configures project actor capacity and start-rate limits", () => {
@@ -111,6 +111,29 @@ test("allows extra controllers and a small warm pool", () => {
     assert.match(output, /kind: PodDisruptionBudget/)
 })
 
+test("runs exactly one pool manager beside the serving control plane", () => {
+    const deployments = manifests({ replicaCount: 3, redis: { urlSecretKey: "redis-url" } }).split("---").filter(document => document.includes("kind: Deployment"))
+    const manager = deployments.find(document => document.includes("-pool-manager\n"))
+    const serving = deployments.find(document => document.includes("value: control_plane"))
+    assert.ok(manager && serving)
+    assert.match(manager, /replicas: 1\b/)
+    assert.match(manager, /strategy: \{type: Recreate\}/)
+    assert.match(manager, /DURABLE_ACTORS_PROCESS_ROLE, value: pool_manager/)
+    assert.doesNotMatch(manager, /readinessProbe/)
+    assert.match(manager, /livenessProbe:\n\s+httpGet: \{path: \/healthz/)
+    assert.match(serving, /replicas: 3\b/)
+})
+
+test("configures how fast warm pools refill and drain", () => {
+    const output = manifests({ actors: { maxStarting: 128, refillIntervalMs: 250, retireConcurrency: 128, podReapIntervalMs: 500, reapConcurrency: 32, registryReapIntervalMs: 5000 } })
+    assert.match(output, /DURABLE_ACTORS_SPARE_MAX_STARTING, value: "128"/)
+    assert.match(output, /DURABLE_ACTORS_SPARE_REFILL_INTERVAL_MS, value: "250"/)
+    assert.match(output, /DURABLE_ACTORS_SPARE_RETIRE_CONCURRENCY, value: "128"/)
+    assert.match(output, /DURABLE_ACTORS_SPARE_POD_REAP_INTERVAL_MS, value: "500"/)
+    assert.match(output, /DURABLE_ACTORS_GKE_REAP_CONCURRENCY, value: "32"/)
+    assert.match(output, /DURABLE_ACTORS_SPARE_REAP_INTERVAL_MS, value: "5000"/)
+})
+
 for (const [name, overrides] of [
     ["unknown storage mode", { storage: { mode: "standrad" } }],
     ["missing Rapid placements", { storage: { mode: "rapid" } }],
@@ -126,7 +149,8 @@ for (const [name, overrides] of [
     ["insecure public URL", { publicUrl: "http://actors.example.com" }],
     ["shared trust namespace", { sandboxNamespace: "actors" }],
     ["missing ingress certificate", { ingress: { enabled: true } }],
-    ["warm pool above fleet limit", { actors: { warm: 300 } }]
+    ["warm pool above fleet limit", { actors: { warm: 300 } }],
+    ["refill interval below 50 ms", { actors: { refillIntervalMs: 10 } }]
 ]) test(`rejects ${name}`, () => assert.notEqual(render(overrides).status, 0))
 
 test("deploys the control plane separately and configures language-specific actor images", () => {

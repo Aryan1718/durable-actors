@@ -3,6 +3,7 @@ use crate::{postgres::testing::with_postgres, sandbox::*};
 
 struct Provider {
     fail: std::sync::atomic::AtomicBool,
+    reaped: std::sync::atomic::AtomicUsize,
     pause: std::sync::Mutex<
         Option<(
             tokio::sync::oneshot::Sender<()>,
@@ -29,6 +30,11 @@ impl SandboxProvider for Provider {
             .map(|spare| spare.resource_id.clone())
             .collect())
     }
+    async fn reap_finished(&self) -> Result<()> {
+        self.reaped
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
     async fn ensure_host(&self, _: &EnsureHostRequest) -> Result<ActorHostHandle> {
         anyhow::bail!("unexpected assignment")
     }
@@ -44,6 +50,7 @@ async fn completed_hosts_are_removed_but_live_hosts_and_uncertain_observations_a
         let provider = Arc::new(Provider {
             fail: true.into(),
             pause: None.into(),
+            reaped: 0.into(),
         });
         let pool = SparePool::new(
             PostgresDatabase::connect(&fixture.url).await?,
@@ -55,6 +62,10 @@ async fn completed_hosts_are_removed_but_live_hosts_and_uncertain_observations_a
                 fleet_maximum: 0,
                 max_starting: 1,
                 idle_ttl_seconds: 600,
+                refill_interval: Duration::from_secs(1),
+                retire_concurrency: 8,
+                reap_interval: Duration::from_secs(30),
+                pod_reap_interval: Duration::from_secs(1),
                 regions: vec![],
                 resources: ResourceLimits::default(),
             },
@@ -80,10 +91,10 @@ async fn completed_hosts_are_removed_but_live_hosts_and_uncertain_observations_a
             .fail
             .store(false, std::sync::atomic::Ordering::SeqCst);
         let stop = CancellationToken::new();
-        pool.start(
+        tokio::spawn(pool.clone().run(
             Arc::new(crate::control_plane::admin::LocalAdminRegistry::default()),
             stop.clone(),
-        );
+        ));
         let result = tokio::time::timeout(Duration::from_secs(3), async {
             while pool.host("done").await?.is_some() {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -93,6 +104,7 @@ async fn completed_hosts_are_removed_but_live_hosts_and_uncertain_observations_a
         .await;
         stop.cancel();
         result??;
+        assert!(provider.reaped.load(std::sync::atomic::Ordering::SeqCst) > 0);
         pool.forget_stopped().await?;
         assert!(pool.host("done").await?.is_none());
         assert!(pool.host("live").await?.is_some());
@@ -117,6 +129,7 @@ async fn stale_cleanup_observation_cannot_remove_a_replacement_identity() -> Res
         let provider = Arc::new(Provider {
             fail: false.into(),
             pause: Some((observed, paused)).into(),
+            reaped: 0.into(),
         });
         let pool = SparePool::new(
             PostgresDatabase::connect(&fixture.url).await?,
@@ -128,6 +141,10 @@ async fn stale_cleanup_observation_cannot_remove_a_replacement_identity() -> Res
                 fleet_maximum: 0,
                 max_starting: 1,
                 idle_ttl_seconds: 600,
+                refill_interval: Duration::from_secs(1),
+                retire_concurrency: 8,
+                reap_interval: Duration::from_secs(30),
+                pod_reap_interval: Duration::from_secs(1),
                 regions: vec![],
                 resources: ResourceLimits::default(),
             },
@@ -169,10 +186,12 @@ async fn stale_cleanup_observation_cannot_remove_a_replacement_identity() -> Res
 #[tokio::test]
 async fn reconciliation_excludes_evicted_spares_from_subsequent_claims() -> Result<()> {
     with_postgres(async |fixture| {
-        let provider = Arc::new(Provider { fail: false.into(), pause: None.into() });
+        let provider = Arc::new(Provider { fail: false.into(), pause: None.into(), reaped: 0.into() });
         let pool = SparePool::new(PostgresDatabase::connect(&fixture.url).await?, provider, PoolConfig {
             control_plane_url: None, kind: SpareKind::Actor, idle: 2, fleet_maximum: 4,
-            max_starting: 2, idle_ttl_seconds: 600, regions: vec![], resources: ResourceLimits::default(),
+            max_starting: 2, idle_ttl_seconds: 600, refill_interval: Duration::from_secs(1), retire_concurrency: 8, reap_interval: Duration::from_secs(30),
+            pod_reap_interval: Duration::from_secs(1), regions: vec![],
+            resources: ResourceLimits::default(),
         });
         for name in ["evicted", "warm"] {
             let spare = SpareHandle {

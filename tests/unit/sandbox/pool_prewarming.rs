@@ -37,6 +37,8 @@ async fn every_replica_warms_ready_spares_without_claiming_them() -> Result<()> 
             fleet_maximum: 4,
             max_starting: 2,
             idle_ttl_seconds: 600,
+            refill_interval: Duration::from_secs(1), retire_concurrency: 8, reap_interval: Duration::from_secs(30),
+            pod_reap_interval: Duration::from_secs(1),
             regions: vec!["north-america-west".into()],
             resources: ResourceLimits::default(),
         };
