@@ -6,6 +6,7 @@ import { ConnectionInventoryNotice } from "./ConnectionInventoryNotice.js"
 import { FilterCombobox } from "./FilterCombobox.js"
 import type { FilterSuggestion } from "./FilterCombobox.js"
 import { RequestObserver } from "./RequestObserver.js"
+import { ResidencyTimeline } from "./ResidencyTimeline.js"
 import { StateInspector } from "./StateInspector.js"
 import { TimeRangePicker } from "./TimeRangePicker.js"
 import type { ActorInstance, ActorInventory, ObserverClient } from "./client.js"
@@ -14,10 +15,11 @@ import { Button } from "./components/ui/button.js"
 import { Input } from "./components/ui/input.js"
 import { NativeSelect, NativeSelectOption } from "./components/ui/native-select.js"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table.js"
-import { useInventory } from "./observer-hooks.js"
+import { useInventory, usePolledQuery } from "./observer-hooks.js"
 import { useQueueWaits } from "./queue-wait-history.js"
 import { formatWait, queueWaitByActor, queueWaitByInstance, queueWaitTotal } from "./queue-wait.js"
 import type { QueueWaitStats } from "./queue-wait.js"
+import { activityLabel, recentInstances } from "./residency.js"
 import { defaultTimeRange, rangePhrase, resolveRange } from "./time-range.js"
 import type { TimeRange } from "./time-range.js"
 
@@ -103,9 +105,6 @@ function ActorObserver({ client, className = "", initialActorName, navigation, t
                             </Badge>
                         )}
                     </div>
-                    {selectedInstanceId === undefined && (
-                        <p>{selectedActorName === undefined ? "Inspect instances, residency, and connections." : "Inspect this actor class’s instances, residency, and connections."}</p>
-                    )}
                 </div>
                 <div className="la-observer-actions">
                     {waits.supported && <TimeRangePicker value={range} onChange={setRange} />}
@@ -129,15 +128,11 @@ function ActorObserver({ client, className = "", initialActorName, navigation, t
                         selectedActor ? (
                             <>
                                 {selectedInstanceId === undefined && (
-                                    <InventorySummary
-                                        inventory={{ ...inventory, actors: [selectedActor] }}
-                                        actorName={selectedActorName}
-                                        queueWait={waits.supported ? (totalWait ?? null) : undefined}
-                                        range={range}
-                                    />
+                                    <InventorySummary inventory={{ ...inventory, actors: [selectedActor] }} queueWait={waits.supported ? (totalWait ?? null) : undefined} />
                                 )}
                                 <ActorInstances
                                     client={client}
+                                    inventory={inventory}
                                     key={selectedActorName}
                                     id={detailsId}
                                     actorName={selectedActorName}
@@ -153,7 +148,7 @@ function ActorObserver({ client, className = "", initialActorName, navigation, t
                         )
                     ) : (
                         <>
-                            <InventorySummary inventory={inventory} queueWait={waits.supported ? (totalWait ?? null) : undefined} range={range} />
+                            <InventorySummary inventory={inventory} queueWait={waits.supported ? (totalWait ?? null) : undefined} />
                             {inventory.actors.length ? (
                                 <ActorTable
                                     inventory={inventory}
@@ -168,13 +163,6 @@ function ActorObserver({ client, className = "", initialActorName, navigation, t
                             )}
                         </>
                     )}
-                    <div className="la-observer-footnote">
-                        <span className="la-observer-refresh-status">
-                            <span className={`la-observer-dot ${failed ? "la-observer-dot-unknown" : client.watchActors ? "la-observer-dot-live" : ""}`} />
-                            {failed ? "Reconnecting…" : client.watchActors ? "Live updates" : "Auto-refresh every 5s"}
-                        </span>
-                        <span>{client.watchActors ? "Changes stream from the control plane." : "Counts follow the latest host heartbeat."}</span>
-                    </div>
                 </>
             )}
         </section>
@@ -192,7 +180,7 @@ function InventorySkeleton() {
     )
 }
 
-function InventorySummary({ inventory, actorName, queueWait, range }: { inventory: ActorInventory; actorName?: string; queueWait?: QueueWaitStats | null; range: TimeRange }) {
+function InventorySummary({ inventory, queueWait }: { inventory: ActorInventory; queueWait?: QueueWaitStats | null }) {
     const totals = inventory.actors.reduce((sum, actor) => ({ live: sum.live + actor.live, dormant: sum.dormant + actor.dormant, unknown: sum.unknown + actor.unknown }), {
         live: 0,
         dormant: 0,
@@ -203,7 +191,6 @@ function InventorySummary({ inventory, actorName, queueWait, range }: { inventor
             <div>
                 <dt>Total instances</dt>
                 <dd aria-label="Total instances">{(totals.live + totals.dormant + totals.unknown).toLocaleString()}</dd>
-                <p>{actorName === undefined ? `${inventory.actors.length} actor ${inventory.actors.length === 1 ? "type" : "types"}` : "In this actor class"}</p>
             </div>
             <div>
                 <dt>
@@ -211,7 +198,6 @@ function InventorySummary({ inventory, actorName, queueWait, range }: { inventor
                     Live
                 </dt>
                 <dd aria-label="Live instances">{totals.live.toLocaleString()}</dd>
-                <p>Loaded in memory</p>
             </div>
             <div>
                 <dt>
@@ -219,7 +205,6 @@ function InventorySummary({ inventory, actorName, queueWait, range }: { inventor
                     Dormant
                 </dt>
                 <dd aria-label="Dormant instances">{totals.dormant.toLocaleString()}</dd>
-                <p>Currently unloaded</p>
             </div>
             {totals.unknown > 0 && (
                 <div>
@@ -228,14 +213,12 @@ function InventorySummary({ inventory, actorName, queueWait, range }: { inventor
                         Unknown
                     </dt>
                     <dd aria-label="Unknown instances">{totals.unknown.toLocaleString()}</dd>
-                    <p>Awaiting host report</p>
                 </div>
             )}
             {queueWait !== undefined && (
                 <div className="la-observer-queue-wait">
                     <dt>Avg queue wait</dt>
                     <dd aria-label="Average queue wait">{formatWait(queueWait?.averageMs)}</dd>
-                    <p>{queueWait ? `Max ${formatWait(queueWait.maxMs)} · ${queueWait.admitted.toLocaleString()} admitted ${rangePhrase(range)}` : `No admitted requests ${rangePhrase(range)}`}</p>
                 </div>
             )}
         </dl>
@@ -362,6 +345,7 @@ function matchesActor(actor: ActorInventory["actors"][number], query: string) {
 
 function ActorInstances({
     client,
+    inventory,
     id,
     actorName,
     instances,
@@ -371,6 +355,7 @@ function ActorInstances({
     onSelectInstance
 }: {
     client: ObserverClient
+    inventory: ActorInventory
     id: string
     actorName: string
     instances: ActorInstance[]
@@ -381,11 +366,27 @@ function ActorInstances({
 }) {
     const [query, setQuery] = useState("")
     const [status, setStatus] = useState("all")
-    const filtered = instances.filter(instance => matches(instance.actorId, query) && (status === "all" || instance.status === status))
-    filtered.sort((a, b) => Number(b.status === "live") - Number(a.status === "live"))
+    const now = Date.now()
+    const resolved = resolveRange(range, now)
+    const history = usePolledQuery(client, { actorName, ...resolved }, client.listResidency, 5_000)
+    const filtered = recentInstances(instances.filter(instance => matches(instance.actorId, query) && (status === "all" || instance.status === status)))
+    const end = resolved.toMs ?? now
+    const start = resolved.fromMs ?? history.value?.periods.reduce((first, period) => Math.min(first, period.fromMs), end) ?? end
     const selectedInstance = instances.find(instance => instance.actorId === selectedInstanceId)
     if (selectedInstanceId !== undefined)
-        return <InstanceDetails key={selectedInstanceId} client={client} id={id} actorName={actorName} actorId={selectedInstanceId} instance={selectedInstance} waits={waits} range={range} />
+        return (
+            <InstanceDetails
+                key={selectedInstanceId}
+                client={client}
+                inventory={inventory}
+                id={id}
+                actorName={actorName}
+                actorId={selectedInstanceId}
+                instance={selectedInstance}
+                waits={waits}
+                range={range}
+            />
+        )
     return (
         <section id={id} className="la-observer-instances" aria-labelledby={`${id}-heading`}>
             <div className="la-observer-instances-heading">
@@ -393,7 +394,7 @@ function ActorInstances({
                     <h2 id={`${id}-heading`}>
                         {actorName} instances <Badge aria-hidden="true">{instances.length.toLocaleString()}</Badge>
                     </h2>
-                    <p>Select an instance to inspect its persisted state, requests, and WebSocket connections.</p>
+                    <p>All instances, most recently active first. Select one to inspect state, requests, and connections.</p>
                 </div>
             </div>
             {instances.length ? (
@@ -407,6 +408,26 @@ function ActorInstances({
                             <NativeSelectOption value="unknown">Unknown</NativeSelectOption>
                         </NativeSelect>
                     </div>
+                    {history.supported && history.loading && !history.value && <p role="status">Loading residency history…</p>}
+                    {history.supported && history.failed && (
+                        <div role="alert" className="la-observer-notice">
+                            <span>Could not refresh residency history. {history.value ? "The timeline may be out of date." : "Try again to load the timeline."}</span>
+                            <Button variant="outline" size="sm" onClick={history.retry}>
+                                Retry residency history
+                            </Button>
+                        </div>
+                    )}
+                    {history.value && filtered.length > 0 && (
+                        <ResidencyTimeline
+                            instances={filtered}
+                            periods={history.value.periods}
+                            start={start < end ? start : end - 3_600_000}
+                            end={end}
+                            endLabel={range.kind === "absolute" ? "end" : "now"}
+                            onSelect={onSelectInstance}
+                        />
+                    )}
+                    {history.value?.truncated && <p role="status">Residency history is limited to the latest 10,000 reports. Choose a shorter time range to see more detail.</p>}
                     <div className="la-observer-table-frame">
                         {filtered.length ? (
                             <Table aria-label={`${actorName} instances`} className="la-observer-instance-table">
@@ -415,6 +436,9 @@ function ActorInstances({
                                         <TableHead scope="col">Instance</TableHead>
                                         <TableHead scope="col">State</TableHead>
                                         <TableHead scope="col">Connections</TableHead>
+                                        <TableHead scope="col" aria-sort="descending">
+                                            Last active ↓
+                                        </TableHead>
                                         {waits && (
                                             <TableHead scope="col" className="la-observer-wait-cell">
                                                 Avg queue wait
@@ -440,6 +464,15 @@ function ActorInstances({
                                                 </Badge>
                                             </TableCell>
                                             <TableCell>{instance.connections.length.toLocaleString()}</TableCell>
+                                            <TableCell className="la-observer-last-active">
+                                                {instance.lastActiveAtMs == null ? (
+                                                    "Unknown"
+                                                ) : (
+                                                    <time dateTime={new Date(instance.lastActiveAtMs).toISOString()} title={new Date(instance.lastActiveAtMs).toLocaleString()}>
+                                                        {activityLabel(instance.lastActiveAtMs, now)}
+                                                    </time>
+                                                )}
+                                            </TableCell>
                                             {waits && (
                                                 <TableCell className="la-observer-wait-cell">
                                                     <QueueWait stats={waits.get(instance.actorId)} />
@@ -477,6 +510,7 @@ function ActorInstances({
 
 function InstanceDetails({
     client,
+    inventory,
     id,
     actorName,
     actorId,
@@ -485,6 +519,7 @@ function InstanceDetails({
     range
 }: {
     client: ObserverClient
+    inventory: ActorInventory
     id: string
     actorName: string
     actorId: string
@@ -520,7 +555,7 @@ function InstanceDetails({
             </div>
             <div hidden={view !== "requests"}>
                 {client.watchRequests || client.listRequests ? (
-                    <RequestObserver client={client} actor={{ actorName, actorId }} timeRange={range} focus={requestFocus} />
+                    <RequestObserver client={client} inventory={inventory} actor={{ actorName, actorId }} timeRange={range} focus={requestFocus} />
                 ) : (
                     <section>
                         <h3>Requests</h3>

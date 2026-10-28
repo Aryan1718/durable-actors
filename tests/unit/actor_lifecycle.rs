@@ -40,6 +40,7 @@ async fn usage_publishes_activation_boundaries_for_each_project() -> Result<()> 
                             ..Default::default()
                         },
                         resident: Some(kind != LifecycleKind::Stopped),
+                        last_active_at_ms: None,
                         waiting: Vec::new(),
                     },
                 })
@@ -137,6 +138,7 @@ async fn inventory_distinguishes_resident_idle_stopped_and_stale_actors() -> Res
                     occurred_at_ms: 1000,
                     resources: Default::default(),
                     resident,
+                    last_active_at_ms: None,
                     waiting: vec![WaitingOperation {
                         id: "request".into(),
                         operation: "increment".into(),
@@ -193,6 +195,7 @@ async fn latest_report_follows_activation_shutdown_and_reactivation_per_project(
             occurred_at_ms: 1000,
             resources: Default::default(),
             resident: Some(true),
+            last_active_at_ms: None,
             waiting: Vec::new(),
         },
     };
@@ -230,6 +233,89 @@ async fn latest_report_follows_activation_shutdown_and_reactivation_per_project(
     assert_eq!(
         persistence.0.get(&actor).await.unwrap().event_id,
         event.event_id
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn residency_tracks_eviction_reactivation_gaps_and_range_boundaries() -> Result<()> {
+    let store = LifecycleStore::default();
+    for (project, actor_name) in [
+        ("project", "Room"),
+        ("other", "Room"),
+        ("project", "Counter"),
+    ] {
+        for (sequence, time, resident, kind, epoch) in [
+            (1, 1_000, true, LifecycleKind::Started, 1),
+            (2, 11_000, true, LifecycleKind::Heartbeat, 1),
+            (3, 21_000, false, LifecycleKind::Heartbeat, 1),
+            (4, 31_000, true, LifecycleKind::Heartbeat, 1),
+            (5, 41_000, false, LifecycleKind::Stopped, 1),
+            (1, 61_000, true, LifecycleKind::Started, 2),
+        ] {
+            let event = LifecycleEvent {
+                organization_id: None,
+                event_id: format!("{epoch}:{sequence}"),
+                actor: ActorKey {
+                    project_id: project.into(),
+                    actor_name: actor_name.into(),
+                    actor_id: "one".into(),
+                },
+                host_id: "host".into(),
+                session_id: format!("session-{epoch}"),
+                region: "us-east".into(),
+                received_at_ms: time,
+                report: LifecycleReport {
+                    kind,
+                    owner_epoch: epoch,
+                    sequence,
+                    started_at_ms: 1000,
+                    occurred_at_ms: time,
+                    resources: Default::default(),
+                    resident: Some(resident),
+                    last_active_at_ms: Some(500),
+                    waiting: vec![],
+                },
+            };
+            store.record(event.clone()).await?;
+            store.record(event).await?;
+        }
+    }
+    let history = store
+        .residency_history("project", "Room", 15_000, 105_000)
+        .await?;
+    assert!(!history.truncated);
+    let periods: Vec<_> = history
+        .periods
+        .iter()
+        .map(|period| (period.status, period.from_ms, period.to_ms))
+        .collect();
+    assert_eq!(
+        periods,
+        vec![
+            (ActorResidency::Live, 15_000, 21_000),
+            (ActorResidency::Dormant, 21_000, 31_000),
+            (ActorResidency::Live, 31_000, 41_000),
+            (ActorResidency::Dormant, 41_000, 61_000),
+            (ActorResidency::Live, 61_000, 96_000),
+            (ActorResidency::Unknown, 96_000, 105_000),
+        ]
+    );
+    assert!(
+        store
+            .residency_history("absent", "Room", 0, 105_000)
+            .await?
+            .periods
+            .is_empty()
+    );
+    let historical = store
+        .residency_history("project", "Room", 45_000, 50_000)
+        .await?;
+    assert_eq!(historical.periods.len(), 1);
+    assert_eq!(historical.periods[0].status, ActorResidency::Dormant);
+    assert_eq!(
+        store.actor_inventory("project").await?.actors[0].instances[0].last_active_at_ms,
+        Some(500)
     );
     Ok(())
 }

@@ -44,6 +44,7 @@ pub(crate) struct ActorStatus {
     pub phase: ActorPhase,
     pub idle_since: Option<tokio::time::Instant>,
     pub waiting: Vec<WaitingOperation>,
+    pub last_active_at_ms: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +60,7 @@ impl Default for ActorStatus {
             phase: ActorPhase::Serving,
             idle_since: Some(tokio::time::Instant::now()),
             waiting: Vec::new(),
+            last_active_at_ms: None,
         }
     }
 }
@@ -340,6 +342,7 @@ impl Actor {
     }
 
     fn start(&mut self, mut request: ActorRequest) {
+        self.record_activity();
         if let Some(admission) = &mut self.admission {
             admission.borrow_and_update();
         }
@@ -438,8 +441,17 @@ impl Actor {
     }
 
     fn finish(&self, request: ActorRequest, result: Result<ActorExecutionResult>) {
+        self.record_activity();
         self.publish();
         request.finish(&self.endpoint, result);
+    }
+
+    fn record_activity(&self) {
+        use crate::clock::{Clock, SystemClock};
+        if let Ok(now) = SystemClock.now_ms() {
+            self.status
+                .send_modify(|status| status.last_active_at_ms = Some(now));
+        }
     }
 
     fn publish(&self) {
@@ -461,6 +473,7 @@ impl Actor {
                 phase,
                 idle_since,
                 waiting,
+                last_active_at_ms: status.last_active_at_ms,
             };
             let changed = *status != next;
             *status = next;

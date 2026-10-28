@@ -48,7 +48,9 @@ class Observer {
             | "getState"
             | "listStateHistory"
         > &
-            Partial<Pick<ControlPlaneClient, "openActorStream" | "openRequestStream" | "listRequests">>,
+            Partial<
+                Pick<ControlPlaneClient, "openActorStream" | "openRequestStream" | "listRequests" | "listResidency">
+            >,
         private readonly openBrowser: (url: string) => Promise<unknown>,
         private readonly assetDirectory = new URL(
             "./",
@@ -143,6 +145,7 @@ class Observer {
             return
         }
         const history = {
+            "/api/observe/residency": this.client.listResidency,
             "/api/observe/state": this.client.getState,
             "/api/observe/state/history": this.client.listStateHistory,
             "/api/observe/requests": this.client.listRequests,

@@ -47,6 +47,7 @@ async fn lifecycle_inventory_is_shared_and_tracks_activation_handoffs() -> Resul
             occurred_at_ms: 1000,
             resources: Default::default(),
             resident: Some(true),
+            last_active_at_ms: None,
             waiting: Vec::new(),
         },
     };
@@ -105,6 +106,30 @@ async fn lifecycle_inventory_is_shared_and_tracks_activation_handoffs() -> Resul
     writer.record(event.clone()).await?;
     wait_lifecycle(&persistence, &project, &event.event_id).await?;
     assert_eq!(reader.actor_inventory(&project).await?.actors[0].live, 1);
+    let history = reader
+        .residency_history(&project, "Counter", 1500, 4500)
+        .await?;
+    let periods: Vec<_> = history
+        .periods
+        .iter()
+        .map(|period| (period.status, period.from_ms, period.to_ms))
+        .collect();
+    assert_eq!(
+        periods,
+        vec![
+            (crate::placement::ActorResidency::Live, 1500, 3000),
+            (crate::placement::ActorResidency::Dormant, 3000, 4000),
+            (crate::placement::ActorResidency::Live, 4000, 4500),
+        ]
+    );
+    assert!(!history.truncated);
+    assert!(
+        reader
+            .residency_history("different-project", "Counter", 0, 4500)
+            .await?
+            .periods
+            .is_empty()
+    );
     assert!(
         reader
             .actor_inventory("different-project")

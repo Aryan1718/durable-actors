@@ -1,6 +1,6 @@
 import React, { act } from "react"
 
-import { cleanup, fireEvent, render, waitFor } from "@testing-library/react"
+import { cleanup, fireEvent, render, waitFor, within } from "@testing-library/react"
 import assert from "node:assert/strict"
 import { afterEach, test } from "node:test"
 
@@ -139,7 +139,8 @@ test("saved history sends typed filters and loads older pages without mixing liv
     await view.findByText("post")
     fireEvent.click(view.getByRole("button", { name: "History" }))
     await view.findByText("saved call 0")
-    assert.equal(view.queryByText("post"), null)
+    assert.equal(view.queryByRole("button", { name: /Inspect post request/ }), null)
+    assert.ok(within(view.getByRole("group", { name: /post method calls/ })).getByText("0 calls"))
     fireEvent.click(view.getByRole("button", { name: "Load older" }))
     await view.findByText("older call")
     assert.ok(view.getByText("saved call 0"))

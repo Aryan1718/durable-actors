@@ -3,34 +3,44 @@ import { TimelineAxis, TimelineZoomControls, timelineTicks, useTimelineZoom } fr
 import type { TimelineWindow } from "./TimelineZoom.js"
 import type { RequestTrace } from "./client.js"
 import { duration, gapLabel, requestTimeline } from "./request-timeline.js"
+import type { RequestTimelineLane } from "./request-timeline.js"
 
 export interface RequestTimelineProps {
     records: RequestTrace[]
+    lanes?: RequestTimelineLane[]
     selected?: RequestTrace
     onSelect: (record: RequestTrace, trigger: HTMLButtonElement) => void
 }
 
-export function RequestTimeline({ records, selected, onSelect }: RequestTimelineProps) {
-    const { start, span, rows } = requestTimeline(records)
+export function RequestTimeline({ records, lanes, selected, onSelect }: RequestTimelineProps) {
+    const { start, span, rows } = requestTimeline(records, lanes)
     const bounds = { start, end: start + Math.max(1, span) }
     const { range, setWindow } = useTimelineZoom(bounds)
-    const visible = rows.map(row => ({ ...row, calls: row.calls.filter(call => inWindow(call.record, range)) })).filter(row => row.calls.length > 0)
+    const visible = rows.map(row => ({ ...row, calls: row.calls.filter(call => inWindow(call.record, range)) }))
+    const count = visible.reduce((total, row) => total + row.calls.length, 0)
     return (
         <div className="request-waterfall" role="group" aria-label="Invocation waterfall">
             <TimelineHeading count={records.length} span={span} />
-            <TimelineZoomControls bounds={bounds} range={range} count={visible.reduce((total, row) => total + row.calls.length, 0)} onChange={setWindow} />
+            <TimelineZoomControls bounds={bounds} range={range} count={count} onChange={setWindow} />
             <TimelineScroll bounds={bounds} range={range} onChange={setWindow}>
                 <TimelineAxis start={start} range={range} onChange={setWindow} />
                 {visible.map(row => (
                     <TimelineRow key={row.key} row={row} range={range} selected={selected} onSelect={onSelect} />
                 ))}
-                {!visible.length && <div className="la-request-empty">No calls in this time range. Pan or zoom out to find calls.</div>}
+                {!visible.length && <div className="la-request-empty">No calls yet.</div>}
             </TimelineScroll>
             <div className="request-waterfall-caption">
                 <span>
-                    Relative to <time dateTime={new Date(start).toISOString()}>{new Date(start).toLocaleString([], { hour12: false })}</time>
+                    {records.length ? (
+                        <>
+                            Relative to <time dateTime={new Date(start).toISOString()}>{new Date(start).toLocaleString([], { hour12: false })}</time>
+                        </>
+                    ) : (
+                        "No calls yet."
+                    )}
                 </span>
                 <span>Gaps use preceding loaded calls on the same instance.</span>
+                {!count && <span className="la:sr-only">No calls in this time range. Pan or zoom out to find calls.</span>}
             </div>
         </div>
     )
@@ -72,7 +82,7 @@ function TimelineHeading({ count, span }: { count: number; span: number }) {
 }
 
 function TimelineRow({
-    row: { record, calls },
+    row: { actorName, actorId, kind, operation, calls },
     range,
     selected,
     onSelect
@@ -86,13 +96,13 @@ function TimelineRow({
         <div
             className="request-waterfall-row"
             role="group"
-            aria-label={`${record.operation} ${record.kind} calls on ${record.actorName} / ${record.actorId}`}
+            aria-label={`${operation} ${kind} calls on ${actorName} / ${actorId}`}
             data-state={calls.some(call => call.record === selected) ? "selected" : undefined}
         >
             <span className="request-waterfall-label">
-                <strong>{record.operation}</strong>
+                <strong>{operation}</strong>
                 <span>
-                    {record.actorName} / {record.actorId}
+                    {actorName} / {actorId}
                 </span>
             </span>
             <span className="request-waterfall-track">

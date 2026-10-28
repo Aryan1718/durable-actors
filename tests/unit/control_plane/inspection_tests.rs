@@ -379,6 +379,7 @@ impl Fixture {
                     occurred_at_ms: now,
                     resources: Default::default(),
                     resident: Some(kind != LifecycleKind::Stopped),
+                    last_active_at_ms: None,
                     waiting,
                 },
             })
@@ -515,6 +516,12 @@ async fn inventory_includes_unused_deployed_types_without_loading_actors() -> Re
     assert_eq!(row["live"], 0);
     assert_eq!(row["dormant"], 0);
     assert_eq!(row["instances"], json!([]));
+    assert_eq!(row["methods"], json!(["clear", "sendMessage"]));
+    let mut stream = fixture
+        .get("/v1/projects/default/observe/events")
+        .await?
+        .error_for_status()?;
+    assert_eq!(stream_inventory(&mut stream).await?, inventory);
     Ok(())
 }
 
@@ -953,6 +960,61 @@ async fn state_inspection_reads_committed_values_and_retained_attribution() -> R
     assert_eq!(
         fixture.get(&format!("{path}&version=0")).await?.status(),
         StatusCode::BAD_REQUEST
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn residency_api_filters_projects_and_actors_and_validates_ranges() -> Result<()> {
+    let fixture = Fixture::start().await?;
+    for (project, id) in [("alpha", "one"), ("beta", "two")] {
+        fixture
+            .report_lifecycle(
+                ActorKey {
+                    project_id: project.into(),
+                    ..fixture.actor(id)
+                },
+                LifecycleKind::Stopped,
+                1,
+                vec![],
+            )
+            .await?;
+    }
+    let base = "/v1/projects/alpha/observe/residency";
+    let history: Value = fixture
+        .get(&format!("{base}?actorName=Room.with.dots"))
+        .await?
+        .error_for_status()?
+        .json()
+        .await?;
+    assert_eq!(history["periods"][0]["actorId"], "one");
+    assert_eq!(history["periods"][0]["status"], "dormant");
+    assert_eq!(history["periods"].as_array().unwrap().len(), 1);
+    let empty: Value = fixture
+        .get(&format!("{base}?actorName=Other"))
+        .await?
+        .json()
+        .await?;
+    assert_eq!(empty["periods"], json!([]));
+    for query in [
+        "",
+        "?actorName=Room&fromMs=20&toMs=10",
+        "?actorName=Room&fromMs=-1",
+        "?actorName=Room&extra=1",
+    ] {
+        assert_eq!(
+            fixture.get(&format!("{base}{query}")).await?.status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+    assert_eq!(
+        fixture
+            .client
+            .get(format!("{}{base}?actorName=Room", fixture.origin))
+            .send()
+            .await?
+            .status(),
+        StatusCode::UNAUTHORIZED
     );
     Ok(())
 }

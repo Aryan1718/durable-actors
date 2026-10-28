@@ -97,6 +97,7 @@ async fn report(
                     occurred_at_ms: sequence * 1000,
                     resources: Default::default(),
                     resident: Some(kind != LifecycleKind::Stopped),
+                    last_active_at_ms: None,
                     waiting: vec![],
                 },
             },

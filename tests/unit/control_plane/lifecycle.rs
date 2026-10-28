@@ -47,6 +47,7 @@ async fn lifecycle_reports_use_authenticated_identity_without_reading_ownership(
                     occurred_at_ms: sequence * 1000,
                     resources: Default::default(),
                     resident: Some(kind != LifecycleKind::Stopped),
+                    last_active_at_ms: None,
                     waiting: Vec::new(),
                 },
             },

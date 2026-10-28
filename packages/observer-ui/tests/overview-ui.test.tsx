@@ -8,7 +8,7 @@ import type { ActorInventory, ObserverClient, RequestTracePage } from "../src/cl
 import "./dom.js"
 
 // React DOM and Radix must see the jsdom globals when they load.
-const { cleanup, fireEvent, render, waitFor } = await import("@testing-library/react")
+const { cleanup, fireEvent, render, waitFor, within } = await import("@testing-library/react")
 const { ConsoleApp } = await import("../src/ConsoleApp.js")
 const { Overview } = await import("../src/Overview.js")
 const { requestSummary, tracesInRange } = await import("../src/overview-data.js")
@@ -65,7 +65,7 @@ const page: RequestTracePage = {
     ]
 }
 
-test("overview retains partial inventory and traces, filters classes, and opens an actor", async () => {
+test("overview lists only actor types, retains partial inventory and traces, and opens an actor", async () => {
     let receive: (value: RequestTracePage) => void = () => {}
     let requestSignal: AbortSignal | undefined
     let selected = ""
@@ -81,22 +81,22 @@ test("overview retains partial inventory and traces, filters classes, and opens 
     const view = render(<Overview client={client} onSelectActor={actor => (selected = actor)} />)
     await view.findByRole("button", { name: "Inspect Room" })
     assert.match(view.getByRole("status").textContent!, /Connection inventory incomplete/)
-    assert.equal(view.getByRole("combobox", { name: "Filter by residency" }).getAttribute("data-slot"), "native-select")
-    assert.equal(view.getByRole("table", { name: "Actor class metrics" }).getAttribute("data-slot"), "table")
-    const scrollRegion = view.getByRole("region", { name: "Actor class metrics" })
-    assert.ok(view.getByRole("table", { name: "Actor class metrics" }).parentElement === scrollRegion, "the labeled focus target owns the table's scrolling")
-    assert.equal(scrollRegion.tabIndex, 0)
+    const types = within(view.getByRole("list", { name: "Actor types" }))
+    assert.deepEqual(
+        types.getAllByRole("listitem").map(item => item.textContent),
+        ["Room", "Counter"]
+    )
+    assert.equal(view.queryByRole("table"), null)
+    assert.equal(view.queryByRole("textbox", { name: "Filter actor classes" }), null)
+    assert.equal(view.queryByRole("combobox", { name: "Filter by residency" }), null)
+    assert.equal(view.queryByText("Thresholds"), null)
     assert.equal(view.getByLabelText("Actor instances").textContent, "4")
     assert.equal(view.getByLabelText("Open WebSocket connections").textContent, "1")
     assert.equal(view.getByLabelText("Retained requests").textContent, "—")
     await act(async () => receive(page))
     assert.equal(view.getByLabelText("Retained requests").textContent, "2")
-    assert.match(view.getByRole("button", { name: "Inspect Room" }).closest("tr")!.textContent!, /50%/)
-    assert.match(view.container.textContent!, /latest 500/)
-    fireEvent.input(view.getByRole("textbox", { name: "Filter actor classes" }), { target: { value: "counter" } })
-    assert.ok(!view.queryByRole("button", { name: "Inspect Room" }))
-    assert.equal(view.getByLabelText("Actor instances").textContent, "4")
-    fireEvent.input(view.getByRole("textbox", { name: "Filter actor classes" }), { target: { value: "room" } })
+    assert.equal(types.getByRole("button", { name: "Inspect Room" }).textContent, "Room")
+    assert.match(view.getByText("50%").textContent!, /50%/)
     fireEvent.click(view.getByRole("button", { name: "Inspect Room" }))
     assert.equal(selected, "Room")
     await act(async () => receive({ ...page, epoch: "restart", records: [], cursor: 0 }))
@@ -173,12 +173,14 @@ test("with saved history the overview reads metrics for the selected time range 
     const view = render(<Overview client={client} onSelectActor={() => {}} />)
     await waitFor(() => assert.equal(view.getByLabelText("Retained requests").textContent, "40"))
     assert.equal(typeof queries[0]!.fromMs, "number")
-    const room = view.getByRole("button", { name: "Inspect Room" }).closest("tr")!
-    assert.match(room.textContent!, /97\.37%/u)
-    assert.match(room.textContent!, /120\.5 ms/u)
-    assert.match(room.textContent!, /8 ms/u)
-    assert.match(view.getByRole("button", { name: "Inspect Counter" }).closest("tr")!.textContent!, /Counter10———0/u, "classes without requests show no metrics rather than made-up percentages")
-    assert.match(view.container.textContent!, /every retained request in the last hour/u)
+    assert.ok(view.getByText("97.37%"))
+    assert.ok(view.getByText("120.5 ms"))
+    assert.ok(view.getByText("8 ms"))
+    const types = within(view.getByRole("list", { name: "Actor types" }))
+    assert.deepEqual(
+        types.getAllByRole("listitem").map(item => item.textContent),
+        ["Room", "Counter"]
+    )
     fireEvent.click(view.getByRole("button", { name: "Time range: Last hour" }))
     fireEvent.click(view.getByRole("button", { name: "All retained" }))
     await waitFor(() => assert.equal(queries.length, 2))

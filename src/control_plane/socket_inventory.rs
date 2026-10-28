@@ -33,6 +33,18 @@ impl ActorInventoryReader for GatewayInventoryReader {
             connections_complete: actors.connections_complete && sockets.complete,
         })
     }
+
+    async fn residency_history(
+        &self,
+        project: &str,
+        actor_name: &str,
+        from_ms: u64,
+        to_ms: u64,
+    ) -> Result<crate::placement::ResidencyHistory> {
+        self.actors
+            .residency_history(project, actor_name, from_ms, to_ms)
+            .await
+    }
 }
 
 fn merge_rooms(
@@ -64,6 +76,7 @@ fn merge_rooms(
             actor.instances.push(ActorInstanceOverview {
                 actor_id: room.actor.actor_id,
                 status: ActorResidency::Dormant,
+                last_active_at_ms: None,
                 connections: vec![],
                 waiting: None,
             });

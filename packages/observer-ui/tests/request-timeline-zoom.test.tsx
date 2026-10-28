@@ -30,6 +30,24 @@ const trace: RequestTrace = {
 }
 const records = [{ ...trace, sequence: 0, startedAtMs: 1000, operation: "early" }, trace, { ...trace, sequence: 2, startedAtMs: 1996, operation: "late" }]
 
+test("zooming and panning keep idle method rows in the same order", () => {
+    const view = render(<RequestTimeline records={records} lanes={[{ ...trace, operation: "unused" }]} onSelect={() => {}} />)
+    const rows = () => [...view.container.querySelectorAll(".request-waterfall-row")]
+    const initial = rows()
+    assert.deepEqual(
+        initial.map(row => row.querySelector("strong")?.textContent),
+        ["early", "late", "load", "unused"]
+    )
+    zoomBy(view, 0.5)
+    assert.deepEqual(rows(), initial)
+    assert.equal(view.getAllByText("0 calls").length, 3)
+    fireEvent.wheel(view.getByLabelText("Invocation timeline, scroll for more calls"), { deltaX: 500 })
+    assert.deepEqual(rows(), initial)
+    assert.equal(view.getAllByText("0 calls").length, 2)
+    view.rerender(<RequestTimeline records={[...records].reverse()} lanes={[{ ...trace, operation: "unused" }]} onSelect={() => {}} />)
+    assert.deepEqual(rows(), initial)
+})
+
 test("timeline zoom groups the slider with its visible-window summary", () => {
     const view = render(<RequestTimeline records={records} onSelect={() => {}} />)
     const controls = within(view.getByRole("group", { name: "Timeline zoom" }))

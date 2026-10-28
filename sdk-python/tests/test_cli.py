@@ -249,6 +249,10 @@ def test_observer_assets_proxy_streaming_and_browser_boundaries(tmp_path, cli_en
                 assert http.get("/app.js").status_code == 200
                 assert http.get("/api/observe/connection").json() == {"connected": True}
                 assert http.get("/api/observe/actors").status_code == 200
+                assert http.get("/api/observe/residency?actorName=Counter").json() == {
+                    "periods": [],
+                    "truncated": False,
+                }
                 assert http.get("/", headers={"host": "evil.example"}).status_code == 403
                 assert http.get("/", headers={"origin": "https://evil.example"}).status_code == 403
                 assert http.get("/", headers={"sec-fetch-site": "cross-site"}).status_code == 403

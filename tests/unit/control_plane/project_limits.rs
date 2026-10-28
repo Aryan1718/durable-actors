@@ -193,6 +193,7 @@ fn stopped(activation: &Activation) -> LifecycleEvent {
             occurred_at_ms: 1000,
             resources: Default::default(),
             resident: Some(true),
+            last_active_at_ms: None,
             waiting: vec![],
         },
     }

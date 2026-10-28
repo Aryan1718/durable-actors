@@ -1,18 +1,15 @@
 import { useEffect, useState } from "react"
 
-import { RefreshCw, Search } from "lucide-react"
+import { RefreshCw } from "lucide-react"
 
 import { ConnectionInventoryNotice } from "./ConnectionInventoryNotice.js"
 import { TimeRangePicker } from "./TimeRangePicker.js"
 import type { ActorInventory, ObserverClient, RequestTracePage } from "./client.js"
 import { Button } from "./components/ui/button.js"
-import { Input } from "./components/ui/input.js"
-import { NativeSelect, NativeSelectOption } from "./components/ui/native-select.js"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table.js"
 import { useInventory, usePolledQuery, useRequests } from "./observer-hooks.js"
 import { inventorySummary, tracesInRange } from "./overview-data.js"
 import { liveOverviewMetrics } from "./overview-metrics.js"
-import type { ClassMetrics, OverviewMetrics } from "./overview-metrics.js"
+import type { OverviewMetrics } from "./overview-metrics.js"
 import { defaultTimeRange, rangePhrase, resolveRange } from "./time-range.js"
 import type { TimeRange } from "./time-range.js"
 
@@ -83,8 +80,8 @@ export function Overview({ client, onSelectActor, timeRange, onTimeRangeChange }
             )}
             <SummaryCards inventory={actors.inventory} metrics={metrics} range={range} />
             <ConnectionInventoryNotice inventory={actors.inventory} />
-            <ClassTable inventory={actors.inventory} metrics={metrics} failed={actors.failed} onSelectActor={onSelectActor} />
-            <DataScope page={saved.supported ? undefined : requests.page} range={range} saved={saved.supported} />
+            <ActorTypes inventory={actors.inventory} failed={actors.failed} onSelectActor={onSelectActor} />
+            <TraceNotices page={saved.supported ? undefined : requests.page} />
         </section>
     )
 }
@@ -154,115 +151,26 @@ function SummaryCards({ inventory, metrics, range }: { inventory?: ActorInventor
     )
 }
 
-function ClassTable({ inventory, metrics, failed, onSelectActor }: { inventory?: ActorInventory; metrics?: OverviewMetrics; failed: boolean; onSelectActor: OverviewProps["onSelectActor"] }) {
-    const [query, setQuery] = useState("")
-    const [residency, setResidency] = useState("all")
-    const actors =
-        inventory?.actors
-            .filter(actor => actor.actorName.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()) && (residency === "all" || actor[residency as "live" | "dormant" | "unknown"] > 0))
-            .sort((a, b) => Number(b.live > 0) - Number(a.live > 0)) ?? []
+function ActorTypes({ inventory, failed, onSelectActor }: { inventory?: ActorInventory; failed: boolean; onSelectActor: OverviewProps["onSelectActor"] }) {
     return (
-        <section aria-label="Actor classes">
+        <section aria-label="Actor types">
             <div className="overview-section-heading">
-                <h2>
-                    Actor classes <span>{number(inventory?.actors.length)}</span>
-                </h2>
-                <Thresholds />
+                <h2>Actor types</h2>
             </div>
-            <div className="overview-panel">
-                <div className="overview-filterbar">
-                    <div className="overview-search">
-                        <Search aria-hidden="true" />
-                        <Input aria-label="Filter actor classes" placeholder="Filter actor classes…" value={query} onInput={event => setQuery(event.currentTarget.value)} />
-                    </div>
-                    <NativeSelect aria-label="Filter by residency" size="sm" value={residency} onChange={event => setResidency(event.target.value)}>
-                        <NativeSelectOption value="all">All states</NativeSelectOption>
-                        <NativeSelectOption value="live">Live instances</NativeSelectOption>
-                        <NativeSelectOption value="dormant">Dormant instances</NativeSelectOption>
-                        <NativeSelectOption value="unknown">Unknown residency</NativeSelectOption>
-                    </NativeSelect>
-                </div>
-                <Table
-                    className="overview-table"
-                    aria-label="Actor class metrics"
-                    containerProps={{ className: "overview-table-scroll", role: "region", "aria-label": "Actor class metrics", tabIndex: 0 }}
-                >
-                    <colgroup>
-                        <col className="overview-class-column" />
-                        <col span={6} />
-                    </colgroup>
-                    <TableHeader>
-                        <TableRow className="overview-groups">
-                            <TableHead scope="colgroup" colSpan={2}>
-                                Actors
-                            </TableHead>
-                            <TableHead scope="colgroup" colSpan={4}>
-                                Requests
-                            </TableHead>
-                            <TableHead scope="colgroup">WebSockets</TableHead>
-                        </TableRow>
-                        <TableRow>
-                            <TableHead scope="col">Class</TableHead>
-                            <TableHead scope="col">Instances</TableHead>
-                            <TableHead scope="col">Total</TableHead>
-                            <TableHead scope="col">Success</TableHead>
-                            <TableHead scope="col">p95 latency</TableHead>
-                            <TableHead scope="col">p95 queue wait</TableHead>
-                            <TableHead scope="col">Connected</TableHead>
-                        </TableRow>
-                    </TableHeader>
-                    <TableBody>
-                        {actors.map(actor => (
-                            <ClassRow
-                                key={actor.actorName}
-                                actor={actor}
-                                metrics={metrics && (metrics.classes.find(row => row.actorName === actor.actorName) ?? empty(actor.actorName))}
-                                onSelectActor={onSelectActor}
-                            />
-                        ))}
-                    </TableBody>
-                </Table>
-                {!actors.length && (
-                    <div className="overview-empty" role="status">
-                        <strong>{!inventory ? (failed ? "Inventory unavailable" : "Loading actor classes…") : inventory.actors.length ? "No matching actor classes" : "No actors yet"}</strong>
-                        <p>{inventory?.actors.length ? "Try another class name or residency state." : "Actor classes appear after deployment."}</p>
-                        {!!inventory?.actors.length && (
-                            <Button
-                                variant="outline"
-                                onClick={() => {
-                                    setQuery("")
-                                    setResidency("all")
-                                }}
-                            >
-                                Clear filters
+            {inventory?.actors.length ? (
+                <ul className="overview-actor-list" aria-label="Actor types">
+                    {inventory.actors.map(actor => (
+                        <li key={actor.actorName}>
+                            <Button variant="ghost" type="button" aria-label={`Inspect ${actor.actorName}`} onClick={() => onSelectActor(actor.actorName)}>
+                                {actor.actorName}
                             </Button>
-                        )}
-                    </div>
-                )}
-            </div>
+                        </li>
+                    ))}
+                </ul>
+            ) : (
+                <p role="status">{!inventory ? (failed ? "Inventory unavailable" : "Loading actor types…") : "No actor types deployed yet."}</p>
+            )}
         </section>
-    )
-}
-
-function ClassRow({ actor, metrics, onSelectActor }: { actor: ActorInventory["actors"][number]; metrics?: ClassMetrics; onSelectActor: OverviewProps["onSelectActor"] }) {
-    return (
-        <TableRow className="la-clickable-row" onClick={() => onSelectActor(actor.actorName)}>
-            <TableCell>
-                <Button variant="ghost" type="button" className="overview-class-link" aria-label={`Inspect ${actor.actorName}`}>
-                    <span title={actor.actorName}>{actor.actorName}</span>
-                </Button>
-            </TableCell>
-            <TableCell>{number(actor.live + actor.dormant + actor.unknown)}</TableCell>
-            <TableCell>{number(metrics?.count)}</TableCell>
-            <TableCell>
-                <Health value={metrics?.success} kind="success" />
-            </TableCell>
-            <TableCell>
-                <Health value={metrics?.p95} kind="latency" />
-            </TableCell>
-            <TableCell>{milliseconds(metrics?.queueP95)}</TableCell>
-            <TableCell>{number(actor.instances.reduce((sum, instance) => sum + instance.connections.length, 0))}</TableCell>
-        </TableRow>
     )
 }
 
@@ -277,35 +185,10 @@ function Health({ value, kind }: { value?: number | null; kind: "success" | "lat
     )
 }
 
-function Thresholds() {
-    return (
-        <details className="overview-thresholds">
-            <summary>
-                <span className="threshold-dots" aria-hidden="true">
-                    <i />
-                    <i />
-                    <i />
-                </span>
-                Thresholds
-            </summary>
-            <div>
-                <strong>Display thresholds</strong>
-                <p>Success: warning below 99%; critical below 95%.</p>
-                <p>Latency: critical when p95 exceeds 100 ms.</p>
-                <p>Reroutes are excluded from success and latency. Queue wait has no health threshold.</p>
-            </div>
-        </details>
-    )
-}
-
-function DataScope({ page, range, saved }: { page?: RequestTracePage; range: TimeRange; saved: boolean }) {
+function TraceNotices({ page }: { page?: RequestTracePage }) {
+    if (!page?.dropped && !page?.persistenceFailed && !page?.evicted) return null
     return (
         <div className="overview-data-scope">
-            <p>
-                {saved
-                    ? `Request metrics cover every retained request ${rangePhrase(range)}${range.kind === "relative" ? " (refreshed every 10 seconds)" : ""}. Inventory counts are current snapshots.`
-                    : `Request metrics cover the latest ${page?.capacity ?? 500} retained traces within the selected window. Inventory counts are current snapshots.`}
-            </p>
             {!!page?.dropped && <p role="alert">{number(page.dropped)} traces were not delivered. Request metrics are incomplete.</p>}
             {page?.persistenceFailed && <p role="alert">Some request events could not be saved. This history may be incomplete.</p>}
             {!!page?.evicted && <p>Earlier traces have expired; these metrics do not represent the full time window.</p>}
@@ -313,9 +196,6 @@ function DataScope({ page, range, saved }: { page?: RequestTracePage; range: Tim
     )
 }
 
-function empty(actorName: string): ClassMetrics {
-    return { actorName, count: 0, success: null, p95: null, queueP95: null }
-}
 function number(value?: number) {
     return value === undefined ? "—" : value.toLocaleString()
 }
