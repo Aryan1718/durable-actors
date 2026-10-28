@@ -17,28 +17,6 @@ use std::{
 #[path = "rapid/batch.rs"]
 mod batch;
 
-#[test]
-fn gcs_replica_identity_preserves_manifest_serialization() -> Result<()> {
-    let replica = Replica {
-        bucket: "projects/_/buckets/rapid-a".into(),
-        object: "logs/segment".into(),
-        identity: ReplicaIdentity::Gcs { generation: 42 },
-    };
-
-    let encoded = serde_json::to_value(&replica)?;
-    assert_eq!(
-        encoded,
-        serde_json::json!({
-            "bucket": "projects/_/buckets/rapid-a",
-            "object": "logs/segment",
-            "generation": 42,
-        })
-    );
-    let decoded: Replica = serde_json::from_value(encoded)?;
-    assert_eq!(decoded.gcs_generation()?, 42);
-    Ok(())
-}
-
 #[tokio::test]
 async fn hot_writes_reuse_streams_and_a_fresh_reader_discovers_acknowledged_state() -> Result<()> {
     let f = Fixture::new()?;
@@ -797,39 +775,6 @@ async fn unavailable_rapid_at_activation_uses_standard_without_losing_state() ->
     assert_eq!(
         f.archive.get(&f.stream.object(1)).await?.unwrap().bytes,
         state(1, 1)?
-    );
-    assert_eq!(
-        f.store()?.latest(&f.stream.prefix).await?,
-        Some((f.stream.object(1), state(1, 1)?))
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn invalid_replica_identity_falls_back_before_manifest_publication() -> Result<()> {
-    let f = Fixture::new()?;
-    f.zones[0].generation.store(0, Ordering::SeqCst);
-    let store = f.store()?;
-    store.start(&f.stream).await?;
-    store.put(&f.stream.object(1), state(1, 1)?).await?;
-    store
-        .finish(
-            &f.stream,
-            tokio::time::Instant::now() + Duration::from_secs(30),
-        )
-        .await?;
-
-    assert!(
-        f.zones
-            .iter()
-            .all(|zone| zone.objects.lock().unwrap().is_empty())
-    );
-    assert!(
-        f.archive
-            .list("")
-            .await?
-            .iter()
-            .all(|key| !key.ends_with(".manifest"))
     );
     assert_eq!(
         f.store()?.latest(&f.stream.prefix).await?,

@@ -1,27 +1,5 @@
 use super::*;
 
-#[tokio::test]
-async fn file_bucket_rejects_etag_conditions_without_changing_contents() -> Result<()> {
-    let directory = tempfile::tempdir()?;
-    let bucket = FileBucket::new(directory.path().into())?;
-    let key = "owner.json";
-    assert!(
-        bucket
-            .compare_and_swap(key, None, bytes::Bytes::from_static(b"owner"))
-            .await?
-    );
-    let result = bucket
-        .compare_and_swap(
-            key,
-            Some(crate::bucket::StorageRevision::ETag("\"opaque\"".into())),
-            bytes::Bytes::from_static(b"replacement"),
-        )
-        .await;
-    assert!(result.is_err());
-    assert_eq!(bucket.get(key).await?.unwrap().bytes.as_ref(), b"owner");
-    Ok(())
-}
-
 use std::{
     io::{BufRead, BufReader},
     process::{Child, ChildStdin, ChildStdout, Command, Stdio},

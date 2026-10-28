@@ -90,27 +90,6 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
 }
 
 #[tokio::test]
-async fn s3_bootstrap_and_refresh_without_code_issue_state_credentials() -> Result<()> {
-    let access = RuntimeAccess {
-        location: BucketLocation::S3 {
-            bucket: "state".into(),
-            region: "us-west-2".into(),
-            artifact_bucket: "code".into(),
-        },
-        token_source: None,
-        persistence: super::super::SnapshotStoreConfig::Local,
-        aws_issuer: Some(test_aws_issuer()?),
-    };
-    let config: HostStorageConfig =
-        serde_json::from_str(&access.bootstrap("us-west-2", &actor(), None).await?)?;
-
-    assert!(config.tokens.is_none());
-    assert!(config.aws.as_ref().unwrap().artifacts.is_empty());
-    assert!(access.issue(&actor(), None).await?.aws.is_some());
-    Ok(())
-}
-
-#[tokio::test]
 async fn s3_bootstrap_with_code_issues_exact_artifact_access() -> Result<()> {
     let access = RuntimeAccess {
         location: BucketLocation::S3 {

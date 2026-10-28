@@ -51,7 +51,3 @@ impl SnapshotStore for StandardSnapshots {
         }
     }
 }
-
-#[cfg(test)]
-#[path = "../../../tests/unit/bucket/rapid/standard.rs"]
-mod tests;

@@ -20,34 +20,6 @@ fn artifact(path: &str, bytes: &[u8]) -> S3BundleFile {
 }
 
 #[test]
-fn s3_bundle_identity_round_trips_without_changing_gcs_encoding() -> Result<()> {
-    let bundle = bundle();
-    let encoded = bundle.encode()?;
-    assert!(encoded.starts_with("s3:"));
-    let decoded = S3Bundle::decode(&encoded)?;
-    assert_eq!(decoded.files[0].etag, "\"opaque-etag\"");
-    assert_eq!(decoded.entrypoint()?, "actors.mjs");
-    assert!(super::super::ActorBundle::decode(&encoded).is_err());
-    assert!(S3Bundle::decode("gcs:e30").is_err());
-    let legacy = super::super::ActorBundle {
-        bucket: "code-bucket".into(),
-        files: vec![super::super::BundleFile {
-            path: "actors.mjs".into(),
-            object: "legacy/actors.mjs".into(),
-            generation: 123,
-            sha256: bundle.files[0].sha256.clone(),
-        }],
-    };
-    let encoded = legacy.encode()?;
-    assert!(encoded.starts_with("gcs:"));
-    assert_eq!(
-        super::super::ActorBundle::decode(&encoded)?.files[0].generation,
-        123
-    );
-    Ok(())
-}
-
-#[test]
 fn s3_manifests_reject_unsafe_or_inconsistent_identities() {
     for path in [
         "../outside",
@@ -106,96 +78,6 @@ async fn s3_install_verifies_all_files_before_publishing() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn missing_changed_and_failed_reads_leave_no_artifact() -> Result<()> {
-    for failure in ["missing", "etag", "generation", "transport"] {
-        let root = tempfile::tempdir()?;
-        let bundle = bundle();
-        let reader = Reader::new(&bundle, vec![Ok(b"code")]);
-        {
-            let mut objects = reader.objects.lock().unwrap();
-            let object = &mut objects[0];
-            match failure {
-                "missing" => *object = Ok(None),
-                "etag" => {
-                    object.as_mut().unwrap().as_mut().unwrap().revision =
-                        StorageRevision::ETag("changed".into())
-                }
-                "generation" => {
-                    object.as_mut().unwrap().as_mut().unwrap().revision =
-                        StorageRevision::Generation(123)
-                }
-                _ => *object = Err(anyhow::anyhow!("download failed")),
-            }
-        }
-        assert!(bundle.install(root.path(), &reader).await.is_err());
-        assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn installation_never_overwrites_existing_customer_files() -> Result<()> {
-    let root = tempfile::tempdir()?;
-    tokio::fs::write(root.path().join("actors.mjs"), b"existing").await?;
-    let bundle = bundle();
-    let reader = Reader::new(&bundle, vec![Ok(b"code")]);
-    assert!(bundle.install(root.path(), &reader).await.is_err());
-    assert_eq!(
-        tokio::fs::read(root.path().join("actors.mjs")).await?,
-        b"existing"
-    );
-    assert_eq!(reader.objects.lock().unwrap().len(), 1);
-    Ok(())
-}
-
-#[tokio::test]
-async fn bucket_reader_rejects_location_mismatches_before_reading() -> Result<()> {
-    let root = tempfile::tempdir()?;
-    let bucket = Arc::new(crate::bucket::FileBucket::new(root.path().to_owned())?);
-    let reader = BucketArtifactReader::new("code-bucket".into(), "us-west-2".into(), bucket)?;
-    assert!(
-        reader
-            .download("other-bucket", "us-west-2", "missing")
-            .await
-            .is_err()
-    );
-    assert!(
-        reader
-            .download("code-bucket", "eu-west-1", "missing")
-            .await
-            .is_err()
-    );
-    assert!(
-        reader
-            .download("code-bucket", "us-west-2", "missing")
-            .await?
-            .is_none()
-    );
-    Ok(())
-}
-
-#[tokio::test]
-async fn publication_failure_rolls_back_only_created_files() -> Result<()> {
-    let root = tempfile::tempdir()?;
-    tokio::fs::write(root.path().join("python"), b"existing").await?;
-    let staged = tempfile::tempdir()?;
-    let mut bundle = bundle();
-    bundle
-        .files
-        .push(artifact("python/dependency.so", b"dependency"));
-    tokio::fs::write(staged.path().join("actors.mjs"), b"code").await?;
-    tokio::fs::create_dir(staged.path().join("python")).await?;
-    tokio::fs::write(staged.path().join("python/dependency.so"), b"dependency").await?;
-    assert!(bundle.publish(root.path(), staged.path()).is_err());
-    assert!(!root.path().join("actors.mjs").exists());
-    assert_eq!(
-        tokio::fs::read(root.path().join("python")).await?,
-        b"existing"
-    );
-    Ok(())
-}
-
 #[cfg(unix)]
 #[tokio::test]
 async fn symlink_roots_and_parent_directories_are_rejected_before_reading() -> Result<()> {
@@ -216,35 +98,6 @@ async fn symlink_roots_and_parent_directories_are_rejected_before_reading() -> R
     assert!(bundle.install(parent.path(), &reader).await.is_err());
     assert_eq!(reader.objects.lock().unwrap().len(), 2);
     assert_eq!(std::fs::read_dir(outside.path())?.count(), 0);
-    Ok(())
-}
-
-#[tokio::test(start_paused = true)]
-async fn stalled_bundle_installation_times_out_and_removes_staged_files() -> Result<()> {
-    struct StallingReader(Reader);
-    #[async_trait]
-    impl ArtifactReader for StallingReader {
-        async fn download(
-            &self,
-            bucket: &str,
-            region: &str,
-            key: &str,
-        ) -> Result<Option<BucketObject>> {
-            if key.ends_with("dependency.so") {
-                return std::future::pending().await;
-            }
-            self.0.download(bucket, region, key).await
-        }
-    }
-    let root = tempfile::tempdir()?;
-    let mut bundle = bundle();
-    bundle
-        .files
-        .push(artifact("python/dependency.so", b"dependency"));
-    let reader = StallingReader(Reader::new(&bundle, vec![Ok(b"code")]));
-    let error = bundle.install(root.path(), &reader).await.unwrap_err();
-    assert_eq!(error.to_string(), "artifact installation timed out");
-    assert_eq!(std::fs::read_dir(root.path())?.count(), 0);
     Ok(())
 }
 

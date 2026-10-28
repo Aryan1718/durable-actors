@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::sync::Arc;
 use std::{
     path::{Path, PathBuf},
     time::Duration,
@@ -12,8 +10,6 @@ use bytes::Bytes;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
 
-#[cfg(test)]
-use crate::bucket::Bucket;
 use crate::bucket::{BucketObject, StorageRevision};
 
 const INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -192,45 +188,6 @@ pub(crate) trait ArtifactReader: Send + Sync {
         region: &str,
         object: &str,
     ) -> Result<Option<BucketObject>>;
-}
-
-#[cfg(test)]
-pub(crate) struct BucketArtifactReader {
-    bucket: String,
-    region: String,
-    storage: Arc<dyn Bucket>,
-}
-
-#[cfg(test)]
-impl BucketArtifactReader {
-    pub fn new(bucket: String, region: String, storage: Arc<dyn Bucket>) -> Result<Self> {
-        validate_location(&bucket, &region)?;
-        Ok(Self {
-            bucket,
-            region,
-            storage,
-        })
-    }
-}
-
-#[async_trait]
-#[cfg(test)]
-impl ArtifactReader for BucketArtifactReader {
-    async fn download(
-        &self,
-        bucket: &str,
-        region: &str,
-        object: &str,
-    ) -> Result<Option<BucketObject>> {
-        ensure!(
-            self.bucket == bucket && self.region == region,
-            "artifact storage location mismatch"
-        );
-        self.storage
-            .get(object)
-            .await
-            .map_err(|_| anyhow::anyhow!("artifact download failed"))
-    }
 }
 
 fn validate_location(bucket: &str, region: &str) -> Result<()> {

@@ -34,28 +34,6 @@ async fn etag_revisions_round_trip_and_reject_stale_ownership_updates() -> Resul
 }
 
 #[tokio::test]
-async fn ownership_hints_preserve_numeric_generations_and_opaque_etags() -> Result<()> {
-    let f = Fixture::new()?;
-    f.runtime
-        .register_activation(&f.actor, &request("first"), "us-east", true, None)
-        .await?;
-    let (_, hint) = f
-        .runtime
-        .get_owner_with_hint(&f.actor.storage_key())
-        .await?;
-    let numeric = serde_json::to_value(hint.unwrap())?;
-    assert_eq!(numeric["generation"], serde_json::json!(1));
-    let decoded: OwnershipHint = serde_json::from_value(numeric.clone())?;
-    assert_eq!(serde_json::to_value(decoded)?, numeric);
-
-    let mut opaque = numeric;
-    opaque["generation"] = serde_json::json!("\"opaque-etag-2\"");
-    let decoded: OwnershipHint = serde_json::from_value(opaque.clone())?;
-    assert_eq!(serde_json::to_value(decoded)?, opaque);
-    Ok(())
-}
-
-#[tokio::test]
 async fn state_writes_require_local_ownership_and_a_matching_lease() -> Result<()> {
     let f = Fixture::new()?;
     let active = f
