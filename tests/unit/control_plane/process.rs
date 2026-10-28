@@ -548,12 +548,13 @@ fn standard_s3_selects_aws_without_changing_the_code_bucket() -> Result<()> {
 }
 
 #[test]
-fn s3_rejects_rapid_spares_and_missing_aws_settings() {
+fn s3_requires_aws_settings_express_logs_and_no_spares() {
     let parse = |values: &HashMap<&str, &str>| {
         ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|value| (*value).into()))
     };
     let mut values = process_environment();
     values.insert("DURABLE_ACTORS_STORAGE_PROVIDER", "s3");
+    values.insert("DURABLE_ACTORS_SPARE_IDLE", "0");
     assert!(parse(&values).is_err());
     values.insert("DURABLE_ACTORS_AWS_REGION", "us-west-2");
     assert!(parse(&values).is_err());
@@ -562,12 +563,13 @@ fn s3_rejects_rapid_spares_and_missing_aws_settings() {
         "arn:aws:iam::123456789012:role/actor",
     );
     assert!(parse(&values).is_err());
-    values.insert("DURABLE_ACTORS_PERSISTENCE", "standard");
-    values.remove("DURABLE_ACTORS_ARCHIVE_BUCKET");
-    values.remove("DURABLE_ACTORS_RAPID_BUCKETS");
-    assert!(parse(&values).is_err());
-    values.insert("DURABLE_ACTORS_SPARE_IDLE", "0");
+    values.insert(
+        "DURABLE_ACTORS_RAPID_BUCKETS",
+        r#"[{"bucket":"logs--usw2-az1--x-s3","zone":"usw2-az1"}]"#,
+    );
     assert!(parse(&values).is_ok());
+    values.insert("DURABLE_ACTORS_SPARE_IDLE", "64");
+    assert!(parse(&values).is_err());
 }
 
 #[test]

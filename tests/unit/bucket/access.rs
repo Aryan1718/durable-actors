@@ -100,6 +100,7 @@ async fn s3_bootstrap_with_code_issues_exact_artifact_access() -> Result<()> {
         token_source: None,
         persistence: super::super::SnapshotStoreConfig::Local,
         aws_issuer: Some(test_aws_issuer()?),
+        express: None,
     };
     let key = "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs";
     let code = crate::bundle::s3::S3Bundle {
@@ -212,6 +213,7 @@ async fn every_request_mints_its_own_token() -> Result<()> {
         token_source: Some(Box::new(Numbered(Default::default()))),
         persistence: super::super::SnapshotStoreConfig::Local,
         aws_issuer: None,
+        express: None,
     };
     let first = access
         .issue(&actor(), None)

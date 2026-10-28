@@ -90,6 +90,12 @@ spec:
             - {name: DURABLE_ACTORS_AWS_ACTOR_ROLE_ARN, value: {{ $.Values.storage.actorRoleArn | quote }}}
             - {name: DURABLE_ACTORS_BUCKET, value: {{ $.Values.storage.bucket | quote }}}
             - {name: DURABLE_ACTORS_ARTIFACT_BUCKET, value: {{ $.Values.storage.bucket | quote }}}
+            {{- with $.Values.storage.express.buckets }}
+            - {name: DURABLE_ACTORS_PERSISTENCE, value: rapid}
+            - {name: DURABLE_ACTORS_ARCHIVE_BUCKET, value: {{ $.Values.storage.bucket | quote }}}
+            - {name: DURABLE_ACTORS_RAPID_BUCKETS, value: {{ . | toJson | quote }}}
+            - {name: DURABLE_ACTORS_RAPID_PLACEMENT, value: {{ $.Values.storage.express.placement | quote }}}
+            {{- end }}
             # S3 hosts cannot use spares; the pool manager only reaps finished pods.
             - {name: DURABLE_ACTORS_SPARE_IDLE, value: "0"}
             - {name: DURABLE_ACTORS_HOST_CPU_MILLIS, value: {{ $.Values.actors.cpuMillis | quote }}}

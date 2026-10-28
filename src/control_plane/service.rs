@@ -551,6 +551,16 @@ impl ControlPlaneService {
                 self.alarms.update(&principal.actor, timestamp_ms).await?;
                 Ok(ControlPlaneCommandReply::Unit)
             }
+            // Segments are fenced in storage, so a host need not hold the lease yet to prepare one.
+            ControlPlaneCommand::ExpressLog { request } => {
+                let reply = self
+                    .runtime_access
+                    .as_ref()
+                    .context("direct storage is not configured")?
+                    .express_log(&principal.actor, request)
+                    .await?;
+                Ok(ControlPlaneCommandReply::ExpressLog { reply })
+            }
             ControlPlaneCommand::RefreshStorageAccess => {
                 self.require_active_host(principal).await?;
                 let spec = self

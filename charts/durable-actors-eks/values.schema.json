@@ -18,7 +18,28 @@
       "properties": {
         "bucket": {"type": "string", "minLength": 3, "maxLength": 63, "pattern": "^[a-z0-9][a-z0-9.-]+[a-z0-9]$"},
         "region": {"type": "string", "pattern": "^[a-z]{2}(-[a-z]+)+-[0-9]+$"},
-        "actorRoleArn": {"type": "string", "pattern": "^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$"}
+        "actorRoleArn": {"type": "string", "pattern": "^arn:aws:iam::[0-9]{12}:role/[A-Za-z0-9+=,.@_/-]+$"},
+        "express": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "buckets": {
+              "type": "array",
+              "maxItems": 2,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "bucket": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]*--[a-z0-9]+-az[0-9]+--x-s3$"},
+                  "zone": {"type": "string", "pattern": "^[a-z0-9]+-az[0-9]+$"}
+                },
+                "required": ["bucket", "zone"]
+              }
+            },
+            "placement": {"type": "string", "enum": ["all", "nearest"]}
+          },
+          "required": ["buckets", "placement"]
+        }
       },
       "required": ["bucket", "region", "actorRoleArn"]
     },

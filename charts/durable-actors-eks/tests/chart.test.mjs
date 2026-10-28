@@ -35,6 +35,14 @@ test("stores state and code in one S3 bucket with actor-scoped AWS credentials",
     assert.doesNotMatch(output, /iam\.gke\.io|DURABLE_ACTORS_RAPID|DURABLE_ACTORS_USAGE_TOPIC/)
 })
 
+test("writes S3 Express logs and archives them in the S3 bucket", () => {
+    assert.doesNotMatch(manifests(), /DURABLE_ACTORS_RAPID_BUCKETS/)
+    const output = manifests({ storage: { express: { buckets: [{ bucket: "logs--use2-az1--x-s3", zone: "use2-az1" }] } } })
+    assert.match(output, /DURABLE_ACTORS_PERSISTENCE, value: rapid/)
+    assert.match(output, /DURABLE_ACTORS_ARCHIVE_BUCKET, value: "test-state"/)
+    assert.ok(output.includes("logs--use2-az1--x-s3"))
+})
+
 test("runs one pool manager that reaps finished pods without building spares", () => {
     const output = manifests()
     assert.match(output, /name: actors-durable-actors-pool-manager\n/)

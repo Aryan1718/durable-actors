@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 mod archive;
 mod checkpoint;
+mod express;
 mod frame;
 mod gcs;
 mod index;
@@ -19,6 +20,7 @@ mod segment;
 mod standard;
 mod writer;
 
+pub(crate) use express::{ExpressLogReply, ExpressLogRequest, ExpressLogs, S3ExpressLogs};
 use frame::Record;
 use prepared::Prepared;
 use segment::Segment;
@@ -40,12 +42,14 @@ struct Replica {
 #[serde(untagged)]
 enum ReplicaIdentity {
     Gcs { generation: i64 },
+    Express {},
 }
 
 impl Replica {
     fn gcs_generation(&self) -> Result<i64> {
         match self.identity {
             ReplicaIdentity::Gcs { generation } => Ok(generation),
+            ReplicaIdentity::Express {} => anyhow::bail!("GCS log replica required"),
         }
     }
 }
@@ -127,13 +131,8 @@ impl RapidSnapshots {
         *self.cleanup.lock().unwrap() = Some(AbortOnDropHandle::new(task));
     }
     fn prepare(&self, actor: &crate::actor::ActorKey) -> Result<()> {
-        let prefix = object_name(&crate::storage_paths::snapshots(actor)?)?.replacen(
-            "snapshots-",
-            "logs-",
-            1,
-        );
         *self.storage.prepared.lock().unwrap() = Some(Prepared::new(
-            prefix,
+            log_prefix(actor)?,
             self.storage.zones.clone(),
             self.storage.placement,
         ));
@@ -323,15 +322,7 @@ impl Manifest {
     fn object(&self) -> Result<String> {
         let actor =
             crate::storage_paths::actor_from_snapshot(&self.stream.object(self.first_version))?;
-        Ok(format!(
-            "{}{}.segment",
-            object_name(&crate::storage_paths::snapshots(&actor)?)?.replacen(
-                "snapshots-",
-                "logs-",
-                1
-            ),
-            self.id
-        ))
+        Ok(format!("{}{}.segment", log_prefix(&actor)?, self.id))
     }
     fn validate(&self, key: &str, prefix: &str, zones: &[Arc<dyn LogZone>]) -> Result<()> {
         ensure!(
@@ -393,6 +384,10 @@ async fn bounded<T>(operation: impl std::future::Future<Output = Result<T>>) -> 
 #[cfg(test)]
 #[path = "../../tests/unit/bucket/rapid.rs"]
 mod tests;
+
+pub(crate) fn log_prefix(actor: &crate::actor::ActorKey) -> Result<String> {
+    Ok(object_name(&crate::storage_paths::snapshots(actor)?)?.replacen("snapshots-", "logs-", 1))
+}
 
 pub(super) fn object_name(logical: &str) -> Result<String> {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};

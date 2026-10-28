@@ -14,6 +14,7 @@ const SESSION_SECONDS: i32 = 900;
 
 pub(crate) struct AwsStorage {
     pub bucket: Arc<super::S3Bucket>,
+    pub client: aws_sdk_s3::Client,
     pub issuer: Arc<AwsCredentialIssuer>,
 }
 
@@ -23,8 +24,10 @@ impl AwsStorage {
             .region(aws_config::Region::new(region.to_owned()))
             .load()
             .await;
+        let client = aws_sdk_s3::Client::new(&sdk);
         Ok(Self {
-            bucket: Arc::new(super::S3Bucket::new(bucket, aws_sdk_s3::Client::new(&sdk))?),
+            bucket: Arc::new(super::S3Bucket::new(bucket, client.clone())?),
+            client,
             issuer: Arc::new(AwsCredentialIssuer::new(
                 role_arn.to_owned(),
                 Arc::new(SdkAssumeRole::new(aws_sdk_sts::Client::new(&sdk))),
@@ -181,9 +184,8 @@ pub(crate) fn ownership_policy(bucket: &str, actor: &ActorKey) -> Result<Session
     object_policy(&["s3:GetObject", "s3:PutObject"], &[resource])
 }
 
-pub(crate) fn state_policy(bucket: &str, actor: &ActorKey) -> Result<SessionPolicy> {
-    let prefix = crate::storage_paths::snapshots(actor)?;
-    let object = format!("{}*", object_arn(bucket, &prefix)?);
+pub(crate) fn state_policy(bucket: &str, prefix: &str) -> Result<SessionPolicy> {
+    let object = format!("{}*", object_arn(bucket, prefix)?);
     let bucket = bucket_arn(bucket)?;
     let actions = ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"];
     let mut statements = object_statements(&actions, &[object]);

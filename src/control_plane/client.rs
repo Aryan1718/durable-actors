@@ -120,6 +120,19 @@ impl ControlPlaneClient {
         }
     }
 
+    pub(crate) async fn express_log(
+        &self,
+        request: crate::bucket::ExpressLogRequest,
+    ) -> Result<crate::bucket::ExpressLogReply> {
+        match self
+            .execute(ControlPlaneCommand::ExpressLog { request })
+            .await?
+        {
+            ControlPlaneCommandReply::ExpressLog { reply } => Ok(reply),
+            _ => anyhow::bail!("unexpected Express log response"),
+        }
+    }
+
     pub async fn connect(endpoint: impl Into<String>, token: impl AsRef<str>) -> Result<Self> {
         let channel = control_plane_endpoint(&endpoint.into())?.connect_lazy();
         Self::from_channel(channel, token.as_ref())

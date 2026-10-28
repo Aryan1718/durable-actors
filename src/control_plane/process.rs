@@ -247,9 +247,18 @@ async fn control_plane_routes(
     let registry = Arc::new(super::PostgresAdminRegistry::from_database(
         database.clone(),
     ));
+    let express = aws
+        .as_ref()
+        .filter(|_| config.storage.persistence.rapid_settings().is_some())
+        .map(|aws| {
+            let logs: Arc<dyn crate::bucket::ExpressLogs> =
+                Arc::new(crate::bucket::S3ExpressLogs::new(aws.client.clone()));
+            (aws.client.clone(), logs)
+        });
     let snapshots = snapshot_store(
         authority.clone(),
         gcs.as_deref(),
+        express.clone(),
         &config.storage.persistence,
         stop.clone(),
     )
@@ -278,6 +287,9 @@ async fn control_plane_routes(
     )?;
     if let Some(aws) = aws {
         runtime_access = runtime_access.with_aws_issuer(aws.issuer);
+    }
+    if let Some((_, logs)) = express {
+        runtime_access = runtime_access.with_express(logs);
     }
     let runtime_access = Arc::new(runtime_access);
     let placements = storage.clone();
@@ -364,11 +376,21 @@ async fn control_plane_routes(
 async fn snapshot_store(
     authority: Arc<dyn Bucket>,
     gcs: Option<&GcsBucket>,
+    express: Option<(aws_sdk_s3::Client, Arc<dyn crate::bucket::ExpressLogs>)>,
     persistence: &crate::bucket::SnapshotStoreConfig,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<Arc<dyn crate::bucket::SnapshotStore>> {
-    if persistence.rapid_settings().is_none() {
+    let Some((_, archive)) = persistence.rapid_settings() else {
         return Ok(Arc::new(crate::bucket::BucketSnapshots(authority)));
+    };
+    if let Some((client, logs)) = express {
+        return Ok(Arc::new(crate::bucket::RapidSnapshots::express(
+            persistence,
+            Arc::new(crate::bucket::S3Bucket::new(archive, client)?),
+            logs,
+            stop,
+            None,
+        )?));
     }
     let gcs = gcs.context("Rapid persistence requires GCS storage")?;
     crate::bucket::RapidSnapshots::validate_gcs(persistence, gcs.clients()).await?;
@@ -633,8 +655,12 @@ fn storage_provider_config(
         "gcs" => Ok(StorageProviderConfig::Gcs),
         "s3" => {
             ensure!(
-                persistence.rapid_settings().is_none(),
-                "S3 currently supports standard persistence only"
+                persistence
+                    .rapid_settings()
+                    .is_none_or(|(buckets, _)| buckets
+                        .iter()
+                        .all(|placement| placement.bucket.ends_with("--x-s3"))),
+                "Rapid persistence on S3 requires S3 Express directory buckets"
             );
             let region = required(get, "DURABLE_ACTORS_AWS_REGION")?;
             ensure!(

@@ -4,7 +4,10 @@ mod file;
 mod gcs;
 mod rapid;
 mod s3;
-pub(crate) use rapid::{RAPID_OPERATION_TIMEOUT, RapidSnapshots};
+pub(crate) use rapid::{
+    ExpressLogReply, ExpressLogRequest, ExpressLogs, RAPID_OPERATION_TIMEOUT, RapidSnapshots,
+    S3ExpressLogs,
+};
 pub(crate) mod recovery;
 mod snapshots;
 pub use snapshots::{ArchiveBatchConfig, RapidBucket, RapidPlacement, SnapshotStoreConfig};

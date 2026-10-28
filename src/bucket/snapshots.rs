@@ -78,6 +78,30 @@ pub struct RapidBucket {
     pub zone: String,
 }
 
+impl RapidBucket {
+    fn validate_zone(&self) -> Result<()> {
+        // S3 Express directory bucket names end with their zone ID, as in `logs--use2-az1--x-s3`.
+        if let Some(name) = self.bucket.strip_suffix("--x-s3") {
+            ensure!(
+                self.zone.contains("-az") && name.ends_with(&format!("--{}", self.zone)),
+                "Express bucket does not occupy its configured zone"
+            );
+            return Ok(());
+        }
+        let (region, suffix) = self
+            .zone
+            .rsplit_once('-')
+            .ok_or_else(|| anyhow::anyhow!("Rapid placement must name a Google Cloud zone"))?;
+        ensure!(
+            suffix.len() == 1
+                && suffix.as_bytes()[0].is_ascii_lowercase()
+                && region.chars().last().is_some_and(|c| c.is_ascii_digit()),
+            "invalid Rapid zone"
+        );
+        Ok(())
+    }
+}
+
 impl SnapshotStoreConfig {
     pub(crate) fn rapid_settings(&self) -> Option<(&[RapidBucket], &str)> {
         match self {
@@ -121,16 +145,7 @@ impl SnapshotStoreConfig {
         let mut names = HashSet::new();
         for placement in buckets {
             crate::storage::validate_bucket(&placement.bucket)?;
-            let (region, suffix) = placement
-                .zone
-                .rsplit_once('-')
-                .ok_or_else(|| anyhow::anyhow!("Rapid placement must name a Google Cloud zone"))?;
-            ensure!(
-                suffix.len() == 1
-                    && suffix.as_bytes()[0].is_ascii_lowercase()
-                    && region.chars().last().is_some_and(|c| c.is_ascii_digit()),
-                "invalid Rapid zone"
-            );
+            placement.validate_zone()?;
             ensure!(
                 zones.insert(&placement.zone),
                 "Rapid buckets must occupy distinct zones"

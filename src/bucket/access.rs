@@ -103,6 +103,7 @@ pub(crate) struct RuntimeAccess {
     token_source: Option<Box<dyn StorageTokenSource>>,
     persistence: super::SnapshotStoreConfig,
     aws_issuer: Option<std::sync::Arc<super::aws_access::AwsCredentialIssuer>>,
+    express: Option<std::sync::Arc<dyn super::ExpressLogs>>,
 }
 
 impl RuntimeAccess {
@@ -115,6 +116,7 @@ impl RuntimeAccess {
             location,
             persistence,
             aws_issuer: None,
+            express: None,
         })
     }
 
@@ -124,6 +126,42 @@ impl RuntimeAccess {
     ) -> Self {
         self.aws_issuer = Some(issuer);
         self
+    }
+
+    pub(crate) fn with_express(mut self, logs: std::sync::Arc<dyn super::ExpressLogs>) -> Self {
+        self.express = Some(logs);
+        self
+    }
+
+    /// Signs or fences Express log chunks for a host, only within its own actor's log segments.
+    pub(crate) async fn express_log(
+        &self,
+        actor: &crate::actor::ActorKey,
+        request: super::ExpressLogRequest,
+    ) -> Result<super::ExpressLogReply> {
+        let logs = self
+            .express
+            .as_ref()
+            .context("Express logs are not configured")?;
+        let (buckets, _) = self
+            .persistence
+            .rapid_settings()
+            .context("Express logs are not configured")?;
+        ensure!(
+            buckets
+                .iter()
+                .any(|placement| placement.bucket == request.bucket()),
+            "unknown Express log bucket"
+        );
+        let segment = request
+            .segment()
+            .strip_prefix(&super::rapid::log_prefix(actor)?)
+            .context("Express log segment belongs to another actor")?;
+        ensure!(
+            segment.ends_with(".segment") && !segment.contains('/'),
+            "invalid Express log segment"
+        );
+        logs.handle(request).await
     }
 
     pub(crate) fn validate_code(&self, code: &crate::bundle::ArtifactBundle) -> Result<()> {
@@ -237,7 +275,13 @@ impl RuntimeAccess {
             .as_ref()
             .context("AWS credential issuer missing")?;
         let ownership = super::aws_access::ownership_policy(bucket, actor)?;
-        let state = super::aws_access::state_policy(bucket, actor)?;
+        let snapshots = crate::storage_paths::snapshots(actor)?;
+        let state = match self.persistence.rapid_settings() {
+            Some((_, archive)) => {
+                super::aws_access::state_policy(archive, &super::rapid::object_name(&snapshots)?)?
+            }
+            None => super::aws_access::state_policy(bucket, &snapshots)?,
+        };
         let artifact_batches = match code_snapshot {
             Some(snapshot) => match crate::bundle::ArtifactBundle::decode(snapshot)? {
                 crate::bundle::ArtifactBundle::S3(bundle) => {

@@ -6,6 +6,11 @@ storage:
   region: ""
   # Role the controller assumes with per-actor session policies.
   actorRoleArn: ""
+  # One or two S3 Express directory buckets in distinct zones, for example
+  # {bucket: actor-logs--use2-az1--x-s3, zone: use2-az1}. Empty keeps Standard persistence.
+  express:
+    buckets: []
+    placement: all
 credentialsSecret: actors-credentials
 ingress:
   enabled: false

@@ -11,6 +11,9 @@ pub(crate) enum ControlPlaneCommand {
         operation: super::socket_gateway::SocketOperation,
     },
     RefreshStorageAccess,
+    ExpressLog {
+        request: crate::bucket::ExpressLogRequest,
+    },
     Lifecycle {
         report: crate::actor_lifecycle::LifecycleReport,
     },
@@ -33,6 +36,9 @@ pub(crate) enum ControlPlaneCommandReply {
     StorageAccess {
         access: crate::bucket::access::StorageAccess,
         replacement_token: String,
+    },
+    ExpressLog {
+        reply: crate::bucket::ExpressLogReply,
     },
     Alarm {
         timestamp_ms: Option<i64>,

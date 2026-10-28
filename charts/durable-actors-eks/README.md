@@ -20,4 +20,18 @@ The cluster must provide:
 
 `storage.actorRoleArn` must trust the controller role. Its permissions are the most any actor session gets; each session is narrowed to one actor's objects. Add a bucket lifecycle rule that aborts incomplete multipart uploads.
 
-Spare pools are not yet supported with S3, so every actor starts cold. Rapid persistence is GCS-only. Image, ingress, Redis and `credentialsSecret` settings match the [GKE chart](../durable-actors/README.md).
+## S3 Express logs
+
+For faster writes, add one or two S3 Express One Zone directory buckets in distinct zones. Each write is acknowledged once it is stored in every listed bucket; `storage.bucket` keeps ownership, code and the permanent archive.
+
+```yaml
+storage:
+  express:
+    buckets:
+      - {bucket: actor-logs--use2-az1--x-s3, zone: use2-az1}
+      - {bucket: actor-logs--use2-az2--x-s3, zone: use2-az2}
+```
+
+The controller role also needs `s3express:CreateSession` on these buckets. Actor hosts never receive Express credentials: they write through short-lived URLs, each signed by the controller for one log object.
+
+Spare pools are not yet supported with S3, so every actor starts cold. Image, ingress, Redis and `credentialsSecret` settings match the [GKE chart](../durable-actors/README.md).

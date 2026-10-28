@@ -15,7 +15,7 @@ fn actor(id: &str) -> crate::actor::ActorKey {
 #[test]
 fn explicit_denies_confine_ownership_and_state_even_with_resource_grants() -> Result<()> {
     let owner = ownership_policy("state", &actor("one"))?;
-    let state = state_policy("state", &actor("one"))?;
+    let state = state_policy("state", &crate::storage_paths::snapshots(&actor("one"))?)?;
     let own_key = crate::storage_paths::owner(&actor("one").storage_key())?;
     let other_key = crate::storage_paths::owner(&actor("two").storage_key())?;
     let prefix = crate::storage_paths::snapshots(&actor("one"))?;

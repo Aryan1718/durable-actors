@@ -79,10 +79,6 @@ impl HostStorage {
                 region,
                 artifact_bucket,
             } => {
-                ensure!(
-                    config.persistence.rapid_settings().is_none(),
-                    "Rapid persistence requires GCS"
-                );
                 ensure!(warm.is_none(), "S3 hosts cannot reuse GCS storage clients");
                 let ownership = s3_bucket(
                     &bucket,
@@ -90,13 +86,25 @@ impl HostStorage {
                     AwsHostCredentials::new(access.clone(), AwsScope::Ownership),
                 )
                 .await?;
-                let state = s3_bucket(
-                    &bucket,
-                    &region,
-                    AwsHostCredentials::new(access.clone(), AwsScope::State),
-                )
-                .await?;
-                let snapshots: Arc<dyn SnapshotStore> = Arc::new(BucketSnapshots(Arc::new(state)));
+                let rapid = config.persistence.rapid_settings();
+                let state = Arc::new(
+                    s3_bucket(
+                        rapid.map_or(bucket.as_str(), |(_, archive)| archive),
+                        &region,
+                        AwsHostCredentials::new(access.clone(), AwsScope::State),
+                    )
+                    .await?,
+                );
+                let snapshots: Arc<dyn SnapshotStore> = match rapid {
+                    Some(_) => Arc::new(RapidSnapshots::express(
+                        &config.persistence,
+                        state,
+                        Arc::new(ControlPlaneExpressLogs(client.clone())),
+                        stop.clone(),
+                        Some(&actor),
+                    )?),
+                    None => Arc::new(BucketSnapshots(state)),
+                };
                 (
                     RuntimeStorage::new(Arc::new(ownership), Arc::new(SystemClock))?
                         .with_persistence(config.persistence, snapshots)?,
@@ -423,6 +431,18 @@ impl HostLeaseRegistry for HostStorage {
 enum ArtifactStorage {
     Gcs(google_cloud_storage::client::Storage),
     S3(S3ArtifactReader),
+}
+
+struct ControlPlaneExpressLogs(Arc<ControlPlaneClient>);
+
+#[async_trait]
+impl crate::bucket::ExpressLogs for ControlPlaneExpressLogs {
+    async fn handle(
+        &self,
+        request: crate::bucket::ExpressLogRequest,
+    ) -> Result<crate::bucket::ExpressLogReply> {
+        self.0.express_log(request).await
+    }
 }
 
 struct S3ArtifactReader {
