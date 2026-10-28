@@ -4,6 +4,7 @@ use aws_sdk_s3::presigning::{PresignedRequest, PresigningConfig};
 use std::collections::VecDeque;
 
 const UPLOADS_PER_REQUEST: u64 = 128;
+const PREFETCH_BELOW: usize = 32;
 const URL_LIFETIME: Duration = Duration::from_secs(300);
 
 impl RapidSnapshots {
@@ -145,14 +146,14 @@ impl LogZone for ExpressZone {
     }
 
     async fn open(&self, object: &str) -> Result<(Replica, Box<dyn LogWriter>)> {
-        let mut writer = ExpressWriter {
+        let writer = ExpressWriter {
             zone: self.clone(),
             segment: object.into(),
-            uploads: VecDeque::new(),
+            uploads: issue(self.clone(), object.into(), 1).await?.into(),
+            pending: None,
             next: 1,
             size: 0,
         };
-        writer.refill().await?;
         let replica = Replica {
             bucket: self.bucket.clone(),
             object: object.into(),
@@ -232,11 +233,13 @@ impl ExpressZone {
     }
 }
 
-/// Writes one chunk object per flush through create-only URLs issued ahead of time.
+/// Writes one chunk object per flush through create-only URLs issued ahead of time, fetching
+/// the next batch in the background once the current one runs low.
 struct ExpressWriter {
     zone: ExpressZone,
     segment: String,
     uploads: VecDeque<Signed>,
+    pending: Option<AbortOnDropHandle<Result<Vec<Signed>>>>,
     next: u64,
     size: u64,
 }
@@ -246,28 +249,34 @@ impl LogWriter for ExpressWriter {
     async fn append_and_flush(&mut self, bytes: Bytes) -> Result<u64> {
         ensure!(!bytes.is_empty(), "empty Express log append");
         for _ in 0..2 {
-            if self.uploads.is_empty() {
-                self.refill().await?;
-            }
-            let upload = self.uploads.pop_front().context("no Express upload URL")?;
+            let upload = self.take().await?;
             let mut request = self.zone.http.put(&upload.url).body(bytes.clone());
             for (name, value) in &upload.headers {
                 request = request.header(name, value);
             }
-            match request.send().await?.status() {
+            let status = match request.send().await {
+                Ok(response) => response.status(),
+                Err(error) => {
+                    self.reset();
+                    return Err(error.into());
+                }
+            };
+            match status {
                 status if status.is_success() => {
                     self.next += 1;
                     self.size += bytes.len() as u64;
+                    self.prefetch();
                     return Ok(self.size);
                 }
                 reqwest::StatusCode::PRECONDITION_FAILED => {
                     anyhow::bail!("Express log segment was fenced")
                 }
                 // An upload URL dies with the control plane's Express session; nothing was written.
-                reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::BAD_REQUEST => {
-                    self.uploads.clear()
+                reqwest::StatusCode::FORBIDDEN | reqwest::StatusCode::BAD_REQUEST => self.reset(),
+                status => {
+                    self.reset();
+                    anyhow::bail!("Express log append failed with {status}")
                 }
-                status => anyhow::bail!("Express log append failed with {status}"),
             }
         }
         anyhow::bail!("Express upload URLs expired before use")
@@ -275,20 +284,42 @@ impl LogWriter for ExpressWriter {
 }
 
 impl ExpressWriter {
-    async fn refill(&mut self) -> Result<()> {
-        let request = ExpressLogRequest::Issue {
-            bucket: self.zone.bucket.clone(),
-            segment: self.segment.clone(),
-            first: self.next,
-            count: UPLOADS_PER_REQUEST,
-        };
-        match self.zone.logs.handle(request).await? {
-            ExpressLogReply::Issued { uploads } => {
-                self.uploads = uploads.into();
-                Ok(())
-            }
-            _ => anyhow::bail!("unexpected Express log reply"),
+    // The first queued upload signs chunk `next`; a pending batch starts after the last one.
+    async fn take(&mut self) -> Result<Signed> {
+        if self.uploads.is_empty() {
+            let batch = match self.pending.take() {
+                Some(pending) => pending.await??,
+                None => issue(self.zone.clone(), self.segment.clone(), self.next).await?,
+            };
+            self.uploads = batch.into();
         }
+        self.uploads.pop_front().context("no Express upload URL")
+    }
+
+    fn prefetch(&mut self) {
+        if self.pending.is_none() && self.uploads.len() <= PREFETCH_BELOW {
+            let first = self.next + self.uploads.len() as u64;
+            let batch = issue(self.zone.clone(), self.segment.clone(), first);
+            self.pending = Some(AbortOnDropHandle::new(tokio::spawn(batch)));
+        }
+    }
+
+    fn reset(&mut self) {
+        self.uploads.clear();
+        self.pending = None;
+    }
+}
+
+async fn issue(zone: ExpressZone, segment: String, first: u64) -> Result<Vec<Signed>> {
+    let request = ExpressLogRequest::Issue {
+        bucket: zone.bucket,
+        segment,
+        first,
+        count: UPLOADS_PER_REQUEST,
+    };
+    match zone.logs.handle(request).await? {
+        ExpressLogReply::Issued { uploads } => Ok(uploads),
+        _ => anyhow::bail!("unexpected Express log reply"),
     }
 }
 

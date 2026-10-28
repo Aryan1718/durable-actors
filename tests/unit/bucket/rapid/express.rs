@@ -29,11 +29,13 @@ async fn fencing_a_segment_stops_its_previous_writer() -> Result<()> {
         zone.read_range(&replica, 2, 3).await?,
         Bytes::from_static(b"etw")
     );
+    // Crosses the first batch of upload URLs, so the background batch is used.
+    for _ in 0..UPLOADS_PER_REQUEST {
+        writer.append_and_flush(Bytes::from_static(b"x")).await?;
+    }
+    let written = [b"onetwo".as_slice(), &[b'x'; UPLOADS_PER_REQUEST as usize]].concat();
 
-    assert_eq!(
-        zone.read(&replica, true).await?,
-        Bytes::from_static(b"onetwo")
-    );
+    assert_eq!(zone.read(&replica, true).await?, written);
     assert!(
         writer
             .append_and_flush(Bytes::from_static(b"late"))
@@ -41,9 +43,6 @@ async fn fencing_a_segment_stops_its_previous_writer() -> Result<()> {
             .is_err()
     );
     assert!(zone.open(&segment).await.is_err());
-    assert_eq!(
-        zone.read(&replica, false).await?,
-        Bytes::from_static(b"onetwo")
-    );
+    assert_eq!(zone.read(&replica, false).await?, written);
     zone.delete(&replica).await
 }
