@@ -14,13 +14,15 @@ export function pinChartImages(values, digests) {
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
-    const values = new URL("../charts/durable-actors/values.yaml", import.meta.url)
-    writeFileSync(
-        values,
-        pinChartImages(readFileSync(values, "utf8"), {
-            controlPlane: process.argv[2],
-            typescript: process.argv[3],
-            python: process.argv[4]
-        })
-    )
+    for (const chart of ["durable-actors", "durable-actors-eks"]) {
+        const values = new URL(`../charts/${chart}/values.yaml`, import.meta.url)
+        writeFileSync(
+            values,
+            pinChartImages(readFileSync(values, "utf8"), {
+                controlPlane: process.argv[2],
+                typescript: process.argv[3],
+                python: process.argv[4]
+            })
+        )
+    }
 }

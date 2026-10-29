@@ -13,7 +13,8 @@ const manifestFiles = {
     pythonPackage: "sdk-python/pyproject.toml",
     pythonRuntime: "pyproject.toml",
     pythonLock: "sdk-python/uv.lock",
-    helmChart: "charts/durable-actors/Chart.yaml"
+    helmChart: "charts/durable-actors/Chart.yaml",
+    eksChart: "charts/durable-actors-eks/Chart.yaml"
 }
 
 export const releaseManifestPaths = Object.values(manifestFiles)
@@ -61,14 +62,19 @@ export function stampReleaseVersion(manifests, version) {
         pythonLock: manifests.pythonLock
             .replace(/(\[\[package\]\]\nname = "durable-actors(?:-runtime)?"\nversion = ")[^"]+(")/gu, `$1${version}$2`)
             .replace(/(name = "durable-actors", extras = \["codegen"\], marker = "extra == 'cli'", specifier = "==)[^"]+/gu, `$1${version}`),
-        helmChart: replaceOne(
-            replaceOne(manifests.helmChart, /^version: .+$/mu, `version: ${version}`, "charts/durable-actors/Chart.yaml"),
-            /^appVersion: .+$/mu,
-            `appVersion: "${version}"`,
-            "charts/durable-actors/Chart.yaml"
-        ),
+        helmChart: stampChart(manifests.helmChart, version, manifestFiles.helmChart),
+        eksChart: stampChart(manifests.eksChart, version, manifestFiles.eksChart),
         observerPackage: replaceOne(manifests.observerPackage, /^( {4}"version": ")[^"]+(",?)/mu, `$1${version}$2`, "packages/observer-ui/package.json")
     }
+}
+
+function stampChart(source, version, path) {
+    return replaceOne(
+        replaceOne(source, /^version: .+$/mu, `version: ${version}`, path),
+        /^appVersion: .+$/mu,
+        `appVersion: "${version}"`,
+        path
+    )
 }
 
 function stampWorkspaceVersions(source, version) {
@@ -109,8 +115,10 @@ function manifestVersions(manifests) {
         { path: "sdk-python/uv.lock (CLI SDK)", version: matchVersion(manifests.pythonLock, /name = "durable-actors", extras = \["codegen"\], marker = "extra == 'cli'", specifier = "==([^"]+)"/u, manifestFiles.pythonLock) },
         { path: manifestFiles.pythonPackage, version: matchVersion(manifests.pythonPackage, /^version = "([^"]+)"/mu, manifestFiles.pythonPackage) },
         { path: manifestFiles.pythonLock, version: matchVersion(manifests.pythonLock, /^\[\[package\]\]\nname = "durable-actors"\nversion = "([^"]+)"/mu, manifestFiles.pythonLock) },
-        { path: manifestFiles.helmChart, version: matchVersion(manifests.helmChart, /^version: ([^\s]+)$/mu, manifestFiles.helmChart) },
-        { path: manifestFiles.helmChart, version: matchVersion(manifests.helmChart, /^appVersion: "([^"]+)"$/mu, manifestFiles.helmChart) },
+        ...["helmChart", "eksChart"].flatMap(chart => [
+            { path: manifestFiles[chart], version: matchVersion(manifests[chart], /^version: ([^\s]+)$/mu, manifestFiles[chart]) },
+            { path: manifestFiles[chart], version: matchVersion(manifests[chart], /^appVersion: "([^"]+)"$/mu, manifestFiles[chart]) }
+        ]),
         { path: manifestFiles.npmPackage, version: JSON.parse(manifests.npmPackage).version },
         { path: manifestFiles.observerPackage, version: JSON.parse(manifests.observerPackage).version },
         ...["sdk", "packages/observer-ui"].map(workspace => ({

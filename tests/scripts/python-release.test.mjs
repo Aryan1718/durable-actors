@@ -16,7 +16,8 @@ test("release version changes keep Python packages and native binaries aligned",
         pythonRuntime: read("pyproject.toml"),
         pythonPackage: read("sdk-python/pyproject.toml"),
         pythonLock: read("sdk-python/uv.lock"),
-        helmChart: read("charts/durable-actors/Chart.yaml")
+        helmChart: read("charts/durable-actors/Chart.yaml"),
+        eksChart: read("charts/durable-actors-eks/Chart.yaml")
     }
     const stamped = stampReleaseVersion(manifests, "9.8.7")
     assert.match(stamped.pythonRuntime, /^version = "9.8.7"$/m)
@@ -25,6 +26,7 @@ test("release version changes keep Python packages and native binaries aligned",
     const workspaces = Bun.JSONC.parse(stamped.bunLock).workspaces
     assert.equal(workspaces.sdk.version, "9.8.7")
     assert.equal(workspaces["packages/observer-ui"].version, "9.8.7")
+    assert.match(stamped.eksChart, /^appVersion: "9.8.7"$/m)
     verifyReleaseVersion(stamped, "9.8.7")
     assert.throws(() => verifyReleaseVersion({ ...stamped, pythonPackage: manifests.pythonPackage }, "9.8.7"), /pyproject/)
 })

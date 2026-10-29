@@ -73,7 +73,7 @@ paths:
             operationId: registerDeployment
             tags: [Deployments]
             summary: Deploy actors
-            description: Registers a compiled GCS bundle and its actor contract. Build and upload with any compatible toolchain before calling this endpoint. Replaces the deployment and restarts actors while preserving saved state. The bundle must use the configured artifact bucket and durable-actors/v3/artifacts/{UUID}/ paths. A new bundle requires contract; resubmitting the current bundle may omit it to retain the current contract. Local development registers localSource with its project directory and entrypoint.
+            description: Registers a compiled bundle and its actor contract. Build and upload it to the artifact bucket with any compatible toolchain before calling this endpoint; use the GCS or S3 bundle shape that matches the installation's storage. Replaces the deployment and restarts actors while preserving saved state. The bundle must use the configured artifact bucket and durable-actors/v3/artifacts/{UUID}/ paths. A new bundle requires contract; resubmitting the current bundle may omit it to retain the current contract. Local development registers localSource with its project directory and entrypoint.
             requestBody:
                 required: true
                 content:
@@ -89,6 +89,18 @@ paths:
                                             - path: actors.mjs
                                               object: durable-actors/v3/artifacts/00000000-0000-4000-8000-000000000001/actors.mjs
                                               generation: 123456789
+                                              sha256: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
+                                    contract: { version: 1, actors: [], typescript: { declarations: "export interface ActorTypes {}", dependencies: {} } }
+                            compiledS3:
+                                value:
+                                    organizationId: org-example
+                                    bundle:
+                                        bucket: actor-code
+                                        region: us-west-2
+                                        files:
+                                            - path: actors.mjs
+                                              object: durable-actors/v3/artifacts/00000000-0000-4000-8000-000000000001/actors.mjs
+                                              etag: '"9b2cf535f27731c974343645a3985328"'
                                               sha256: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA
                                     contract: { version: 1, actors: [], typescript: { declarations: "export interface ActorTypes {}", dependencies: {} } }
                             local:
@@ -897,6 +909,11 @@ components:
                 failures: { type: integer, minimum: 0 }
                 metadata: { description: Metadata saved with a retained onConnect event. }
         ActorBundle:
+            description: Compiled code in the configured artifact bucket, on GCS or S3 to match the installation's storage.
+            oneOf:
+                - { $ref: "#/components/schemas/GcsBundle" }
+                - { $ref: "#/components/schemas/S3Bundle" }
+        GcsBundle:
             type: object
             additionalProperties: false
             required: [bucket, files]
@@ -914,6 +931,26 @@ components:
                             path: { type: string, minLength: 1 }
                             object: { type: string, minLength: 1 }
                             generation: { type: integer, minimum: 1 }
+                            sha256: { type: string, pattern: "^[A-Za-z0-9_-]{43}$", description: Base64url-encoded SHA256 without padding. }
+        S3Bundle:
+            type: object
+            additionalProperties: false
+            required: [bucket, region, files]
+            properties:
+                bucket: { type: string, minLength: 3, maxLength: 63 }
+                region: { type: string, minLength: 1, description: The artifact bucket's AWS region. }
+                files:
+                    type: array
+                    minItems: 1
+                    description: Unique relative paths including exactly one actors.mjs or actors.pyz entrypoint. Each object must be durable-actors/v3/artifacts/{UUID}/{path}, with one UUID for the bundle.
+                    items:
+                        type: object
+                        additionalProperties: false
+                        required: [path, object, etag, sha256]
+                        properties:
+                            path: { type: string, minLength: 1 }
+                            object: { type: string, minLength: 1, maxLength: 1024 }
+                            etag: { type: string, minLength: 1, description: The object's ETag exactly as S3 returns it, including quotes. Hosts refuse an object whose ETag differs. }
                             sha256: { type: string, pattern: "^[A-Za-z0-9_-]{43}$", description: Base64url-encoded SHA256 without padding. }
         LocalSource:
             type: object
