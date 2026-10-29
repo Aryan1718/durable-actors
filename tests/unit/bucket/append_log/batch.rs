@@ -88,7 +88,7 @@ fn controlled(
     f: &Fixture,
     bytes: usize,
     interval_ms: u64,
-) -> Result<(RapidSnapshots, Arc<ArchiveBucket>)> {
+) -> Result<(AppendLogSnapshots, Arc<ArchiveBucket>)> {
     let archive = Arc::new(ArchiveBucket {
         inner: f.archive.clone(),
         stalled: AtomicBool::new(false),
@@ -103,7 +103,7 @@ fn controlled(
         stalled_checkpoint: AtomicBool::new(false),
         checkpoint_attempts: AtomicU64::new(0),
     });
-    let store = RapidSnapshots::new(
+    let store = AppendLogSnapshots::new(
         archive.clone(),
         Arc::new(BucketSnapshots(archive.clone())),
         f.zones
@@ -396,7 +396,7 @@ async fn resumed_checkpoint_retries_without_new_writes() -> Result<()> {
 
 async fn write_history(
     f: &Fixture,
-    writer: &RapidSnapshots,
+    writer: &AppendLogSnapshots,
     count: u64,
 ) -> Result<(Arc<crate::litestream::Litestream>, Vec<Bytes>)> {
     use crate::litestream::{Litestream, Replicator, storage::SqliteCapture};

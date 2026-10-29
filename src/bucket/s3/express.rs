@@ -1,56 +1,94 @@
-use super::*;
-use crate::bucket::SnapshotStoreConfig;
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+    time::Duration,
+};
+
+use anyhow::{Context, Result, ensure};
+use async_trait::async_trait;
 use aws_sdk_s3::presigning::{PresignedRequest, PresigningConfig};
-use std::collections::VecDeque;
+use bytes::Bytes;
+use serde::{Deserialize, Serialize};
+use tokio_util::{sync::CancellationToken, task::AbortOnDropHandle};
+
+use crate::bucket::{
+    Bucket, RapidBucket, SnapshotStoreConfig,
+    append_log::{AppendLogSnapshots, LogWriter, LogZone, Replica, ReplicaIdentity},
+};
 
 const UPLOADS_PER_REQUEST: u64 = 128;
 const PREFETCH_BELOW: usize = 32;
 const URL_LIFETIME: Duration = Duration::from_secs(300);
 
-impl RapidSnapshots {
-    pub(crate) fn express(
-        config: &SnapshotStoreConfig,
-        archive: Arc<dyn Bucket>,
-        logs: Arc<dyn ExpressLogs>,
-        stop: CancellationToken,
-        actor: Option<&crate::actor::ActorKey>,
-    ) -> Result<Self> {
-        config.validate()?;
-        let SnapshotStoreConfig::Rapid {
-            buckets,
-            archive_batch,
-            placement,
-            ..
-        } = config
-        else {
-            anyhow::bail!("append-log persistence configuration required");
-        };
-        let snapshots = Arc::new(super::standard::StandardSnapshots::new(archive.clone()));
-        let http = reqwest::Client::new();
-        let zones = buckets
-            .iter()
-            .map(|placement| {
-                Arc::new(ExpressZone {
-                    bucket: placement.bucket.clone(),
-                    logs: logs.clone(),
-                    http: http.clone(),
-                }) as Arc<dyn LogZone>
+pub(crate) fn snapshots(
+    config: &SnapshotStoreConfig,
+    archive: Arc<dyn Bucket>,
+    logs: Arc<dyn ExpressLogs>,
+    stop: CancellationToken,
+    actor: Option<&crate::actor::ActorKey>,
+) -> Result<AppendLogSnapshots> {
+    validate_zones(config)?;
+    let http = reqwest::Client::new();
+    AppendLogSnapshots::with_zones(
+        config,
+        archive,
+        |placement| {
+            Arc::new(ExpressZone {
+                bucket: placement.bucket.clone(),
+                logs: logs.clone(),
+                http: http.clone(),
             })
-            .collect();
-        let store = Self::new(
-            archive,
-            snapshots,
-            zones,
-            *placement,
-            *archive_batch,
-            Arc::new(crate::litestream::compaction::RustCompactor),
-            stop,
-        )?;
-        if let Some(actor) = actor {
-            store.prepare(actor)?;
-        }
-        Ok(store)
-    }
+        },
+        stop,
+        actor,
+    )
+}
+
+pub(crate) fn validate_zones(config: &SnapshotStoreConfig) -> Result<()> {
+    config
+        .rapid_settings()
+        .map_or(&[][..], |(buckets, _)| buckets)
+        .iter()
+        .try_for_each(validate_zone)
+}
+
+// Directory bucket names end with their zone ID, as in `logs--use2-az1--x-s3`.
+fn validate_zone(placement: &RapidBucket) -> Result<()> {
+    let name = placement
+        .bucket
+        .strip_suffix("--x-s3")
+        .context("Rapid persistence on S3 requires S3 Express directory buckets")?;
+    ensure!(
+        placement.zone.contains("-az") && name.ends_with(&format!("--{}", placement.zone)),
+        "Express bucket does not occupy its configured zone"
+    );
+    Ok(())
+}
+
+/// Admits a host's request only for its own actor's log segments in a configured Express bucket.
+pub(crate) fn authorize(
+    request: &ExpressLogRequest,
+    actor: &crate::actor::ActorKey,
+    config: &SnapshotStoreConfig,
+) -> Result<()> {
+    let (buckets, _) = config
+        .rapid_settings()
+        .context("Express logs are not configured")?;
+    ensure!(
+        buckets
+            .iter()
+            .any(|placement| placement.bucket == request.bucket()),
+        "unknown Express log bucket"
+    );
+    let segment = request
+        .segment()
+        .strip_prefix(&crate::bucket::append_log::log_prefix(actor)?)
+        .context("Express log segment belongs to another actor")?;
+    ensure!(
+        segment.ends_with(".segment") && !segment.contains('/'),
+        "invalid Express log segment"
+    );
+    Ok(())
 }
 
 /// Signs and fences Express log chunks. Only the control plane holds Express credentials;
@@ -523,5 +561,5 @@ fn signed(request: &PresignedRequest) -> Signed {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/unit/bucket/rapid/express.rs"]
+#[path = "../../../tests/unit/bucket/s3/express.rs"]
 mod tests;

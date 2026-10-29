@@ -94,9 +94,9 @@ async fn prewarmed_assignment_uses_ready_host_without_creating_a_pod() -> Result
 }
 
 fn request() -> Result<EnsureHostRequest> {
-    let manifest = crate::bundle::ActorBundle {
+    let manifest = crate::bucket::gcs::GcsBundle {
         bucket: "code-bucket".into(),
-        files: vec![crate::bundle::BundleFile {
+        files: vec![crate::bucket::gcs::bundle::GcsBundleFile {
             path: "actors.mjs".into(),
             object: "code/actors.mjs".into(),
             generation: 1,
@@ -145,7 +145,8 @@ fn python_assignment_uses_its_manifest_entrypoint() -> Result<()> {
     let mut request = request()?;
     request.resources.cpu_millis = 500;
     request.resources.memory_mib = 512;
-    let mut manifest = crate::bundle::ActorBundle::decode(request.code_snapshot.as_ref().unwrap())?;
+    let mut manifest =
+        crate::bucket::gcs::GcsBundle::decode(request.code_snapshot.as_ref().unwrap())?;
     manifest.files[0].path = "actors.pyz".into();
     request.code_snapshot = Some(manifest.encode()?);
     request.actor_entrypoint = Some("actors.pyz".into());

@@ -31,24 +31,6 @@ fn large_base64_text_roundtrips_and_clones() -> Result<()> {
 }
 
 #[tokio::test]
-async fn uploads_have_bounded_chunks_and_replay_the_requested_offset() -> Result<()> {
-    use google_cloud_storage::streaming_source::{Seek, StreamingSource};
-    let bytes = bytes::Bytes::from(vec![17; 1024 * 1024 + 7]);
-    let mut upload = crate::payload::Upload::new(bytes.clone());
-    let mut received = Vec::new();
-    while let Some(chunk) = upload.next().await {
-        let chunk = chunk?;
-        assert!(chunk.len() <= 256 * 1024);
-        received.extend_from_slice(&chunk);
-    }
-    assert_eq!(received.as_slice(), bytes.as_ref());
-    upload.seek(1024 * 1024).await?;
-    assert_eq!(upload.next().await.unwrap()?.as_ref(), &[17; 7]);
-    assert!(upload.next().await.is_none());
-    Ok(())
-}
-
-#[tokio::test]
 async fn downloads_bound_pending_bytes_and_preserve_the_final_partial_batch() -> Result<()> {
     use crate::payload::{Download, IO_BUFFER_BYTES};
     use bytes::Bytes;

@@ -81,7 +81,7 @@ async fn relative_state_directories_are_absolute_in_host_configuration() -> Resu
             )
             .await?,
     )?;
-    let BucketLocation::File {
+    let crate::bucket::access::BucketLocation::File {
         directory: configured,
     } = config.bucket
     else {

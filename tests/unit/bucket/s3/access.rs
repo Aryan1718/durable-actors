@@ -225,6 +225,68 @@ async fn issuance_uses_fixed_role_scoped_policy_and_redacts_credentials() -> Res
     Ok(())
 }
 
+#[tokio::test]
+async fn s3_bootstrap_with_code_issues_exact_artifact_access() -> Result<()> {
+    struct Sts;
+    #[async_trait]
+    impl AssumeRole for Sts {
+        async fn assume_role(&self, _: AssumeRoleRequest) -> Result<TemporaryCredentials> {
+            Ok(TemporaryCredentials {
+                access_key_id: "key".into(),
+                secret_access_key: "secret".into(),
+                session_token: "token".into(),
+                expires_at_ms: 2_000_000,
+            })
+        }
+    }
+    struct NoExpress;
+    #[async_trait]
+    impl ExpressLogs for NoExpress {
+        async fn handle(&self, _: ExpressLogRequest) -> Result<ExpressLogReply> {
+            anyhow::bail!("unused")
+        }
+    }
+    let access = crate::bucket::access::RuntimeAccess::new(
+        Box::new(S3Access::new(
+            "state".into(),
+            "us-west-2".into(),
+            "code".into(),
+            Arc::new(AwsCredentialIssuer::new(
+                "arn:aws:iam::123456789012:role/actor".into(),
+                Arc::new(Sts),
+                Arc::new(FixedClock),
+            )?),
+            Arc::new(NoExpress),
+        )),
+        SnapshotStoreConfig::Local,
+    );
+    let key = "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs";
+    let code = crate::bucket::s3::S3Bundle {
+        bucket: "code".into(),
+        region: "us-west-2".into(),
+        files: vec![crate::bucket::s3::bundle::S3BundleFile {
+            path: "actors.mjs".into(),
+            object: key.into(),
+            etag: "etag".into(),
+            sha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
+        }],
+    }
+    .encode()?;
+
+    let config: crate::bucket::access::HostStorageConfig = serde_json::from_str(
+        &access
+            .bootstrap("us-west-2", &actor("one"), Some(&code))
+            .await?,
+    )?;
+
+    let Some(StorageAccess::S3(aws)) = config.access else {
+        anyhow::bail!("AWS credentials");
+    };
+    assert_eq!(aws.artifacts.len(), 1);
+    assert_eq!(aws.artifacts[0].keys, [key]);
+    Ok(())
+}
+
 fn explicitly_allows(
     policy: &SessionPolicy,
     action: &str,

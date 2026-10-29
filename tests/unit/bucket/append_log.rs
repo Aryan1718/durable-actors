@@ -14,7 +14,7 @@ use std::{
     },
 };
 
-#[path = "rapid/batch.rs"]
+#[path = "append_log/batch.rs"]
 mod batch;
 
 #[tokio::test]
@@ -234,7 +234,7 @@ async fn manifests_must_name_distinct_configured_zones() -> Result<()> {
         let store = f.store()?;
         store.start(&f.stream).await?;
         store.put(&f.stream.object(1), state(1, 1)?).await?;
-        let prefix = crate::bucket::rapid::object_name(&f.stream.prefix)?;
+        let prefix = crate::bucket::append_log::object_name(&f.stream.prefix)?;
         let key = f
             .archive
             .list(&prefix)
@@ -332,7 +332,7 @@ async fn failed_manifest_publication_never_acknowledges_an_undiscoverable_log() 
         }
     }
     let f = Fixture::new()?;
-    let store = RapidSnapshots::new(
+    let store = AppendLogSnapshots::new(
         Arc::new(UnavailableArchive),
         Arc::new(BucketSnapshots(f.archive.clone())),
         f.zones
@@ -519,38 +519,6 @@ fn large_snapshots() -> Result<BTreeMap<u64, Bytes>> {
         .collect()
 }
 
-#[test]
-fn lifecycle_rules_must_exclude_unarchived_logs() -> Result<()> {
-    use google_cloud_storage::model::bucket::{
-        Lifecycle,
-        lifecycle::{
-            Rule,
-            rule::{Action, Condition},
-        },
-    };
-    let bucket = |prefixes: Vec<&str>| {
-        google_cloud_storage::model::Bucket::new().set_lifecycle(
-            Lifecycle::new().set_rule([Rule::new()
-                .set_action(Action::new().set_type("Delete"))
-                .set_condition(
-                    Condition::new()
-                        .set_age_days(7)
-                        .set_matches_prefix(prefixes),
-                )]),
-        )
-    };
-    super::gcs::validate_retention(&bucket(vec![
-        "durable-actors-v3-snapshots-",
-        "durable-actors-v3-uploads-",
-    ]))?;
-    assert!(super::gcs::validate_retention(&bucket(vec![])).is_err());
-    assert!(super::gcs::validate_retention(&bucket(vec!["durable-actors-v3-"])).is_err());
-    assert!(
-        super::gcs::validate_retention(&bucket(vec!["durable-actors-v3-logs-tenant"])).is_err()
-    );
-    Ok(())
-}
-
 #[tokio::test]
 async fn large_records_and_subsequent_small_writes_stay_on_rapid() -> Result<()> {
     let f = Fixture::new()?;
@@ -631,7 +599,7 @@ async fn failed_coverage_publication_never_deletes_a_durable_rapid_copy() -> Res
         }
     }
     let f = Fixture::new()?;
-    let store = RapidSnapshots::new(
+    let store = AppendLogSnapshots::new(
         Arc::new(RejectCoverage(f.archive.clone())),
         Arc::new(BucketSnapshots(f.archive.clone())),
         f.zones
@@ -824,7 +792,7 @@ async fn manifests_cannot_redirect_a_reader_to_another_actors_log() -> Result<()
     let other = f.store()?;
     other.start(&other_stream).await?;
     other.put(&object, state(1, 1)?).await?;
-    let manifests = |stream: &StateStream| crate::bucket::rapid::object_name(&stream.prefix);
+    let manifests = |stream: &StateStream| crate::bucket::append_log::object_name(&stream.prefix);
     let left = f.archive.list(&manifests(&f.stream)?).await?.pop().unwrap();
     let right = f
         .archive
@@ -887,8 +855,8 @@ impl Fixture {
             },
         })
     }
-    fn store(&self) -> Result<RapidSnapshots> {
-        RapidSnapshots::new(
+    fn store(&self) -> Result<AppendLogSnapshots> {
+        AppendLogSnapshots::new(
             self.archive.clone(),
             Arc::new(BucketSnapshots(self.archive.clone())),
             self.zones
@@ -948,7 +916,10 @@ impl LogZone for MemoryZone {
         &self.name
     }
     fn validate_identity(&self, replica: &Replica) -> Result<()> {
-        ensure!(replica.gcs_generation()? > 0, "invalid test generation");
+        ensure!(
+            matches!(replica.identity, ReplicaIdentity::Gcs { generation } if generation > 0),
+            "invalid test generation"
+        );
         Ok(())
     }
     async fn open(&self, object: &str) -> Result<(Replica, Box<dyn LogWriter>)> {

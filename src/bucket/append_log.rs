@@ -10,9 +10,7 @@ use tokio_util::sync::CancellationToken;
 
 mod archive;
 mod checkpoint;
-mod express;
 mod frame;
-mod gcs;
 mod index;
 mod prepared;
 mod reader;
@@ -20,7 +18,6 @@ mod segment;
 mod standard;
 mod writer;
 
-pub(crate) use express::{ExpressLogReply, ExpressLogRequest, ExpressLogs, S3ExpressLogs};
 use frame::Record;
 use prepared::Prepared;
 use segment::Segment;
@@ -28,39 +25,31 @@ use tokio_util::task::AbortOnDropHandle;
 use writer::Session;
 
 const ROTATION_INTERVAL: Duration = Duration::from_secs(60);
-pub(crate) const RAPID_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const LOG_OPERATION_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct Replica {
-    bucket: String,
-    object: String,
+pub(crate) struct Replica {
+    pub bucket: String,
+    pub object: String,
     #[serde(flatten)]
-    identity: ReplicaIdentity,
+    pub identity: ReplicaIdentity,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
-enum ReplicaIdentity {
+pub(crate) enum ReplicaIdentity {
     Gcs { generation: i64 },
     Express {},
 }
 
-impl Replica {
-    fn gcs_generation(&self) -> Result<i64> {
-        match self.identity {
-            ReplicaIdentity::Gcs { generation } => Ok(generation),
-            ReplicaIdentity::Express {} => anyhow::bail!("GCS log replica required"),
-        }
-    }
-}
-
 #[async_trait]
-trait LogWriter: Send {
+pub(crate) trait LogWriter: Send {
     async fn append_and_flush(&mut self, bytes: Bytes) -> Result<u64>;
 }
 
+/// One zone's log storage, implemented by each provider's zonal bucket class.
 #[async_trait]
-trait LogZone: Send + Sync {
+pub(crate) trait LogZone: Send + Sync {
     fn bucket(&self) -> &str;
     fn validate_identity(&self, replica: &Replica) -> Result<()>;
     async fn open(&self, object: &str) -> Result<(Replica, Box<dyn LogWriter>)>;
@@ -78,7 +67,7 @@ fn validate_replica(zone: &dyn LogZone, replica: &Replica, object: &str) -> Resu
         .context("invalid log replica descriptor")
 }
 
-pub(crate) struct RapidSnapshots {
+pub(crate) struct AppendLogSnapshots {
     storage: Arc<LogStorage>,
     session: Arc<Mutex<Option<Session>>>,
     stop: CancellationToken,
@@ -106,7 +95,39 @@ struct Manifest {
     replicas: Vec<Replica>,
 }
 
-impl RapidSnapshots {
+impl AppendLogSnapshots {
+    pub(crate) fn with_zones(
+        config: &super::SnapshotStoreConfig,
+        archive: Arc<dyn Bucket>,
+        zone: impl Fn(&super::RapidBucket) -> Arc<dyn LogZone>,
+        stop: CancellationToken,
+        actor: Option<&crate::actor::ActorKey>,
+    ) -> Result<Self> {
+        config.validate()?;
+        let super::SnapshotStoreConfig::Rapid {
+            buckets,
+            archive_batch,
+            placement,
+            ..
+        } = config
+        else {
+            anyhow::bail!("append-log persistence configuration required");
+        };
+        let store = Self::new(
+            archive.clone(),
+            Arc::new(standard::StandardSnapshots::new(archive)),
+            buckets.iter().map(zone).collect(),
+            *placement,
+            *archive_batch,
+            Arc::new(crate::litestream::compaction::RustCompactor),
+            stop,
+        )?;
+        if let Some(actor) = actor {
+            store.prepare(actor)?;
+        }
+        Ok(store)
+    }
+
     fn start_cleanup(&self, prefix: String) {
         let storage = self.storage.clone();
         let stop = self.stop.clone();
@@ -178,7 +199,7 @@ impl RapidSnapshots {
 }
 
 #[async_trait]
-impl SnapshotStore for RapidSnapshots {
+impl SnapshotStore for AppendLogSnapshots {
     async fn get(&self, object: &str) -> Result<Option<Bytes>> {
         if let Some(bytes) = self
             .session
@@ -312,7 +333,7 @@ impl Manifest {
     fn key(&self) -> Result<String> {
         Ok(format!(
             "{}log~{}.manifest",
-            super::rapid::object_name(&self.stream.prefix)?,
+            object_name(&self.stream.prefix)?,
             self.id
         ))
     }
@@ -376,20 +397,20 @@ impl LogStorage {
 }
 
 async fn bounded<T>(operation: impl std::future::Future<Output = Result<T>>) -> Result<T> {
-    tokio::time::timeout(RAPID_OPERATION_TIMEOUT, operation)
+    tokio::time::timeout(LOG_OPERATION_TIMEOUT, operation)
         .await
         .context("log operation timed out")?
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/bucket/rapid.rs"]
+#[path = "../../tests/unit/bucket/append_log.rs"]
 mod tests;
 
 pub(crate) fn log_prefix(actor: &crate::actor::ActorKey) -> Result<String> {
     Ok(object_name(&crate::storage_paths::snapshots(actor)?)?.replacen("snapshots-", "logs-", 1))
 }
 
-pub(super) fn object_name(logical: &str) -> Result<String> {
+pub(crate) fn object_name(logical: &str) -> Result<String> {
     use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
     let root = format!("{}snapshots/", crate::storage_paths::ROOT);
     let relative = logical

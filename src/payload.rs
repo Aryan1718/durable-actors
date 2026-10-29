@@ -141,41 +141,6 @@ impl<'de> Deserialize<'de> for Text {
     }
 }
 
-pub(crate) struct Upload {
-    bytes: Bytes,
-    offset: usize,
-}
-impl Upload {
-    pub fn new(bytes: Bytes) -> Self {
-        Self { bytes, offset: 0 }
-    }
-}
-impl google_cloud_storage::streaming_source::StreamingSource for Upload {
-    type Error = io::Error;
-    async fn next(&mut self) -> Option<io::Result<Bytes>> {
-        if self.offset == self.bytes.len() {
-            return None;
-        }
-        let end = self.bytes.len().min(self.offset + IO_BUFFER_BYTES);
-        let bytes = self.bytes.slice(self.offset..end);
-        self.offset = end;
-        Some(Ok(bytes))
-    }
-    async fn size_hint(&self) -> io::Result<google_cloud_storage::streaming_source::SizeHint> {
-        Ok(google_cloud_storage::streaming_source::SizeHint::with_exact(self.bytes.len() as u64))
-    }
-}
-impl google_cloud_storage::streaming_source::Seek for Upload {
-    type Error = io::Error;
-    async fn seek(&mut self, offset: u64) -> io::Result<()> {
-        self.offset = usize::try_from(offset).map_err(io::Error::other)?;
-        if self.offset > self.bytes.len() {
-            return Err(io::Error::other("upload seek exceeds object"));
-        }
-        Ok(())
-    }
-}
-
 pub(crate) struct Download {
     spool: Spool,
     buffer: Vec<u8>,

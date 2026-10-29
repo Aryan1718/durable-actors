@@ -4,7 +4,7 @@ use anyhow::{Context, Result, ensure};
 use tracing::{info, warn};
 
 use crate::{
-    bucket::{Bucket, GcsBucket, RuntimeStorageReader, aws_access::AwsStorage},
+    bucket::{Bucket, GcsBucket, RuntimeStorageReader, s3::AwsStorage},
     postgres::PostgresDatabase,
     redis_client::{Redis, RedisConfig},
     request_traces::{
@@ -244,26 +244,10 @@ async fn control_plane_routes(
         )?
         .with_persistence(config.storage.persistence, snapshots)?,
     );
-    let mut runtime_access = crate::bucket::access::RuntimeAccess::new(
-        match &config.storage.provider {
-            StorageProviderConfig::Gcs => crate::bucket::access::BucketLocation::Gcs {
-                artifact_bucket: config.storage.artifact_bucket.clone(),
-                bucket: config.storage.bucket.clone(),
-            },
-            StorageProviderConfig::S3 { region, .. } => crate::bucket::access::BucketLocation::S3 {
-                artifact_bucket: config.storage.artifact_bucket.clone(),
-                bucket: config.storage.bucket.clone(),
-                region: region.clone(),
-            },
-        },
+    let runtime_access = Arc::new(crate::bucket::access::RuntimeAccess::new(
+        provider.access(&config.storage.bucket, &config.storage.artifact_bucket)?,
         storage.persistence.clone(),
-    )?;
-    if let StorageProvider::S3(aws) = provider {
-        runtime_access = runtime_access
-            .with_aws_issuer(aws.issuer)
-            .with_express(Arc::new(crate::bucket::S3ExpressLogs::new(aws.client)));
-    }
-    let runtime_access = Arc::new(runtime_access);
+    ));
     let placements = storage.clone();
     let connections = crate::sandbox::connections::HostConnections::new()?;
     let socket_bus = match &redis {
@@ -368,6 +352,20 @@ impl StorageProvider {
             Self::S3(aws) => aws.bucket.clone(),
         }
     }
+
+    fn access(
+        &self,
+        bucket: &str,
+        artifact_bucket: &str,
+    ) -> Result<Box<dyn crate::bucket::access::AccessIssuer>> {
+        Ok(match self {
+            Self::Gcs(_) => Box::new(crate::bucket::gcs::GcsAccess::from_environment(
+                bucket.into(),
+                artifact_bucket.into(),
+            )?),
+            Self::S3(aws) => Box::new(aws.access(artifact_bucket)),
+        })
+    }
 }
 
 async fn snapshot_store(
@@ -382,18 +380,18 @@ async fn snapshot_store(
     };
     match provider {
         StorageProvider::Gcs(gcs) => {
-            crate::bucket::RapidSnapshots::validate_gcs(persistence, gcs.clients()).await?;
-            Ok(Arc::new(crate::bucket::RapidSnapshots::gcs(
+            crate::bucket::gcs::rapid::validate(persistence, gcs.clients()).await?;
+            Ok(Arc::new(crate::bucket::gcs::rapid::snapshots(
                 persistence,
                 gcs.clients(),
                 stop,
                 None,
             )?))
         }
-        StorageProvider::S3(aws) => Ok(Arc::new(crate::bucket::RapidSnapshots::express(
+        StorageProvider::S3(aws) => Ok(Arc::new(crate::bucket::s3::express::snapshots(
             persistence,
             Arc::new(crate::bucket::S3Bucket::new(archive, aws.client.clone())?),
-            Arc::new(crate::bucket::S3ExpressLogs::new(aws.client.clone())),
+            Arc::new(crate::bucket::s3::S3ExpressLogs::new(aws.client.clone())),
             stop,
             None,
         )?)),
@@ -650,16 +648,12 @@ fn storage_provider_config(
         .as_deref()
         .unwrap_or("gcs")
     {
-        "gcs" => Ok(StorageProviderConfig::Gcs),
+        "gcs" => {
+            crate::bucket::gcs::rapid::validate_zones(persistence)?;
+            Ok(StorageProviderConfig::Gcs)
+        }
         "s3" => {
-            ensure!(
-                persistence
-                    .rapid_settings()
-                    .is_none_or(|(buckets, _)| buckets
-                        .iter()
-                        .all(|placement| placement.bucket.ends_with("--x-s3"))),
-                "Rapid persistence on S3 requires S3 Express directory buckets"
-            );
+            crate::bucket::s3::express::validate_zones(persistence)?;
             let region = required(get, "DURABLE_ACTORS_AWS_REGION")?;
             ensure!(
                 !region.is_empty() && region.trim() == region,

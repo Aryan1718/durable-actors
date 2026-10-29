@@ -16,9 +16,9 @@ impl SandboxProvider for UnusedSandboxProvider {
 
 pub(crate) fn code_artifact(generation: i64) -> String {
     use base64::Engine;
-    crate::bundle::ActorBundle {
+    crate::bucket::gcs::GcsBundle {
         bucket: "test-artifacts".into(),
-        files: vec![crate::bundle::BundleFile {
+        files: vec![crate::bucket::gcs::bundle::GcsBundleFile {
             path: "actors.mjs".into(),
             object: "durable-actors/v3/artifacts/00000000-0000-4000-8000-000000000001/actors.mjs"
                 .into(),

@@ -17,7 +17,7 @@ impl LogStorage {
 
     pub async fn records(&self, prefix: &str, fence: bool) -> Result<BTreeMap<String, Bytes>> {
         let started = std::time::Instant::now();
-        let physical = super::super::rapid::object_name(prefix)?;
+        let physical = super::object_name(prefix)?;
         let keys: Vec<_> = self
             .archive
             .list(&physical)

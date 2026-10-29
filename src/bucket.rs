@@ -1,13 +1,9 @@
 pub(crate) mod access;
-pub(crate) mod aws_access;
-mod file;
-mod gcs;
-mod rapid;
-mod s3;
-pub(crate) use rapid::{
-    ExpressLogReply, ExpressLogRequest, ExpressLogs, RAPID_OPERATION_TIMEOUT, RapidSnapshots,
-    S3ExpressLogs,
-};
+mod append_log;
+pub(crate) mod file;
+pub(crate) mod gcs;
+pub(crate) mod s3;
+pub(crate) use append_log::LOG_OPERATION_TIMEOUT;
 pub(crate) mod recovery;
 mod snapshots;
 pub use snapshots::{ArchiveBatchConfig, RapidBucket, RapidPlacement, SnapshotStoreConfig};

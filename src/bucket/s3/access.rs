@@ -6,16 +6,28 @@ use aws_sdk_sts::config::{retry::RetryConfig, timeout::TimeoutConfig};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::{actor::ActorKey, clock::Clock};
+use super::{ExpressLogReply, ExpressLogRequest, ExpressLogs, S3Bucket, S3ExpressLogs};
+use crate::{
+    actor::ActorKey,
+    bucket::{
+        SnapshotStoreConfig,
+        access::{AccessIssuer, BucketLocation, StorageAccess},
+    },
+    bundle::ArtifactBundle,
+    clock::Clock,
+};
 
 const POLICY_LIMIT: usize = 2_048;
 const ISSUANCE_TIMEOUT: Duration = Duration::from_secs(10);
 const SESSION_SECONDS: i32 = 900;
 
+/// The control plane's AWS storage: its own bucket client and the issuer of actor credentials.
 pub(crate) struct AwsStorage {
-    pub bucket: Arc<super::S3Bucket>,
+    pub bucket: Arc<S3Bucket>,
     pub client: aws_sdk_s3::Client,
-    pub issuer: Arc<AwsCredentialIssuer>,
+    name: String,
+    region: String,
+    issuer: Arc<AwsCredentialIssuer>,
 }
 
 impl AwsStorage {
@@ -26,14 +38,158 @@ impl AwsStorage {
             .await;
         let client = aws_sdk_s3::Client::new(&sdk);
         Ok(Self {
-            bucket: Arc::new(super::S3Bucket::new(bucket, client.clone())?),
+            bucket: Arc::new(S3Bucket::new(bucket, client.clone())?),
             client,
+            name: bucket.into(),
+            region: region.into(),
             issuer: Arc::new(AwsCredentialIssuer::new(
                 role_arn.to_owned(),
                 Arc::new(SdkAssumeRole::new(aws_sdk_sts::Client::new(&sdk))),
                 Arc::new(crate::clock::SystemClock),
             )?),
         })
+    }
+
+    pub(crate) fn access(&self, artifact_bucket: &str) -> S3Access {
+        S3Access::new(
+            self.name.clone(),
+            self.region.clone(),
+            artifact_bucket.into(),
+            self.issuer.clone(),
+            Arc::new(S3ExpressLogs::new(self.client.clone())),
+        )
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AwsStorageCredentials {
+    pub ownership: TemporaryCredentials,
+    pub state: TemporaryCredentials,
+    pub artifacts: Vec<AwsArtifactCredentials>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AwsArtifactCredentials {
+    pub keys: Vec<String>,
+    pub credentials: TemporaryCredentials,
+}
+
+impl AwsStorageCredentials {
+    pub(crate) fn expires_at_ms(&self) -> u64 {
+        self.artifacts.iter().fold(
+            self.ownership.expires_at_ms.min(self.state.expires_at_ms),
+            |expires, artifact| expires.min(artifact.credentials.expires_at_ms),
+        )
+    }
+}
+
+pub(crate) struct S3Access {
+    bucket: String,
+    region: String,
+    artifact_bucket: String,
+    issuer: Arc<AwsCredentialIssuer>,
+    express: Arc<dyn ExpressLogs>,
+}
+
+impl S3Access {
+    pub(crate) fn new(
+        bucket: String,
+        region: String,
+        artifact_bucket: String,
+        issuer: Arc<AwsCredentialIssuer>,
+        express: Arc<dyn ExpressLogs>,
+    ) -> Self {
+        Self {
+            bucket,
+            region,
+            artifact_bucket,
+            issuer,
+            express,
+        }
+    }
+}
+
+#[async_trait]
+impl AccessIssuer for S3Access {
+    fn location(&self) -> BucketLocation {
+        BucketLocation::S3 {
+            bucket: self.bucket.clone(),
+            region: self.region.clone(),
+            artifact_bucket: self.artifact_bucket.clone(),
+        }
+    }
+
+    fn validate_code(&self, code: &ArtifactBundle) -> Result<()> {
+        let ArtifactBundle::S3(code) = code else {
+            anyhow::bail!("code artifact provider does not match storage provider");
+        };
+        ensure!(
+            code.bucket == self.artifact_bucket && code.region == self.region,
+            "code artifact belongs to another storage location"
+        );
+        Ok(())
+    }
+
+    async fn issue(
+        &self,
+        actor: &ActorKey,
+        persistence: &SnapshotStoreConfig,
+        code: Option<ArtifactBundle>,
+    ) -> Result<Option<StorageAccess>> {
+        let ownership = ownership_policy(&self.bucket, actor)?;
+        let snapshots = crate::storage_paths::snapshots(actor)?;
+        let state = match persistence.rapid_settings() {
+            Some((_, archive)) => state_policy(
+                archive,
+                &crate::bucket::append_log::object_name(&snapshots)?,
+            )?,
+            None => state_policy(&self.bucket, &snapshots)?,
+        };
+        let artifact_batches = match code {
+            Some(ArtifactBundle::S3(bundle)) => {
+                ensure!(
+                    bundle.bucket == self.artifact_bucket,
+                    "code artifact belongs to another bucket"
+                );
+                artifact_policies(
+                    &self.artifact_bucket,
+                    &bundle
+                        .files
+                        .into_iter()
+                        .map(|file| file.object)
+                        .collect::<Vec<_>>(),
+                )?
+            }
+            Some(ArtifactBundle::Gcs(_)) => anyhow::bail!("S3 storage requires S3 code artifacts"),
+            None => Vec::new(),
+        };
+        let (ownership, state) =
+            tokio::try_join!(self.issuer.issue(&ownership), self.issuer.issue(&state))?;
+        let mut artifacts = Vec::with_capacity(artifact_batches.len());
+        for batch in artifact_batches {
+            artifacts.push(AwsArtifactCredentials {
+                keys: batch.keys,
+                credentials: self.issuer.issue(&batch.policy).await?,
+            });
+        }
+        Ok(Some(StorageAccess::S3(AwsStorageCredentials {
+            ownership,
+            state,
+            artifacts,
+        })))
+    }
+
+    /// Signs or fences Express log chunks for a host, only within its own actor's log segments.
+    async fn express_log(
+        &self,
+        actor: &ActorKey,
+        persistence: &SnapshotStoreConfig,
+        request: ExpressLogRequest,
+    ) -> Result<ExpressLogReply> {
+        super::express::authorize(&request, actor, persistence)?;
+        self.express.handle(request).await
     }
 }
 
@@ -174,17 +330,17 @@ impl SessionPolicy {
     }
 }
 
-pub(crate) struct ArtifactPolicyBatch {
+struct ArtifactPolicyBatch {
     pub keys: Vec<String>,
     pub policy: SessionPolicy,
 }
 
-pub(crate) fn ownership_policy(bucket: &str, actor: &ActorKey) -> Result<SessionPolicy> {
+fn ownership_policy(bucket: &str, actor: &ActorKey) -> Result<SessionPolicy> {
     let resource = object_arn(bucket, &crate::storage_paths::owner(&actor.storage_key())?)?;
     object_policy(&["s3:GetObject", "s3:PutObject"], &[resource])
 }
 
-pub(crate) fn state_policy(bucket: &str, prefix: &str) -> Result<SessionPolicy> {
+fn state_policy(bucket: &str, prefix: &str) -> Result<SessionPolicy> {
     let object = format!("{}*", object_arn(bucket, prefix)?);
     let bucket = bucket_arn(bucket)?;
     let actions = ["s3:GetObject", "s3:PutObject", "s3:AbortMultipartUpload"];
@@ -205,7 +361,7 @@ pub(crate) fn state_policy(bucket: &str, prefix: &str) -> Result<SessionPolicy> 
     serialize_policy(statements)
 }
 
-pub(crate) fn artifact_policies(bucket: &str, keys: &[String]) -> Result<Vec<ArtifactPolicyBatch>> {
+fn artifact_policies(bucket: &str, keys: &[String]) -> Result<Vec<ArtifactPolicyBatch>> {
     bucket_arn(bucket)?;
     let mut batches = Vec::new();
     let mut current = Vec::new();
@@ -321,5 +477,5 @@ fn validate_role(role: &str) -> Result<()> {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/bucket/aws_access.rs"]
+#[path = "../../../tests/unit/bucket/s3/access.rs"]
 mod tests;

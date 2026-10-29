@@ -122,7 +122,7 @@ impl S3Bundle {
                 .chunks(crate::payload::IO_BUFFER_BYTES)
                 .map(|chunk| Ok(Bytes::copy_from_slice(chunk))),
         );
-        super::install_verified_file(root, &file.path, &file.sha256, chunks).await
+        crate::bundle::install_verified_file(root, &file.path, &file.sha256, chunks).await
     }
 
     fn publish(&self, root: &Path, staged: &Path) -> Result<()> {
@@ -153,7 +153,7 @@ impl S3Bundle {
 
 impl S3BundleFile {
     fn validate(&self, prefix: &str) -> Result<()> {
-        super::validate_path(&self.path)?;
+        crate::bundle::validate_path(&self.path)?;
         ensure!(
             !self.path.contains(['\\', ':'])
                 && self
@@ -278,5 +278,5 @@ impl Drop for PublishedFiles {
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/bundle/s3.rs"]
+#[path = "../../../tests/unit/bucket/s3/bundle.rs"]
 mod tests;

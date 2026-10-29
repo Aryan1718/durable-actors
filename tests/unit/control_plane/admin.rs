@@ -70,10 +70,10 @@ fn secret_changes_update_host_configuration() {
 
 #[test]
 fn launch_spec_accepts_s3_artifact_references() -> Result<()> {
-    let bundle = crate::bundle::s3::S3Bundle {
+    let bundle = crate::bucket::s3::S3Bundle {
         bucket: "code-bucket".into(),
         region: "us-west-2".into(),
-        files: vec![crate::bundle::s3::S3BundleFile {
+        files: vec![crate::bucket::s3::bundle::S3BundleFile {
             path: "actors.mjs".into(),
             object: "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs"
                 .into(),

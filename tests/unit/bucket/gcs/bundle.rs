@@ -40,7 +40,7 @@ async fn bundle_downloads_are_bounded_until_their_bodies_finish() -> Result<()> 
         .await?;
     let _server =
         AbortOnDropHandle::new(tokio::spawn(async { axum::serve(listener, routes).await }));
-    let bundle = ActorBundle {
+    let bundle = GcsBundle {
         bucket: "code-bucket".into(),
         files: std::iter::once(artifact("actors.mjs", b"code"))
             .chain((1..12).map(|index| artifact(&format!("python/{index}.py"), b"code")))
@@ -75,8 +75,8 @@ async fn bundle_downloads_are_bounded_until_their_bodies_finish() -> Result<()> 
     Ok(())
 }
 
-fn artifact(path: &str, bytes: &[u8]) -> BundleFile {
-    BundleFile {
+fn artifact(path: &str, bytes: &[u8]) -> GcsBundleFile {
+    GcsBundleFile {
         path: path.into(),
         object: "compiled/actors.mjs".into(),
         generation: 123,
@@ -163,19 +163,19 @@ async fn artifact_paths_cannot_escape_the_sandbox_code_directory() -> Result<()>
 }
 
 fn checksum(bytes: &[u8]) -> String {
-    URL_SAFE_NO_PAD.encode(aws_lc_rs::digest::digest(&SHA256, bytes).as_ref())
+    URL_SAFE_NO_PAD.encode(aws_lc_rs::digest::digest(&aws_lc_rs::digest::SHA256, bytes).as_ref())
 }
 
 #[test]
 fn python_code_manifests_include_the_entrypoint_and_installed_dependencies() -> Result<()> {
-    let manifest = ActorBundle {
+    let manifest = GcsBundle {
         bucket: "code-bucket".into(),
         files: vec![
             artifact("actors.pyz", b"code"),
             artifact("python/dependency/module.so", b"native"),
         ],
     };
-    let decoded = ActorBundle::decode(&manifest.encode()?)?;
+    let decoded = GcsBundle::decode(&manifest.encode()?)?;
     assert_eq!(decoded.entrypoint()?, "actors.pyz");
     assert_eq!(decoded.files.len(), 2);
     Ok(())

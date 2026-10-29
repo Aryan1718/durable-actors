@@ -1,3 +1,12 @@
+pub(crate) mod access;
+pub(crate) mod bundle;
+pub(crate) mod express;
+pub(crate) mod host;
+
+pub(crate) use access::{AwsStorage, AwsStorageCredentials};
+pub(crate) use bundle::S3Bundle;
+pub(crate) use express::{ExpressLogReply, ExpressLogRequest, ExpressLogs, S3ExpressLogs};
+
 use super::{Bucket, BucketObject, StorageRevision};
 use anyhow::{Context, Result, ensure};
 use async_trait::async_trait;

@@ -1,3 +1,8 @@
+mod access;
+pub(crate) mod bundle;
+pub(crate) mod host;
+pub(crate) mod rapid;
+
 use std::{
     sync::{Arc, OnceLock},
     time::Duration,
@@ -5,10 +10,14 @@ use std::{
 
 use anyhow::Result;
 use async_trait::async_trait;
+use bytes::Bytes;
 use google_cloud_auth::credentials::{
     CacheableResource, Credentials, CredentialsProvider, EntityTag,
 };
 use google_cloud_storage::client::{Storage, StorageControl};
+
+pub(crate) use access::{GcsAccess, StorageTokens};
+pub(crate) use bundle::GcsBundle;
 
 use super::{Bucket, BucketObject, StorageRevision};
 
@@ -22,7 +31,7 @@ pub(crate) struct WarmGcs {
     credentials: PendingCredentials,
 }
 
-/// A spare's clients for the two halves of [`super::access::StorageTokens`].
+/// A spare's clients for the two halves of [`StorageTokens`].
 pub(crate) struct WarmStorage {
     pub ownership: WarmGcs,
     pub state: WarmGcs,
@@ -193,7 +202,7 @@ impl Bucket for GcsBucket {
         bytes: bytes::Bytes,
     ) -> Result<bool> {
         let _transfer = self.clients.transfer(bytes.len() as u64).await?;
-        let source = crate::payload::Upload::new(bytes);
+        let source = Upload::new(bytes);
         match self
             .clients
             .storage
@@ -249,6 +258,44 @@ fn bucket_name(bucket: &str) -> Result<String> {
         "invalid storage bucket"
     );
     Ok(format!("projects/_/buckets/{bucket}"))
+}
+
+struct Upload {
+    bytes: Bytes,
+    offset: usize,
+}
+impl Upload {
+    fn new(bytes: Bytes) -> Self {
+        Self { bytes, offset: 0 }
+    }
+}
+impl google_cloud_storage::streaming_source::StreamingSource for Upload {
+    type Error = std::io::Error;
+    async fn next(&mut self) -> Option<std::io::Result<Bytes>> {
+        if self.offset == self.bytes.len() {
+            return None;
+        }
+        let end = self
+            .bytes
+            .len()
+            .min(self.offset + crate::payload::IO_BUFFER_BYTES);
+        let bytes = self.bytes.slice(self.offset..end);
+        self.offset = end;
+        Some(Ok(bytes))
+    }
+    async fn size_hint(&self) -> std::io::Result<google_cloud_storage::streaming_source::SizeHint> {
+        Ok(google_cloud_storage::streaming_source::SizeHint::with_exact(self.bytes.len() as u64))
+    }
+}
+impl google_cloud_storage::streaming_source::Seek for Upload {
+    type Error = std::io::Error;
+    async fn seek(&mut self, offset: u64) -> std::io::Result<()> {
+        self.offset = usize::try_from(offset).map_err(std::io::Error::other)?;
+        if self.offset > self.bytes.len() {
+            return Err(std::io::Error::other("upload seek exceeds object"));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Clone, Default)]

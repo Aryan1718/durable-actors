@@ -12,7 +12,7 @@ use tracing::{error, info};
 
 use crate::{
     actor::{ActorExecutorConnection, ActorExecutorListener},
-    bucket::RAPID_OPERATION_TIMEOUT,
+    bucket::LOG_OPERATION_TIMEOUT,
     bundle::ActorRuntime,
     clock::SystemClock,
     control_plane::{ActorJwtVerifier, ActorTokenPurpose, ControlPlaneClient},
@@ -30,7 +30,7 @@ const HOST_ACTOR_DRAIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long the executor waits for its host to attach. Falling back from Rapid can
 /// spend two operation timeouts before Standard starts: the failed open, then
 /// deleting the replicas that did open.
-const EXECUTOR_STARTUP_TIMEOUT: Duration = RAPID_OPERATION_TIMEOUT.saturating_mul(3);
+const EXECUTOR_STARTUP_TIMEOUT: Duration = LOG_OPERATION_TIMEOUT.saturating_mul(3);
 
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]

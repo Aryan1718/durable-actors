@@ -1,5 +1,13 @@
 use super::*;
-use crate::bucket::access::{BucketLocation, HostStorageConfig, RuntimeAccess};
+use crate::bucket::{
+    access::{BucketLocation, HostStorageConfig, RuntimeAccess, StorageAccess},
+    s3::{
+        ExpressLogReply, ExpressLogRequest, ExpressLogs,
+        access::{
+            AssumeRole, AssumeRoleRequest, AwsCredentialIssuer, S3Access, TemporaryCredentials,
+        },
+    },
+};
 
 #[tokio::test]
 async fn s3_image_hosts_bootstrap_and_refresh_without_gcs_artifact_access() -> Result<()> {
@@ -11,17 +19,16 @@ async fn s3_image_hosts_bootstrap_and_refresh_without_gcs_artifact_access() -> R
         ActorTokenPurpose::ControlPlane,
         Duration::from_secs(60),
     )?;
-    let access = Arc::new(
-        RuntimeAccess::new(
-            BucketLocation::S3 {
-                bucket: "state".into(),
-                region: "us-west-2".into(),
-                artifact_bucket: "unused".into(),
-            },
-            crate::bucket::SnapshotStoreConfig::Local,
-        )?
-        .with_aws_issuer(test_aws_issuer()?),
-    );
+    let access = Arc::new(RuntimeAccess::new(
+        Box::new(S3Access::new(
+            "state".into(),
+            "us-west-2".into(),
+            "unused".into(),
+            test_aws_issuer()?,
+            Arc::new(NoExpress),
+        )),
+        crate::bucket::SnapshotStoreConfig::Local,
+    ));
     let provisioner = SandboxHostProvisioner::new(
         Arc::new(ImageHost),
         HostSandboxRuntimeConfig {
@@ -78,8 +85,7 @@ async fn s3_image_hosts_bootstrap_and_refresh_without_gcs_artifact_access() -> R
         else {
             anyhow::bail!("expected storage access reply")
         };
-        assert!(access.tokens.is_none());
-        assert!(access.aws.is_some());
+        assert!(matches!(access, Some(StorageAccess::S3(_))));
         let refreshed = auth.authenticate_authorization(&format!("Bearer {replacement_token}"))?;
         assert_eq!(refreshed.actor, principal.actor);
         assert_eq!(refreshed.host_id, principal.host_id);
@@ -110,8 +116,7 @@ impl SandboxProvider for ImageHost {
                 .context("storage config")?,
         )?;
         assert!(matches!(config.bucket, BucketLocation::S3 { bucket, .. } if bucket == "state"));
-        assert!(config.tokens.is_none());
-        assert!(config.aws.is_some());
+        assert!(matches!(config.access, Some(StorageAccess::S3(_))));
         let route = "https://image-host.example.com".to_owned();
         Ok(crate::sandbox::ActorHostHandle {
             lease: Some(HostLease {
@@ -134,15 +139,12 @@ impl SandboxProvider for ImageHost {
     }
 }
 
-fn test_aws_issuer() -> Result<Arc<crate::bucket::aws_access::AwsCredentialIssuer>> {
+fn test_aws_issuer() -> Result<Arc<AwsCredentialIssuer>> {
     struct Sts;
     #[async_trait]
-    impl crate::bucket::aws_access::AssumeRole for Sts {
-        async fn assume_role(
-            &self,
-            _: crate::bucket::aws_access::AssumeRoleRequest,
-        ) -> Result<crate::bucket::aws_access::TemporaryCredentials> {
-            Ok(crate::bucket::aws_access::TemporaryCredentials {
+    impl AssumeRole for Sts {
+        async fn assume_role(&self, _: AssumeRoleRequest) -> Result<TemporaryCredentials> {
+            Ok(TemporaryCredentials {
                 access_key_id: "key".into(),
                 secret_access_key: "secret".into(),
                 session_token: "token".into(),
@@ -150,11 +152,18 @@ fn test_aws_issuer() -> Result<Arc<crate::bucket::aws_access::AwsCredentialIssue
             })
         }
     }
-    Ok(Arc::new(
-        crate::bucket::aws_access::AwsCredentialIssuer::new(
-            "arn:aws:iam::123456789012:role/actor".into(),
-            Arc::new(Sts),
-            Arc::new(crate::clock::SystemClock),
-        )?,
-    ))
+    Ok(Arc::new(AwsCredentialIssuer::new(
+        "arn:aws:iam::123456789012:role/actor".into(),
+        Arc::new(Sts),
+        Arc::new(crate::clock::SystemClock),
+    )?))
+}
+
+struct NoExpress;
+
+#[async_trait]
+impl ExpressLogs for NoExpress {
+    async fn handle(&self, _: ExpressLogRequest) -> Result<ExpressLogReply> {
+        anyhow::bail!("unused")
+    }
 }

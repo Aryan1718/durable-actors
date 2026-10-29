@@ -86,3 +86,33 @@ impl google_cloud_storage::stub::AppendableObjectWriter for UploadStub {
         self.persisted
     }
 }
+
+#[test]
+fn lifecycle_rules_must_exclude_unarchived_logs() -> Result<()> {
+    use google_cloud_storage::model::bucket::{
+        Lifecycle,
+        lifecycle::{
+            Rule,
+            rule::{Action, Condition},
+        },
+    };
+    let bucket = |prefixes: Vec<&str>| {
+        google_cloud_storage::model::Bucket::new().set_lifecycle(
+            Lifecycle::new().set_rule([Rule::new()
+                .set_action(Action::new().set_type("Delete"))
+                .set_condition(
+                    Condition::new()
+                        .set_age_days(7)
+                        .set_matches_prefix(prefixes),
+                )]),
+        )
+    };
+    validate_retention(&bucket(vec![
+        "durable-actors-v3-snapshots-",
+        "durable-actors-v3-uploads-",
+    ]))?;
+    assert!(validate_retention(&bucket(vec![])).is_err());
+    assert!(validate_retention(&bucket(vec!["durable-actors-v3-"])).is_err());
+    assert!(validate_retention(&bucket(vec!["durable-actors-v3-logs-tenant"])).is_err());
+    Ok(())
+}

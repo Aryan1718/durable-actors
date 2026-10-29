@@ -16,10 +16,10 @@ fn actor() -> crate::actor::ActorKey {
 #[test]
 fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
     let actor = actor();
-    let local = super::super::SnapshotStoreConfig::Local;
-    let mut code = crate::bundle::ActorBundle {
+    let local = SnapshotStoreConfig::Local;
+    let mut code = crate::bucket::gcs::GcsBundle {
         bucket: "code".into(),
-        files: vec![crate::bundle::BundleFile {
+        files: vec![crate::bucket::gcs::bundle::GcsBundleFile {
             path: "actors.mjs".into(),
             object: "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs"
                 .into(),
@@ -52,7 +52,7 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
     );
     for index in 0..1000 {
         let path = format!("modules/{index}.mjs");
-        code.files.push(crate::bundle::BundleFile {
+        code.files.push(crate::bucket::gcs::bundle::GcsBundleFile {
             object: format!(
                 "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/{path}"
             ),
@@ -89,82 +89,16 @@ fn credentials_are_scoped_to_one_actor_and_its_deployed_code() -> Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn s3_bootstrap_with_code_issues_exact_artifact_access() -> Result<()> {
-    let access = RuntimeAccess {
-        location: BucketLocation::S3 {
-            bucket: "state".into(),
-            region: "us-west-2".into(),
-            artifact_bucket: "code".into(),
-        },
-        token_source: None,
-        persistence: super::super::SnapshotStoreConfig::Local,
-        aws_issuer: Some(test_aws_issuer()?),
-        express: None,
-    };
-    let key = "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs";
-    let code = crate::bundle::s3::S3Bundle {
-        bucket: "code".into(),
-        region: "us-west-2".into(),
-        files: vec![crate::bundle::s3::S3BundleFile {
-            path: "actors.mjs".into(),
-            object: key.into(),
-            etag: "etag".into(),
-            sha256: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".into(),
-        }],
-    }
-    .encode()?;
-
-    let config: HostStorageConfig =
-        serde_json::from_str(&access.bootstrap("us-west-2", &actor(), Some(&code)).await?)?;
-
-    assert!(config.tokens.is_none());
-    let aws = config.aws.context("AWS credentials")?;
-    assert_eq!(aws.artifacts.len(), 1);
-    assert_eq!(aws.artifacts[0].keys, [key]);
-    Ok(())
-}
-
-fn test_aws_issuer() -> Result<Arc<super::super::aws_access::AwsCredentialIssuer>> {
-    struct Sts;
-    #[async_trait]
-    impl super::super::aws_access::AssumeRole for Sts {
-        async fn assume_role(
-            &self,
-            _: super::super::aws_access::AssumeRoleRequest,
-        ) -> Result<super::super::aws_access::TemporaryCredentials> {
-            Ok(super::super::aws_access::TemporaryCredentials {
-                access_key_id: "key".into(),
-                secret_access_key: "secret".into(),
-                session_token: "token".into(),
-                expires_at_ms: 2_000_000,
-            })
-        }
-    }
-    struct FixedClock;
-    impl Clock for FixedClock {
-        fn now_ms(&self) -> Result<u64> {
-            Ok(1_000_000)
-        }
-    }
-    Ok(Arc::new(
-        super::super::aws_access::AwsCredentialIssuer::new(
-            "arn:aws:iam::123456789012:role/actor".into(),
-            Arc::new(Sts),
-            Arc::new(FixedClock),
-        )?,
-    ))
-}
-
 #[test]
 fn log_credentials_cover_only_this_actors_logs_and_archive() -> Result<()> {
     let actor = actor();
-    let config: super::super::SnapshotStoreConfig = serde_json::from_value(
+    let config: SnapshotStoreConfig = serde_json::from_value(
         serde_json::json!({"type":"rapid","archive_bucket":"archive-test","buckets":[
             {"bucket":"rapid-test-a","zone":"us-west4-a"},{"bucket":"rapid-test-b","zone":"us-west4-b"}
         ]}),
     )?;
-    let archive = super::super::rapid::object_name(&crate::storage_paths::snapshots(&actor)?)?;
+    let archive =
+        crate::bucket::append_log::object_name(&crate::storage_paths::snapshots(&actor)?)?;
     let logs = archive.replacen("snapshots-", "logs-", 1);
     assert_eq!(
         scopes("authority", &config, None, &actor, None)?.state,
@@ -205,26 +139,22 @@ async fn every_request_mints_its_own_token() -> Result<()> {
             })
         }
     }
-    let access = RuntimeAccess {
-        location: BucketLocation::Gcs {
-            bucket: "authority".into(),
-            artifact_bucket: "code".into(),
-        },
-        token_source: Some(Box::new(Numbered(Default::default()))),
-        persistence: super::super::SnapshotStoreConfig::Local,
-        aws_issuer: None,
-        express: None,
+    let access = GcsAccess {
+        bucket: "authority".into(),
+        artifact_bucket: "code".into(),
+        tokens: Box::new(Numbered(Default::default())),
     };
-    let first = access
-        .issue(&actor(), None)
-        .await?
-        .tokens
-        .context("token")?;
-    let second = access
-        .issue(&actor(), None)
-        .await?
-        .tokens
-        .context("token")?;
+    let issue = || async {
+        match access
+            .issue(&actor(), &SnapshotStoreConfig::Local, None)
+            .await?
+        {
+            Some(StorageAccess::Gcs(tokens)) => Ok(tokens),
+            _ => anyhow::bail!("GCS tokens"),
+        }
+    };
+    let first = issue().await?;
+    let second = issue().await?;
     assert_ne!(first.ownership.access_token, first.state.access_token);
     assert_ne!(first.ownership.access_token, second.ownership.access_token);
     Ok(())
@@ -265,7 +195,7 @@ async fn concurrent_launches_share_one_intermediary_exchange() -> Result<()> {
     ));
     let rules = scopes(
         "authority",
-        &super::super::SnapshotStoreConfig::Local,
+        &SnapshotStoreConfig::Local,
         None,
         &actor(),
         None,
@@ -304,9 +234,9 @@ async fn each_token_fits_the_boundary_limit_at_the_longest_identifiers() -> Resu
         actor_id: "i".repeat(128),
     };
     let bucket = |name: &str| format!("{name}{}", "x".repeat(63 - name.len()));
-    let code = crate::bundle::ActorBundle {
+    let code = crate::bucket::gcs::GcsBundle {
         bucket: bucket("code"),
-        files: vec![crate::bundle::BundleFile {
+        files: vec![crate::bucket::gcs::bundle::GcsBundleFile {
             path: "actors.mjs".into(),
             object: "durable-actors/v3/artifacts/12345678-1234-4234-8234-123456789012/actors.mjs"
                 .into(),
@@ -318,7 +248,7 @@ async fn each_token_fits_the_boundary_limit_at_the_longest_identifiers() -> Resu
         "archive_bucket": bucket("archive"), "buckets":[
         {"bucket": bucket("rapid-a"), "zone":"us-west4-a"},
         {"bucket": bucket("rapid-b"), "zone":"us-west4-b"}]}))?;
-    for persistence in [super::super::SnapshotStoreConfig::Local, rapid] {
+    for persistence in [SnapshotStoreConfig::Local, rapid] {
         let scopes = scopes(
             &bucket("authority"),
             &persistence,
