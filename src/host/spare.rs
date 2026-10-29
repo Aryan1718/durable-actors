@@ -15,7 +15,7 @@ pub(super) struct WarmHost {
     pub listener: TcpListener,
     pub executor: WarmExecutor,
     pub javascript: tokio::process::Child,
-    pub storage: WarmStorage,
+    pub storage: Option<WarmStorage>,
     pub control_plane: Option<WarmControlPlane>,
     pub replication: Arc<dyn Replicator>,
 }
@@ -49,17 +49,15 @@ pub async fn serve_spare(shutdown: impl Future<Output = ()> + Send + 'static) ->
     let listener = TcpListener::bind(bind).await?;
     let ipc = ActorExecutorListener::bind(&socket).await?;
     let configured_runtime = std::env::var("DURABLE_ACTORS_EXECUTOR_RUNTIME").ok();
+    let storage_provider =
+        std::env::var("DURABLE_ACTORS_STORAGE_PROVIDER").unwrap_or_else(|_| "gcs".into());
     let runtime = executor_runtime(None, configured_runtime.as_deref())?;
     let mut javascript = spawn_executor_process(true, &socket, runtime)?;
     let (warmed, control_plane) = tokio::join!(
         async {
             tokio::try_join!(
                 async { tokio::time::timeout(Duration::from_secs(30), ipc.accept_warm()).await? },
-                async {
-                    let storage = WarmStorage::new().await?;
-                    storage.preconnect().await;
-                    anyhow::Ok(storage)
-                },
+                crate::bucket::warm_storage(&storage_provider),
             )
         },
         prewarm_control_plane(std::env::var("DURABLE_ACTORS_CONTROL_PLANE_URL").ok()),
@@ -73,7 +71,7 @@ pub async fn serve_spare(shutdown: impl Future<Output = ()> + Send + 'static) ->
         result = &mut server => anyhow::bail!("spare assignment server stopped: {result:?}"),
         status = javascript.wait() => anyhow::bail!("generic actor executor exited: {}", status?),
         () = &mut shutdown => return Ok(()),
-        () = storage.keep_warm() => unreachable!("storage warmup stopped"),
+        () = keep_warm(storage.as_ref()) => unreachable!("storage warmup stopped"),
     };
     tokio::fs::remove_file(&ready).await?;
     let timings = HostStartupTimings::start();
@@ -101,6 +99,13 @@ pub async fn serve_spare(shutdown: impl Future<Output = ()> + Send + 'static) ->
     drop(stop_guard);
     let _ = tokio::time::timeout(Duration::from_secs(2), server).await;
     result
+}
+
+async fn keep_warm(storage: Option<&WarmStorage>) {
+    match storage {
+        Some(storage) => storage.keep_warm().await,
+        None => std::future::pending().await,
+    }
 }
 
 async fn prewarm_control_plane(url: Option<String>) -> Result<WarmControlPlane> {

@@ -60,12 +60,13 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "warm": {"type": "integer", "minimum": 0, "maximum": 256},
         "cpuMillis": {"type": "integer", "minimum": 1},
         "cpuLimitMillis": {"type": ["integer", "null"], "minimum": 1},
         "memoryMiB": {"type": "integer", "minimum": 1},
         "memoryLimitMiB": {"type": ["integer", "null"], "minimum": 1}
       },
-      "required": ["cpuMillis", "memoryMiB"]
+      "required": ["warm", "cpuMillis", "memoryMiB"]
     },
     "alarms": {
       "type": "object",

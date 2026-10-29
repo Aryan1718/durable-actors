@@ -61,6 +61,15 @@ pub enum StorageProviderConfig {
     S3 { region: String, role_arn: String },
 }
 
+impl StorageProviderConfig {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Gcs => "gcs",
+            Self::S3 { .. } => "s3",
+        }
+    }
+}
+
 #[derive(Default)]
 pub enum AnalyticsBackend {
     #[default]
@@ -598,18 +607,18 @@ impl ControlPlaneProcessConfig {
             bucket,
             provider,
         };
-        let sandbox_provider =
-            sandbox_provider_config(&mut get, &jwt_issuer, &invocation_audience)?;
+        let sandbox_provider = sandbox_provider_config(
+            &mut get,
+            &jwt_issuer,
+            &invocation_audience,
+            storage.provider.name(),
+        )?;
         let region = region.or_else(|| sandbox_provider.pool.regions.first().cloned());
         ensure!(
             region
                 .as_ref()
                 .is_some_and(|region| sandbox_provider.pool.regions.contains(region)),
             "default region has no configured sandbox placement"
-        );
-        ensure!(
-            storage.provider == StorageProviderConfig::Gcs || sandbox_provider.pool.idle == 0,
-            "S3 storage does not support spares; set DURABLE_ACTORS_SPARE_IDLE=0"
         );
         let socket_event_sink = socket_event_sink_config(&mut get)?;
         let alarm_poll_interval = alarm_poll_interval(&mut get)?;
@@ -820,6 +829,7 @@ fn sandbox_provider_config(
     get: &mut impl FnMut(&str) -> Option<String>,
     jwt_issuer: &str,
     invocation_audience: &str,
+    storage_provider: &str,
 ) -> Result<SandboxProviderConfig> {
     let public_origin = validated_http_url(
         &required(get, "DURABLE_ACTORS_PUBLIC_URL")?,
@@ -845,7 +855,7 @@ fn sandbox_provider_config(
         idle <= fleet_maximum,
         "DURABLE_ACTORS_SPARE_IDLE must not exceed DURABLE_ACTORS_SPARE_FLEET_MAX"
     );
-    let (backend, regions) = sandbox_backend(get, &control_plane_url)?;
+    let (backend, regions) = sandbox_backend(get, &control_plane_url, storage_provider)?;
     Ok(SandboxProviderConfig {
         runtime_images: RuntimeImages {
             typescript: runtime_image(get, "DURABLE_ACTORS_TYPESCRIPT_IMAGE")?,
@@ -915,6 +925,7 @@ fn sandbox_provider_config(
 fn sandbox_backend(
     get: &mut impl FnMut(&str) -> Option<String>,
     control_plane_url: &str,
+    storage_provider: &str,
 ) -> Result<(SandboxBackend, Vec<String>)> {
     match get("DURABLE_ACTORS_SANDBOX_PROVIDER")
         .as_deref()
@@ -936,6 +947,7 @@ fn sandbox_backend(
                         1024,
                     )? as usize,
                     runtime_class: runtime_class(get)?,
+                    storage_provider: storage_provider.into(),
                 }),
                 regions,
             ))
@@ -977,6 +989,7 @@ fn sandbox_backend(
                     app_name,
                     regions,
                     timeout: Duration::from_secs(seconds.into()),
+                    storage_provider: storage_provider.into(),
                 }),
                 canonical,
             ))

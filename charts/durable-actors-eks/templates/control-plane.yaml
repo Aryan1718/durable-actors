@@ -96,8 +96,7 @@ spec:
             - {name: DURABLE_ACTORS_RAPID_BUCKETS, value: {{ . | toJson | quote }}}
             - {name: DURABLE_ACTORS_RAPID_PLACEMENT, value: {{ $.Values.storage.express.placement | quote }}}
             {{- end }}
-            # S3 hosts cannot use spares; the pool manager only reaps finished pods.
-            - {name: DURABLE_ACTORS_SPARE_IDLE, value: "0"}
+            - {name: DURABLE_ACTORS_SPARE_IDLE, value: {{ $.Values.actors.warm | quote }}}
             - {name: DURABLE_ACTORS_HOST_CPU_MILLIS, value: {{ $.Values.actors.cpuMillis | quote }}}
             {{- with $.Values.actors.cpuLimitMillis }}
             - {name: DURABLE_ACTORS_HOST_CPU_LIMIT_MILLIS, value: {{ . | quote }}}

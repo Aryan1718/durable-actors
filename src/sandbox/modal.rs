@@ -26,6 +26,8 @@ pub(crate) struct ModalConfig {
     pub app_name: String,
     pub regions: BTreeMap<String, String>,
     pub timeout: Duration,
+    /// The storage provider whose connections spares open before assignment.
+    pub storage_provider: String,
 }
 
 pub(crate) async fn provider(
@@ -204,6 +206,10 @@ fn spare_params(
                 control_plane.clone(),
             ),
             ("DURABLE_ACTORS_SPARE_READY_FILE".into(), READY_FILE.into()),
+            (
+                "DURABLE_ACTORS_STORAGE_PROVIDER".into(),
+                config.storage_provider.clone(),
+            ),
             ("TOKIO_WORKER_THREADS".into(), "2".into()),
         ]),
         cpu: Some(f64::from(request.resources.cpu_millis) / 1000.0),

@@ -44,4 +44,4 @@ storage:
 
 The controller role also needs `s3express:CreateSession` on these buckets. Actor hosts never receive Express credentials: they write through short-lived URLs, each signed by the controller for one log object.
 
-Spare pools are not yet supported with S3, so every actor starts cold. Image, ingress, Redis and `credentialsSecret` settings match the [GKE chart](../durable-actors/README.md).
+Spares (`actors.warm`), image, ingress, Redis and `credentialsSecret` settings match the [GKE chart](../durable-actors/README.md). S3 spares open their storage connections at assignment.

@@ -85,6 +85,20 @@ pub(crate) async fn replace(
     }
 }
 
+/// Opens the storage connections a spare keeps ready for its future actor. Only GCS keeps any;
+/// other providers connect at assignment.
+pub(crate) async fn warm_storage(provider: &str) -> Result<Option<WarmStorage>> {
+    match provider {
+        "gcs" => {
+            let storage = WarmStorage::new().await?;
+            storage.preconnect().await;
+            Ok(Some(storage))
+        }
+        "s3" => Ok(None),
+        _ => anyhow::bail!("unsupported storage provider {provider:?}"),
+    }
+}
+
 /// Whether a cloud client reads host credentials from this environment variable; actor code must
 /// not inherit it.
 pub(crate) fn is_credential_variable(name: &str) -> bool {

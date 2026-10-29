@@ -67,6 +67,7 @@ fn config() -> ModalConfig {
         app_name: "durable-actors-test".into(),
         regions: BTreeMap::from([("north-america-west".into(), "us-west".into())]),
         timeout: Duration::from_secs(600),
+        storage_provider: "s3".into(),
     }
 }
 
@@ -97,6 +98,7 @@ fn modal_spare_preserves_resource_requests_and_limits() -> Result<()> {
     );
     assert_eq!(params.command, ["/usr/local/bin/durable-actors"]);
     assert_eq!(params.env["DURABLE_ACTORS_SPARE_TOKEN"], "assignment-token");
+    assert_eq!(params.env["DURABLE_ACTORS_STORAGE_PROVIDER"], "s3");
     assert_eq!(
         params.env["DURABLE_ACTORS_CONTROL_PLANE_URL"],
         "https://control.example.com"

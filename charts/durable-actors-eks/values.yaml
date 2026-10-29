@@ -19,6 +19,8 @@ ingress:
   annotations: {}
 replicaCount: 1
 actors:
+  # Ready spares per region; zero starts every actor on demand.
+  warm: 0
   cpuMillis: 250
   # Unset leaves actor CPU uncapped.
   cpuLimitMillis: null

@@ -15,9 +15,16 @@ fn customer_pod_enforces_isolation_and_allows_node_scale_down() -> Result<()> {
             memory_limit_mib: Some(4096),
         },
     };
+    let config = KubernetesConfig {
+        namespace: "sandboxes".into(),
+        zones: BTreeMap::new(),
+        reap_concurrency: 4,
+        runtime_class: "gvisor".into(),
+        storage_provider: "s3".into(),
+    };
     let pod = spare_pod(
         &request,
-        "gvisor",
+        &config,
         &[
             "us-west4-a".into(),
             "us-west4-b".into(),
@@ -79,6 +86,17 @@ fn customer_pod_enforces_isolation_and_allows_node_scale_down() -> Result<()> {
             .unwrap()
             .allow_privilege_escalation,
         Some(false)
+    );
+    assert!(
+        spec.containers[0]
+            .env
+            .as_ref()
+            .unwrap()
+            .iter()
+            .any(|variable| {
+                variable.name == "DURABLE_ACTORS_STORAGE_PROVIDER"
+                    && variable.value.as_deref() == Some("s3")
+            })
     );
     Ok(())
 }
@@ -307,6 +325,7 @@ async fn fake_cluster(
             zones: BTreeMap::from([("north-america-west".into(), vec!["us-west4-a".into()])]),
             reap_concurrency: 4,
             runtime_class: "gvisor".into(),
+            storage_provider: "gcs".into(),
         },
     );
     Ok((cluster, server))

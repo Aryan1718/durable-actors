@@ -34,6 +34,8 @@ pub(crate) struct KubernetesConfig {
     pub zones: BTreeMap<String, Vec<String>>,
     pub reap_concurrency: usize,
     pub runtime_class: String,
+    /// The storage provider whose connections spares open before assignment.
+    pub storage_provider: String,
 }
 
 pub(crate) async fn provider(
@@ -132,7 +134,7 @@ impl SandboxCluster for Kubernetes {
         );
         let pod = spare_pod(
             request,
-            &self.config.runtime_class,
+            &self.config,
             self.zones(&request.canonical_region)?,
             &token,
         )?;
@@ -249,14 +251,14 @@ async fn observe(pods: Api<Pod>, writer: Writer<Pod>, changed: watch::Sender<()>
 
 fn spare_pod(
     request: &CreateSpareRequest,
-    runtime_class: &str,
+    config: &KubernetesConfig,
     zones: &[String],
     token: &str,
 ) -> Result<Pod> {
     let mut pod = base_pod(
         &request.name,
         &request.image_ref,
-        runtime_class,
+        &config.runtime_class,
         zones,
         &request.resources,
     );
@@ -265,6 +267,7 @@ fn spare_pod(
     pod["spec"]["containers"][0]["env"] = json!([
         {"name":"DURABLE_ACTORS_PROCESS_ROLE", "value":"spare"},
         {"name":"DURABLE_ACTORS_SPARE_TOKEN", "value":token},
+        {"name":"DURABLE_ACTORS_STORAGE_PROVIDER", "value":config.storage_provider},
         {"name":"DURABLE_ACTORS_CONTROL_PLANE_URL", "value":request.control_plane_url.as_ref().context("spare control plane URL required")?}
     ]);
     pod["spec"]["containers"][0]["readinessProbe"] = json!({"exec":{"command":["/usr/bin/test", "-f", "/tmp/durable-actors-spare-ready"]}, "periodSeconds":1, "failureThreshold":3});

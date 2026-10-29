@@ -262,7 +262,7 @@ async fn prepare_actor_host(
         Some(warm) => (
             Some(warm.listener),
             Some((warm.executor, warm.javascript)),
-            Some(warm.storage),
+            warm.storage,
             warm.control_plane,
         ),
         None => (None, None, None, None),
