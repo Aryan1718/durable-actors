@@ -231,41 +231,14 @@ async fn control_plane_routes(
             ),
         ));
     }
-    let aws = match &config.storage.provider {
-        StorageProviderConfig::Gcs => None,
-        StorageProviderConfig::S3 { region, role_arn } => {
-            Some(AwsStorage::connect(&config.storage.bucket, region, role_arn).await?)
-        }
-    };
-    let (authority, gcs): (Arc<dyn Bucket>, Option<Arc<GcsBucket>>) = match &aws {
-        Some(aws) => (aws.bucket.clone(), None),
-        None => {
-            let bucket = Arc::new(GcsBucket::new(&config.storage.bucket).await?);
-            (bucket.clone(), Some(bucket))
-        }
-    };
+    let provider = StorageProvider::connect(&config.storage).await?;
     let registry = Arc::new(super::PostgresAdminRegistry::from_database(
         database.clone(),
     ));
-    let express = aws
-        .as_ref()
-        .filter(|_| config.storage.persistence.rapid_settings().is_some())
-        .map(|aws| {
-            let logs: Arc<dyn crate::bucket::ExpressLogs> =
-                Arc::new(crate::bucket::S3ExpressLogs::new(aws.client.clone()));
-            (aws.client.clone(), logs)
-        });
-    let snapshots = snapshot_store(
-        authority.clone(),
-        gcs.as_deref(),
-        express.clone(),
-        &config.storage.persistence,
-        stop.clone(),
-    )
-    .await?;
+    let snapshots = snapshot_store(&provider, &config.storage.persistence, stop.clone()).await?;
     let storage = Arc::new(
         RuntimeStorageReader::new(
-            authority,
+            provider.authority(),
             Arc::new(crate::clock::SystemClock),
             Arc::new(crate::litestream::EmbeddedRestore),
         )?
@@ -285,11 +258,10 @@ async fn control_plane_routes(
         },
         storage.persistence.clone(),
     )?;
-    if let Some(aws) = aws {
-        runtime_access = runtime_access.with_aws_issuer(aws.issuer);
-    }
-    if let Some((_, logs)) = express {
-        runtime_access = runtime_access.with_express(logs);
+    if let StorageProvider::S3(aws) = provider {
+        runtime_access = runtime_access
+            .with_aws_issuer(aws.issuer)
+            .with_express(Arc::new(crate::bucket::S3ExpressLogs::new(aws.client)));
     }
     let runtime_access = Arc::new(runtime_access);
     let placements = storage.clone();
@@ -373,33 +345,59 @@ async fn control_plane_routes(
     Ok(tonic::service::Routes::from(public_api).add_service(internal_api))
 }
 
+enum StorageProvider {
+    Gcs(Arc<GcsBucket>),
+    S3(AwsStorage),
+}
+
+impl StorageProvider {
+    async fn connect(storage: &ControlPlaneStorageConfig) -> Result<Self> {
+        Ok(match &storage.provider {
+            StorageProviderConfig::Gcs => {
+                Self::Gcs(Arc::new(GcsBucket::new(&storage.bucket).await?))
+            }
+            StorageProviderConfig::S3 { region, role_arn } => {
+                Self::S3(AwsStorage::connect(&storage.bucket, region, role_arn).await?)
+            }
+        })
+    }
+
+    fn authority(&self) -> Arc<dyn Bucket> {
+        match self {
+            Self::Gcs(bucket) => bucket.clone(),
+            Self::S3(aws) => aws.bucket.clone(),
+        }
+    }
+}
+
 async fn snapshot_store(
-    authority: Arc<dyn Bucket>,
-    gcs: Option<&GcsBucket>,
-    express: Option<(aws_sdk_s3::Client, Arc<dyn crate::bucket::ExpressLogs>)>,
+    provider: &StorageProvider,
     persistence: &crate::bucket::SnapshotStoreConfig,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<Arc<dyn crate::bucket::SnapshotStore>> {
     let Some((_, archive)) = persistence.rapid_settings() else {
-        return Ok(Arc::new(crate::bucket::BucketSnapshots(authority)));
+        return Ok(Arc::new(crate::bucket::BucketSnapshots(
+            provider.authority(),
+        )));
     };
-    if let Some((client, logs)) = express {
-        return Ok(Arc::new(crate::bucket::RapidSnapshots::express(
+    match provider {
+        StorageProvider::Gcs(gcs) => {
+            crate::bucket::RapidSnapshots::validate_gcs(persistence, gcs.clients()).await?;
+            Ok(Arc::new(crate::bucket::RapidSnapshots::gcs(
+                persistence,
+                gcs.clients(),
+                stop,
+                None,
+            )?))
+        }
+        StorageProvider::S3(aws) => Ok(Arc::new(crate::bucket::RapidSnapshots::express(
             persistence,
-            Arc::new(crate::bucket::S3Bucket::new(archive, client)?),
-            logs,
+            Arc::new(crate::bucket::S3Bucket::new(archive, aws.client.clone())?),
+            Arc::new(crate::bucket::S3ExpressLogs::new(aws.client.clone())),
             stop,
             None,
-        )?));
+        )?)),
     }
-    let gcs = gcs.context("Rapid persistence requires GCS storage")?;
-    crate::bucket::RapidSnapshots::validate_gcs(persistence, gcs.clients()).await?;
-    Ok(Arc::new(crate::bucket::RapidSnapshots::gcs(
-        persistence,
-        gcs.clients(),
-        stop,
-        None,
-    )?))
 }
 
 async fn telemetry_stores(
