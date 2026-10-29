@@ -48,7 +48,7 @@ Configuration uses environment variables. Precedence is to use exported variable
 | `DURABLE_ACTORS_SPARE_RETIRE_CONCURRENCY` | `64` | Retired spares the pool manager deletes at once; 1–1024. Retiring spares count against the fleet maximum until deleted. |
 | `DURABLE_ACTORS_SPARE_REAP_INTERVAL_MS` | `30000` | How often the pool manager drops stopped spares and hosts from the registry; 500–600000 ms. Each pass inspects every registered sandbox: a Modal API call, but only a local read on GKE. |
 | `DURABLE_ACTORS_SPARE_POD_REAP_INTERVAL_MS` | `1000` | How often the pool manager deletes finished sandboxes; 100–60000 ms. On GKE each pass reads the shared pod watch and only finished pods cost an API call; Modal sandboxes end on their own. |
-| `DURABLE_ACTORS_GKE_REAP_CONCURRENCY` | `64` | Finished GKE pods the pool manager deletes at once; 1–1024. |
+| `DURABLE_ACTORS_KUBERNETES_REAP_CONCURRENCY` | `64` | Finished pods the pool manager deletes at once; 1–1024. |
 | `DURABLE_ACTORS_SPARE_TTL_SECONDS`      | `600`   | Unassigned host lifetime; 30–3600 seconds.                                                                                                                                                                                                                                                  |
 | `DURABLE_ACTORS_HOST_CPU_MILLIS`        | `250`   | Default actor CPU request in millicores; spares use it.                                                                                                                                                                                                                                     |
 | `DURABLE_ACTORS_HOST_CPU_LIMIT_MILLIS`  | Unset   | Default actor CPU limit; at least the request. Unset leaves CPU uncapped.                                                                                                                                                                                                                   |
@@ -132,9 +132,10 @@ Use the [self-hosting guide](../self-hosting.md) and [Helm chart](../../charts/d
 | `DURABLE_ACTORS_RAPID_PLACEMENT` | Rapid only: `all` (default) writes every configured zone. `nearest` needs two zones, usually in different regions: at assignment the host opens its log in both, keeps the first to open, and writes only there for the session. The chart uses `storage.rapid.placement`. |
 | `DURABLE_ACTORS_ARCHIVE_BATCH_BYTES` | Rapid archive batch target, default `16777216` bytes. |
 | `DURABLE_ACTORS_ARCHIVE_BATCH_INTERVAL_MS` | Rapid archive batch interval, default `10000` milliseconds. |
-| `DURABLE_ACTORS_GKE_NAMESPACE` | Dedicated sandbox namespace; the chart defaults to `<release-namespace>-<release-name>`. |
-| `DURABLE_ACTORS_GKE_ZONE` | Actor placement zone, for example `us-west4-a`; the runtime infers the canonical compute region. The chart sets this from `placement.zone`. |
-| `DURABLE_ACTORS_GKE_ZONES` | Advanced alternative to `GKE_ZONE`: JSON map from canonical compute region to eligible Google zones, such as `{"north-america-west":["us-west4-a","us-west4-b"]}`. A single zone string per region is also accepted. Configure only one of the two placement variables. |
+| `DURABLE_ACTORS_KUBERNETES_NAMESPACE` | Dedicated sandbox namespace; the chart defaults to `<release-namespace>-<release-name>`. |
+| `DURABLE_ACTORS_KUBERNETES_RUNTIME_CLASS` | RuntimeClass for actor pods, default `gvisor`. Its scheduling rules choose the sandbox nodes: GKE's built-in class selects GKE Sandbox nodes, and on EKS the cluster provides one. |
+| `DURABLE_ACTORS_KUBERNETES_ZONE` | Actor placement zone, for example `us-west4-a` or `us-west-2a`; the runtime infers the canonical compute region. The chart sets this from `placement.zone`. |
+| `DURABLE_ACTORS_KUBERNETES_ZONES` | Advanced alternative to `KUBERNETES_ZONE`: JSON map from canonical compute region to eligible zones, such as `{"north-america-west":["us-west4-a","us-west4-b"]}`. A single zone string per region is also accepted. Configure only one of the two placement variables. |
 | `DURABLE_ACTORS_TYPESCRIPT_IMAGE` | TypeScript actor OCI image pinned by SHA-256 digest; selected for compiled `.mjs` artifacts. |
 | `DURABLE_ACTORS_PYTHON_IMAGE` | Python actor OCI image pinned by SHA-256 digest; selected for compiled `.pyz` artifacts. |
 | `DURABLE_ACTORS_EXECUTOR_RUNTIME` | Set by actor images to `typescript` or `python`; selects the executor before a warm spare is assigned. Native hosts infer it from the compiled entrypoint. |
@@ -195,19 +196,19 @@ Estimates affect only usage publications. ClickHouse retains the actual lifecycl
 
 ## Modal data plane
 
-Set `DURABLE_ACTORS_SANDBOX_PROVIDER=modal` to run hosts on Modal. The default is `gke`.
+Set `DURABLE_ACTORS_SANDBOX_PROVIDER=modal` to run hosts on Modal. The default is `kubernetes`.
 Both providers use the same PostgreSQL spare pool, deployment API, actor runtime, and GCS storage.
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DURABLE_ACTORS_SANDBOX_PROVIDER` | `gke` | `gke` or `modal`. |
+| `DURABLE_ACTORS_SANDBOX_PROVIDER` | `kubernetes` | `kubernetes` (GKE or EKS) or `modal`. |
 | `DURABLE_ACTORS_MODAL_APP` | Required for Modal | Dedicated Modal App for this control-plane installation. |
 | `DURABLE_ACTORS_MODAL_REGIONS` | Required for Modal | JSON mapping of canonical actor regions to Modal regions, e.g. `{"north-america-west":"us-west"}`. |
 | `DURABLE_ACTORS_MODAL_TIMEOUT_SECONDS` | `3600` | Maximum sandbox lifetime, 120–86400 seconds, including time spent as a spare. |
 
 Modal reads the active `~/.modal.toml` profile or `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET`.
 Its control-plane URL must be an HTTPS origin that carries gRPC. Proxies must preserve HTTP/2
-and gRPC response trailers on `/durable_actors.v1.ActorControlPlaneService/*`. GKE zone settings
+and gRPC response trailers on `/durable_actors.v1.ActorControlPlaneService/*`. Kubernetes zone settings
 are unnecessary in Modal mode. CPU requests and limits are passed as Modal physical cores
 (`cpu_millis / 1000`); memory requests and limits retain their MiB values.
 
@@ -215,8 +216,8 @@ Sandboxes run on GCP. Use a dedicated Modal App and PostgreSQL spare registry fo
 installation; sharing a registry between providers is unsupported. Runtime images must be
 accessible without private registry credentials.
 
-Deployment `secretRefs` use the same Kubernetes secrets as GKE. The control plane reads them
-from `DURABLE_ACTORS_GKE_NAMESPACE` (default `terse-sandboxes`) at assignment and requires
+Deployment `secretRefs` use the same Kubernetes secrets as the Kubernetes data plane. The control plane reads them
+from `DURABLE_ACTORS_KUBERNETES_NAMESPACE` (default `terse-sandboxes`) at assignment and requires
 Kubernetes credentials with permission to get those secrets. Secrets must carry the
 `terse.ai/customer-secret=true` label; duplicate environment keys and non-UTF-8 values are rejected.
 Deployments without secret references do not require Kubernetes access in Modal mode.

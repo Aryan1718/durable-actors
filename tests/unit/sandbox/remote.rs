@@ -80,7 +80,7 @@ async fn prewarmed_assignment_uses_ready_host_without_creating_a_pod() -> Result
         retires: AtomicUsize::new(0),
     });
     let provider = RemoteSandboxProvider {
-        name: "gke",
+        name: "kubernetes",
         cluster: cluster.clone(),
         secrets: Arc::new(Secrets),
         assignment: Arc::new(Assign),
@@ -183,7 +183,7 @@ impl HostAssignment for ExpiredAssignment {
 #[tokio::test]
 async fn assignment_rejects_a_host_whose_lease_expired_before_its_reply() -> Result<()> {
     let provider = RemoteSandboxProvider {
-        name: "gke",
+        name: "kubernetes",
         secrets: Arc::new(Secrets),
         cluster: Arc::new(Cluster {
             creates: AtomicUsize::new(0),

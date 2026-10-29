@@ -1090,7 +1090,7 @@ impl HostProvisioner for SandboxHostProvisioner {
                 .for_entrypoint(manifest.entrypoint()?)?
                 .into();
         } else {
-            crate::sandbox::gke::validate_image(&source.image_ref)?;
+            crate::sandbox::validate_image(&source.image_ref)?;
         }
         prepared.validate()?;
         Ok((prepared, None))
@@ -1131,7 +1131,7 @@ impl HostProvisioner for SandboxHostProvisioner {
     ) -> Result<HostTermination> {
         if let Some(pool) = &self.pool {
             return Ok(HostTermination {
-                provider: "gke".into(),
+                provider: "kubernetes".into(),
                 resource_ids: pool.retire_config(&spec.host_config_key()).await?,
             });
         }

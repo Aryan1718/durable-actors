@@ -31,7 +31,7 @@ test("stores state and code in one S3 bucket with actor-scoped AWS credentials",
     assert.match(output, /DURABLE_ACTORS_AWS_REGION, value: "us-west-2"/)
     assert.match(output, /DURABLE_ACTORS_AWS_ACTOR_ROLE_ARN, value: "arn:aws:iam::123456789012:role\/durable-actors-actor"/)
     for (const name of ["BUCKET", "ARTIFACT_BUCKET"]) assert.match(output, new RegExp(`DURABLE_ACTORS_${name}, value: "test-state"`))
-    assert.match(output, /DURABLE_ACTORS_GKE_ZONE, value: "us-west-2a"/)
+    assert.match(output, /DURABLE_ACTORS_KUBERNETES_ZONE, value: "us-west-2a"/)
     assert.doesNotMatch(output, /iam\.gke\.io|DURABLE_ACTORS_RAPID|DURABLE_ACTORS_USAGE_TOPIC/)
 })
 

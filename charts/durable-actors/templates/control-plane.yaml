@@ -97,8 +97,8 @@ spec:
             - {name: DURABLE_ACTORS_PUBLIC_URL, value: {{ $.Values.publicUrl | quote }}}
             - {name: DURABLE_ACTORS_TYPESCRIPT_IMAGE, value: {{ include "actors.image" $.Values.images.typescript | quote }}}
             - {name: DURABLE_ACTORS_PYTHON_IMAGE, value: {{ include "actors.image" $.Values.images.python | quote }}}
-            - {name: DURABLE_ACTORS_GKE_NAMESPACE, value: {{ include "actors.sandboxNamespace" $ | quote }}}
-            - {name: DURABLE_ACTORS_GKE_ZONE, value: {{ $.Values.placement.zone | quote }}}
+            - {name: DURABLE_ACTORS_KUBERNETES_NAMESPACE, value: {{ include "actors.sandboxNamespace" $ | quote }}}
+            - {name: DURABLE_ACTORS_KUBERNETES_ZONE, value: {{ $.Values.placement.zone | quote }}}
             - {name: DURABLE_ACTORS_PERSISTENCE, value: {{ $.Values.storage.mode | quote }}}
             - {name: DURABLE_ACTORS_BUCKET, value: {{ $.Values.storage.bucket | quote }}}
             - {name: DURABLE_ACTORS_ARTIFACT_BUCKET, value: {{ $.Values.storage.bucket | quote }}}
@@ -113,7 +113,7 @@ spec:
             - {name: DURABLE_ACTORS_SPARE_RETIRE_CONCURRENCY, value: {{ $.Values.actors.retireConcurrency | quote }}}
             - {name: DURABLE_ACTORS_SPARE_REAP_INTERVAL_MS, value: {{ $.Values.actors.registryReapIntervalMs | quote }}}
             - {name: DURABLE_ACTORS_SPARE_POD_REAP_INTERVAL_MS, value: {{ $.Values.actors.podReapIntervalMs | quote }}}
-            - {name: DURABLE_ACTORS_GKE_REAP_CONCURRENCY, value: {{ $.Values.actors.reapConcurrency | quote }}}
+            - {name: DURABLE_ACTORS_KUBERNETES_REAP_CONCURRENCY, value: {{ $.Values.actors.reapConcurrency | quote }}}
             - {name: DURABLE_ACTORS_HOST_CPU_MILLIS, value: {{ $.Values.actors.cpuMillis | quote }}}
             {{- with $.Values.actors.cpuLimitMillis }}
             - {name: DURABLE_ACTORS_HOST_CPU_LIMIT_MILLIS, value: {{ . | quote }}}

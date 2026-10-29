@@ -8,8 +8,8 @@ use crate::host::HostId;
 
 pub(crate) mod assignment;
 pub(crate) mod connections;
-pub(crate) mod gke;
 mod kube_retry;
+pub(crate) mod kubernetes;
 mod local;
 mod local_store;
 pub(crate) mod modal;
@@ -18,6 +18,7 @@ mod remote;
 pub(crate) mod secrets;
 
 pub(crate) use local::LocalSandboxProvider;
+pub(crate) use remote::validate_image;
 
 /// Kubernetes-style resources: `cpu_millis` and `memory_mib` are requests; an unset limit
 /// leaves that resource uncapped.

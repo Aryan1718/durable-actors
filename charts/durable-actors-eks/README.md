@@ -14,7 +14,17 @@ storage:
 
 The cluster must provide:
 
-- A node group for actors running gVisor: nodes labelled and tainted `sandbox.gke.io/runtime=gvisor`, and a `gvisor` RuntimeClass whose handler runs `runsc`, scheduled onto those nodes.
+- A node group for actors running gVisor, with nodes labelled and tainted `terse.ai/sandbox-runtime=gvisor`, and a `gvisor` RuntimeClass that schedules onto them:
+
+  ```yaml
+  apiVersion: node.k8s.io/v1
+  kind: RuntimeClass
+  metadata: {name: gvisor}
+  handler: runsc
+  scheduling:
+    nodeSelector: {terse.ai/sandbox-runtime: gvisor}
+    tolerations: [{key: terse.ai/sandbox-runtime, operator: Equal, value: gvisor, effect: NoSchedule}]
+  ```
 - IMDSv2 with a hop limit of 1 on actor nodes, and NetworkPolicy enforcement (for example, the VPC CNI's `enableNetworkPolicy`).
 - An EKS Pod Identity association for the controller's service account (`<release>-durable-actors`) to a role that can read and write the bucket and assume `storage.actorRoleArn`. Don't associate a role with the sandbox namespace's `sandbox` service account.
 

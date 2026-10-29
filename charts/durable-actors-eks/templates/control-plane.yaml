@@ -35,7 +35,7 @@ spec:
           requiredDuringSchedulingIgnoredDuringExecution:
             nodeSelectorTerms:
               - matchExpressions:
-                  - key: sandbox.gke.io/runtime
+                  - key: terse.ai/sandbox-runtime
                     operator: NotIn
                     values: [gvisor]
       securityContext:
@@ -83,8 +83,8 @@ spec:
             - {name: DURABLE_ACTORS_PUBLIC_URL, value: {{ $.Values.publicUrl | quote }}}
             - {name: DURABLE_ACTORS_TYPESCRIPT_IMAGE, value: {{ include "actors.image" $.Values.images.typescript | quote }}}
             - {name: DURABLE_ACTORS_PYTHON_IMAGE, value: {{ include "actors.image" $.Values.images.python | quote }}}
-            - {name: DURABLE_ACTORS_GKE_NAMESPACE, value: {{ include "actors.sandboxNamespace" $ | quote }}}
-            - {name: DURABLE_ACTORS_GKE_ZONE, value: {{ $.Values.placement.zone | quote }}}
+            - {name: DURABLE_ACTORS_KUBERNETES_NAMESPACE, value: {{ include "actors.sandboxNamespace" $ | quote }}}
+            - {name: DURABLE_ACTORS_KUBERNETES_ZONE, value: {{ $.Values.placement.zone | quote }}}
             - {name: DURABLE_ACTORS_STORAGE_PROVIDER, value: s3}
             - {name: DURABLE_ACTORS_AWS_REGION, value: {{ $.Values.storage.region | quote }}}
             - {name: DURABLE_ACTORS_AWS_ACTOR_ROLE_ARN, value: {{ $.Values.storage.actorRoleArn | quote }}}

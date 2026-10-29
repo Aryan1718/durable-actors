@@ -1,5 +1,7 @@
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
+use anyhow::{Context, Result, ensure};
+use async_trait::async_trait;
 use futures_util::StreamExt;
 use k8s_openapi::api::core::v1::Pod;
 use kube::{
@@ -15,16 +17,32 @@ use serde_json::json;
 use tokio::sync::watch;
 use tokio_util::task::AbortOnDropHandle;
 
-use super::*;
+use super::{
+    remote::{RemoteSandboxProvider, SandboxCluster},
+    secrets::SecretResolver,
+    *,
+};
 use crate::sandbox::kube_retry::retry_throttled;
 
 const MANAGED: &str = "app.kubernetes.io/managed-by=terse";
 
+/// A cluster that runs each host in its own pod. The RuntimeClass names the sandbox (gVisor on GKE
+/// and EKS) and, through its scheduling rules, the nodes that provide it.
 #[derive(Clone, Debug)]
-pub(crate) struct GkeConfig {
+pub(crate) struct KubernetesConfig {
     pub namespace: String,
     pub zones: BTreeMap<String, Vec<String>>,
     pub reap_concurrency: usize,
+    pub runtime_class: String,
+}
+
+pub(crate) async fn provider(
+    config: KubernetesConfig,
+    secrets: Arc<dyn SecretResolver>,
+    connections: connections::HostConnections,
+) -> Result<RemoteSandboxProvider> {
+    let cluster = Kubernetes::new(kube::Client::try_default().await?, config);
+    RemoteSandboxProvider::new("kubernetes", Arc::new(cluster), secrets, connections)
 }
 
 /// Reads pod state from one shared watch so provisioning costs a single API call per pod.
@@ -32,11 +50,11 @@ pub(super) struct Kubernetes {
     pods: Api<Pod>,
     observed: Store<Pod>,
     changes: watch::Receiver<()>,
-    config: GkeConfig,
+    config: KubernetesConfig,
     _watch: AbortOnDropHandle<()>,
 }
 impl Kubernetes {
-    pub fn new(client: Client, config: GkeConfig) -> Self {
+    pub fn new(client: Client, config: KubernetesConfig) -> Self {
         let pods = Api::namespaced(client, &config.namespace);
         let (observed, writer) = reflector::store();
         let (changed, changes) = watch::channel(());
@@ -100,7 +118,7 @@ impl Kubernetes {
             .zones
             .get(region)
             .map(Vec::as_slice)
-            .with_context(|| format!("no GKE zone configured for {region}"))
+            .with_context(|| format!("no Kubernetes zone configured for {region}"))
     }
 }
 
@@ -112,7 +130,12 @@ impl SandboxCluster for Kubernetes {
             uuid::Uuid::new_v4().simple(),
             uuid::Uuid::new_v4().simple()
         );
-        let pod = spare_pod(request, self.zones(&request.canonical_region)?, &token)?;
+        let pod = spare_pod(
+            request,
+            &self.config.runtime_class,
+            self.zones(&request.canonical_region)?,
+            &token,
+        )?;
         let ready = self.start(pod).await?;
         let ip: std::net::IpAddr = ready
             .status
@@ -224,8 +247,19 @@ async fn observe(pods: Api<Pod>, writer: Writer<Pod>, changed: watch::Sender<()>
         .await;
 }
 
-fn spare_pod(request: &CreateSpareRequest, zones: &[String], token: &str) -> Result<Pod> {
-    let mut pod = base_pod(&request.name, &request.image_ref, zones, &request.resources);
+fn spare_pod(
+    request: &CreateSpareRequest,
+    runtime_class: &str,
+    zones: &[String],
+    token: &str,
+) -> Result<Pod> {
+    let mut pod = base_pod(
+        &request.name,
+        &request.image_ref,
+        runtime_class,
+        zones,
+        &request.resources,
+    );
     pod["metadata"]["annotations"] =
         json!({"cluster-autoscaler.kubernetes.io/safe-to-evict": "true"});
     pod["spec"]["containers"][0]["env"] = json!([
@@ -240,15 +274,15 @@ fn spare_pod(request: &CreateSpareRequest, zones: &[String], token: &str) -> Res
 fn base_pod(
     name: &str,
     image: &str,
+    runtime_class: &str,
     zones: &[String],
     resources: &ResourceLimits,
 ) -> serde_json::Value {
     json!({
         "apiVersion":"v1", "kind":"Pod", "metadata":{"name":name, "labels":{"app.kubernetes.io/managed-by":"terse", "terse.ai/purpose":"actor"}},
         "spec":{
-            "runtimeClassName":"gvisor", "automountServiceAccountToken":false, "serviceAccountName":"sandbox",
+            "runtimeClassName":runtime_class, "automountServiceAccountToken":false, "serviceAccountName":"sandbox",
             "restartPolicy":"Never", "terminationGracePeriodSeconds":45,
-            "nodeSelector":{"sandbox.gke.io/runtime":"gvisor"},
             "affinity":{"nodeAffinity":{"requiredDuringSchedulingIgnoredDuringExecution":{"nodeSelectorTerms":[{"matchExpressions":[{"key":"topology.kubernetes.io/zone","operator":"In","values":zones}]}]}}},
             "topologySpreadConstraints":[{"maxSkew":1,"topologyKey":"topology.kubernetes.io/zone","whenUnsatisfiable":"ScheduleAnyway","labelSelector":{"matchLabels":{"terse.ai/purpose":"actor"}}}],
             "securityContext":{"runAsNonRoot":true, "runAsUser":10000, "runAsGroup":10000, "fsGroup":10000},
@@ -348,5 +382,5 @@ impl Drop for PodCleanup {
 }
 
 #[cfg(test)]
-#[path = "../../../tests/unit/sandbox/kubernetes.rs"]
+#[path = "../../tests/unit/sandbox/kubernetes.rs"]
 mod tests;

@@ -70,7 +70,7 @@ export class Staging {
 
     async prepareInfrastructure() {
         console.log("Preparing the staging actor namespace, image registry, and gVisor node pool…")
-        const namespace = this.env.DURABLE_ACTORS_GKE_NAMESPACE
+        const namespace = this.env.DURABLE_ACTORS_KUBERNETES_NAMESPACE
         await this.apply([
             { apiVersion: "v1", kind: "Namespace", metadata: { name: namespace, labels: { "terse.ai/sandboxes": "true" } } },
             { apiVersion: "v1", kind: "ServiceAccount", metadata: { name: "sandbox", namespace }, automountServiceAccountToken: false },
@@ -104,7 +104,7 @@ export class Staging {
                     this.env.STAGING_NODE_POOL,
                     `--cluster=${this.env.STAGING_GKE_CLUSTER}`,
                     `--location=${this.env.STAGING_GKE_LOCATION}`,
-                    `--node-locations=${this.env.DURABLE_ACTORS_GKE_ZONE}`,
+                    `--node-locations=${this.env.DURABLE_ACTORS_KUBERNETES_ZONE}`,
                     "--sandbox=type=gvisor",
                     "--machine-type=e2-standard-2",
                     "--image-type=COS_CONTAINERD",
@@ -323,8 +323,8 @@ export function stagingEnvironment(document, system = process.env) {
         "DURABLE_ACTORS_ARTIFACT_BUCKET",
         "DURABLE_ACTORS_ARCHIVE_BUCKET",
         "DURABLE_ACTORS_RAPID_BUCKETS",
-        "DURABLE_ACTORS_GKE_NAMESPACE",
-        "DURABLE_ACTORS_GKE_ZONE",
+        "DURABLE_ACTORS_KUBERNETES_NAMESPACE",
+        "DURABLE_ACTORS_KUBERNETES_ZONE",
         "NGROK_DOMAIN",
         "NGROK_AUTH_TOKEN",
         ...secretKeys(configured)
@@ -347,10 +347,10 @@ export function stagingEnvironment(document, system = process.env) {
         extra !== undefined
     )
         throw new Error("Use a staging image repository in STAGING_GCP_PROJECT")
-    if (!isStagingResource(configured.DURABLE_ACTORS_GKE_NAMESPACE) || !isStagingResource(configured.STAGING_PROBE_NAMESPACE) || /(^|-)(prod|production)(-|$)/.test(configured.STAGING_NODE_POOL))
+    if (!isStagingResource(configured.DURABLE_ACTORS_KUBERNETES_NAMESPACE) || !isStagingResource(configured.STAGING_PROBE_NAMESPACE) || /(^|-)(prod|production)(-|$)/.test(configured.STAGING_NODE_POOL))
         throw new Error("Use a staging test namespace and node pool")
     if (
-        configured.DURABLE_ACTORS_GKE_ZONE !== configured.STAGING_GKE_LOCATION ||
+        configured.DURABLE_ACTORS_KUBERNETES_ZONE !== configured.STAGING_GKE_LOCATION ||
         configured.DURABLE_ACTORS_PERSISTENCE !== "rapid" ||
         configured.DURABLE_ACTORS_SPARE_IDLE !== "0" ||
         configured.DURABLE_ACTORS_PROCESS_ROLE !== "control_plane"

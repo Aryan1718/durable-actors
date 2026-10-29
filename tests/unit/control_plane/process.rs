@@ -151,7 +151,7 @@ fn pool_capacity_is_configurable_and_validated() -> Result<()> {
 #[test]
 fn pool_drain_rates_are_configurable_and_validated() -> Result<()> {
     let mut values = process_environment();
-    values.insert("DURABLE_ACTORS_SANDBOX_PROVIDER", "gke");
+    values.insert("DURABLE_ACTORS_SANDBOX_PROVIDER", "kubernetes");
     let parse = |values: &HashMap<&str, &str>| {
         ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|v| (*v).into()))
     };
@@ -165,12 +165,17 @@ fn pool_drain_rates_are_configurable_and_validated() -> Result<()> {
         defaults.sandbox_provider.pool.pod_reap_interval,
         Duration::from_secs(1)
     );
-    assert_eq!(gke(&defaults).reap_concurrency, 64);
+    assert_eq!(kubernetes(&defaults).reap_concurrency, 64);
+    assert_eq!(kubernetes(&defaults).runtime_class, "gvisor");
     values.extend([
         ("DURABLE_ACTORS_SPARE_RETIRE_CONCURRENCY", "128"),
         ("DURABLE_ACTORS_SPARE_REAP_INTERVAL_MS", "2000"),
         ("DURABLE_ACTORS_SPARE_POD_REAP_INTERVAL_MS", "500"),
-        ("DURABLE_ACTORS_GKE_REAP_CONCURRENCY", "16"),
+        ("DURABLE_ACTORS_KUBERNETES_REAP_CONCURRENCY", "16"),
+        (
+            "DURABLE_ACTORS_KUBERNETES_RUNTIME_CLASS",
+            "kata-vm-isolation",
+        ),
     ]);
     let configured = parse(&values)?;
     assert_eq!(configured.sandbox_provider.pool.retire_concurrency, 128);
@@ -182,10 +187,12 @@ fn pool_drain_rates_are_configurable_and_validated() -> Result<()> {
         configured.sandbox_provider.pool.pod_reap_interval,
         Duration::from_millis(500)
     );
-    assert_eq!(gke(&configured).reap_concurrency, 16);
+    assert_eq!(kubernetes(&configured).reap_concurrency, 16);
+    assert_eq!(kubernetes(&configured).runtime_class, "kata-vm-isolation");
     for (name, value) in [
         ("DURABLE_ACTORS_SPARE_RETIRE_CONCURRENCY", "0"),
-        ("DURABLE_ACTORS_GKE_REAP_CONCURRENCY", "0"),
+        ("DURABLE_ACTORS_KUBERNETES_REAP_CONCURRENCY", "0"),
+        ("DURABLE_ACTORS_KUBERNETES_RUNTIME_CLASS", "Not A Class"),
         ("DURABLE_ACTORS_SPARE_POD_REAP_INTERVAL_MS", "10"),
     ] {
         let mut invalid = values.clone();
@@ -292,7 +299,7 @@ fn authentication_warning_depends_on_the_listening_address_and_secret() -> Resul
 }
 
 #[test]
-fn rapid_configuration_uses_two_zones_and_gke() -> Result<()> {
+fn rapid_configuration_uses_two_zones_and_kubernetes() -> Result<()> {
     let values = process_environment();
     let config = ControlPlaneProcessConfig::from_lookup(|name| {
         values.get(name).map(|value| (*value).into())
@@ -301,7 +308,10 @@ fn rapid_configuration_uses_two_zones_and_gke() -> Result<()> {
         config.storage.persistence,
         crate::bucket::SnapshotStoreConfig::Rapid { .. }
     ));
-    assert_eq!(gke(&config).zones["north-america-west"], vec!["us-west4-a"]);
+    assert_eq!(
+        kubernetes(&config).zones["north-america-west"],
+        vec!["us-west4-a"]
+    );
     Ok(())
 }
 
@@ -309,7 +319,7 @@ fn rapid_configuration_uses_two_zones_and_gke() -> Result<()> {
 fn compute_region_accepts_multiple_zones_and_rejects_empty_or_mismatched_sets() -> Result<()> {
     let mut values = process_environment();
     values.insert(
-        "DURABLE_ACTORS_GKE_ZONES",
+        "DURABLE_ACTORS_KUBERNETES_ZONES",
         r#"{"north-america-west":["us-west4-a","us-west4-b","us-west4-c"]}"#,
     );
     let parse = |values: &HashMap<&str, &str>| {
@@ -321,7 +331,7 @@ fn compute_region_accepts_multiple_zones_and_rejects_empty_or_mismatched_sets() 
         r#"{"north-america-west":["us-west4-a","us-east4-b"]}"#,
         r#"{"north-america-west":["us-west4-a","us-west4-a"]}"#,
     ] {
-        values.insert("DURABLE_ACTORS_GKE_ZONES", zones);
+        values.insert("DURABLE_ACTORS_KUBERNETES_ZONES", zones);
         assert!(parse(&values).is_err(), "{zones}");
     }
     Ok(())
@@ -374,7 +384,7 @@ fn process_environment() -> HashMap<&'static str, &'static str> {
             r#"[{"bucket":"rapid-test-a","zone":"us-west4-a"},{"bucket":"rapid-test-b","zone":"us-west4-b"}]"#,
         ),
         (
-            "DURABLE_ACTORS_GKE_ZONES",
+            "DURABLE_ACTORS_KUBERNETES_ZONES",
             r#"{"north-america-west":"us-west4-a"}"#,
         ),
         ("DURABLE_ACTORS_PUBLIC_URL", "https://actors.example.com"),
@@ -490,7 +500,7 @@ fn default_region_requires_a_configured_compute_zone() -> Result<()> {
     assert!(parse(&values).is_err());
     values.remove("DURABLE_ACTORS_REGION");
     values.insert(
-        "DURABLE_ACTORS_GKE_ZONES",
+        "DURABLE_ACTORS_KUBERNETES_ZONES",
         r#"{"north-america-west":"us-west4-b"}"#,
     );
     assert!(parse(&values).is_ok());
@@ -621,16 +631,19 @@ fn rapid_placement_defaults_to_every_zone_and_accepts_nearest() -> Result<()> {
 }
 
 #[test]
-fn single_gke_zone_infers_the_actor_region() -> Result<()> {
+fn single_kubernetes_zone_infers_the_actor_region() -> Result<()> {
     let mut values = process_environment();
-    values.remove("DURABLE_ACTORS_GKE_ZONES");
-    values.insert("DURABLE_ACTORS_GKE_ZONE", "us-east4-a");
+    values.remove("DURABLE_ACTORS_KUBERNETES_ZONES");
+    values.insert("DURABLE_ACTORS_KUBERNETES_ZONE", "us-east4-a");
     let config =
         ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|v| (*v).into()))?;
     assert_eq!(config.region.as_deref(), Some("north-america-east"));
-    assert_eq!(gke(&config).zones["north-america-east"], ["us-east4-a"]);
+    assert_eq!(
+        kubernetes(&config).zones["north-america-east"],
+        ["us-east4-a"]
+    );
     values.insert(
-        "DURABLE_ACTORS_GKE_ZONES",
+        "DURABLE_ACTORS_KUBERNETES_ZONES",
         r#"{"north-america-west":"us-west4-a"}"#,
     );
     assert!(
@@ -643,13 +656,16 @@ fn single_gke_zone_infers_the_actor_region() -> Result<()> {
 #[test]
 fn aws_zone_infers_the_actor_region() -> Result<()> {
     let mut values = process_environment();
-    values.remove("DURABLE_ACTORS_GKE_ZONES");
-    values.insert("DURABLE_ACTORS_GKE_ZONE", "us-west-2a");
+    values.remove("DURABLE_ACTORS_KUBERNETES_ZONES");
+    values.insert("DURABLE_ACTORS_KUBERNETES_ZONE", "us-west-2a");
     let config =
         ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|v| (*v).into()))?;
     assert_eq!(config.region.as_deref(), Some("north-america-west"));
-    assert_eq!(gke(&config).zones["north-america-west"], ["us-west-2a"]);
-    values.insert("DURABLE_ACTORS_GKE_ZONE", "us-west-9a");
+    assert_eq!(
+        kubernetes(&config).zones["north-america-west"],
+        ["us-west-2a"]
+    );
+    values.insert("DURABLE_ACTORS_KUBERNETES_ZONE", "us-west-9a");
     assert!(
         ControlPlaneProcessConfig::from_lookup(|name| values.get(name).map(|v| (*v).into()))
             .is_err()
@@ -712,18 +728,18 @@ fn replicas_share_caches_through_redis_when_configured() -> Result<()> {
     Ok(())
 }
 
-fn gke(config: &ControlPlaneProcessConfig) -> &GkeConfig {
+fn kubernetes(config: &ControlPlaneProcessConfig) -> &KubernetesConfig {
     match &config.sandbox_provider.backend {
-        SandboxBackend::Gke(gke) => gke,
-        _ => panic!("expected GKE"),
+        SandboxBackend::Kubernetes(kubernetes) => kubernetes,
+        _ => panic!("expected Kubernetes"),
     }
 }
 
 #[test]
 fn modal_configuration_does_not_require_kubernetes() -> Result<()> {
     let mut values = process_environment();
-    values.remove("DURABLE_ACTORS_GKE_ZONES");
-    values.remove("DURABLE_ACTORS_GKE_ZONE");
+    values.remove("DURABLE_ACTORS_KUBERNETES_ZONES");
+    values.remove("DURABLE_ACTORS_KUBERNETES_ZONE");
     values.extend([
         ("DURABLE_ACTORS_SANDBOX_PROVIDER", "modal"),
         ("DURABLE_ACTORS_MODAL_APP", "modal-test"),
@@ -748,7 +764,7 @@ fn modal_configuration_does_not_require_kubernetes() -> Result<()> {
     };
     assert_eq!(modal.app_name, "modal-test");
     assert_eq!(modal.timeout, Duration::from_secs(3600));
-    values.insert("DURABLE_ACTORS_GKE_NAMESPACE", "project-secrets");
+    values.insert("DURABLE_ACTORS_KUBERNETES_NAMESPACE", "project-secrets");
     assert_eq!(
         parse(&values)?.sandbox_provider.secret_namespace,
         "project-secrets"

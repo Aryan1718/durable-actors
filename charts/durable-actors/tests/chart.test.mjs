@@ -130,7 +130,7 @@ test("configures how fast warm pools refill and drain", () => {
     assert.match(output, /DURABLE_ACTORS_SPARE_REFILL_INTERVAL_MS, value: "250"/)
     assert.match(output, /DURABLE_ACTORS_SPARE_RETIRE_CONCURRENCY, value: "128"/)
     assert.match(output, /DURABLE_ACTORS_SPARE_POD_REAP_INTERVAL_MS, value: "500"/)
-    assert.match(output, /DURABLE_ACTORS_GKE_REAP_CONCURRENCY, value: "32"/)
+    assert.match(output, /DURABLE_ACTORS_KUBERNETES_REAP_CONCURRENCY, value: "32"/)
     assert.match(output, /DURABLE_ACTORS_SPARE_REAP_INTERVAL_MS, value: "5000"/)
 })
 

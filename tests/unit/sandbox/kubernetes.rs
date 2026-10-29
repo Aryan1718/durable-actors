@@ -17,6 +17,7 @@ fn customer_pod_enforces_isolation_and_allows_node_scale_down() -> Result<()> {
     };
     let pod = spare_pod(
         &request,
+        "gvisor",
         &[
             "us-west4-a".into(),
             "us-west4-b".into(),
@@ -301,10 +302,11 @@ async fn fake_cluster(
         ));
     let cluster = Kubernetes::new(
         Client::try_from(config)?,
-        GkeConfig {
+        KubernetesConfig {
             namespace: "sandboxes".into(),
             zones: BTreeMap::from([("north-america-west".into(), vec!["us-west4-a".into()])]),
             reap_concurrency: 4,
+            runtime_class: "gvisor".into(),
         },
     );
     Ok((cluster, server))
@@ -355,6 +357,7 @@ fn temporary_storage_is_disk_backed_and_bounded() {
     let pod = base_pod(
         "actor",
         "image",
+        "gvisor",
         &["us-west4-a".into()],
         &ResourceLimits {
             cpu_millis: 500,

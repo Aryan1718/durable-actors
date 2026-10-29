@@ -11,7 +11,7 @@ use crate::{
         TraceStore,
         persistence::{clickhouse::ClickHouseTracePersistence, postgres::PostgresTracePersistence},
     },
-    sandbox::{HostSandboxRuntimeConfig, gke::GkeConfig, modal::ModalConfig},
+    sandbox::{HostSandboxRuntimeConfig, kubernetes::KubernetesConfig, modal::ModalConfig},
 };
 
 use super::{ActorJwtVerifier, ControlPlaneService};
@@ -111,7 +111,7 @@ pub struct SandboxProviderConfig {
 }
 
 pub(crate) enum SandboxBackend {
-    Gke(GkeConfig),
+    Kubernetes(KubernetesConfig),
     Modal(ModalConfig),
 }
 
@@ -467,8 +467,8 @@ async fn sandbox_provider(
         config.secret_namespace.clone(),
     ));
     Ok(Arc::new(match &config.backend {
-        SandboxBackend::Gke(gke) => {
-            crate::sandbox::gke::provider(gke.clone(), secrets, connections).await?
+        SandboxBackend::Kubernetes(kubernetes) => {
+            crate::sandbox::kubernetes::provider(kubernetes.clone(), secrets, connections).await?
         }
         SandboxBackend::Modal(modal) => {
             crate::sandbox::modal::provider(
@@ -899,7 +899,7 @@ fn sandbox_provider_config(
             resources: host_resources(get)?,
         },
         backend,
-        secret_namespace: get("DURABLE_ACTORS_GKE_NAMESPACE")
+        secret_namespace: get("DURABLE_ACTORS_KUBERNETES_NAMESPACE")
             .unwrap_or_else(|| "terse-sandboxes".into()),
         public_origin,
         resource_bounds: resource_bounds(get)?,
@@ -918,23 +918,24 @@ fn sandbox_backend(
 ) -> Result<(SandboxBackend, Vec<String>)> {
     match get("DURABLE_ACTORS_SANDBOX_PROVIDER")
         .as_deref()
-        .unwrap_or("gke")
+        .unwrap_or("kubernetes")
     {
-        "gke" => {
+        "kubernetes" => {
             let zones = placement_zones(get)?;
             let regions = zones.keys().cloned().collect();
             Ok((
-                SandboxBackend::Gke(GkeConfig {
-                    namespace: get("DURABLE_ACTORS_GKE_NAMESPACE")
+                SandboxBackend::Kubernetes(KubernetesConfig {
+                    namespace: get("DURABLE_ACTORS_KUBERNETES_NAMESPACE")
                         .unwrap_or_else(|| "terse-sandboxes".into()),
                     zones,
                     reap_concurrency: pool_number(
                         get,
-                        "DURABLE_ACTORS_GKE_REAP_CONCURRENCY",
+                        "DURABLE_ACTORS_KUBERNETES_REAP_CONCURRENCY",
                         64,
                         1,
                         1024,
                     )? as usize,
+                    runtime_class: runtime_class(get)?,
                 }),
                 regions,
             ))
@@ -997,13 +998,25 @@ fn modal_region(region: &str) -> Option<&'static str> {
     }
 }
 
+fn runtime_class(get: &mut impl FnMut(&str) -> Option<String>) -> Result<String> {
+    let name = get("DURABLE_ACTORS_KUBERNETES_RUNTIME_CLASS").unwrap_or_else(|| "gvisor".into());
+    ensure!(
+        (1..=253).contains(&name.len())
+            && name.bytes().all(|byte| byte.is_ascii_lowercase()
+                || byte.is_ascii_digit()
+                || b".-".contains(&byte)),
+        "DURABLE_ACTORS_KUBERNETES_RUNTIME_CLASS must name a RuntimeClass"
+    );
+    Ok(name)
+}
+
 fn placement_zones(
     get: &mut impl FnMut(&str) -> Option<String>,
 ) -> Result<BTreeMap<String, Vec<String>>> {
-    if let Some(zone) = get("DURABLE_ACTORS_GKE_ZONE") {
+    if let Some(zone) = get("DURABLE_ACTORS_KUBERNETES_ZONE") {
         ensure!(
-            get("DURABLE_ACTORS_GKE_ZONES").is_none(),
-            "configure GKE_ZONE or GKE_ZONES, not both"
+            get("DURABLE_ACTORS_KUBERNETES_ZONES").is_none(),
+            "configure KUBERNETES_ZONE or KUBERNETES_ZONES, not both"
         );
         let region = super::regions::storage_region(&zone)?.to_owned();
         return compute_zones(&serde_json::to_string(&BTreeMap::from([(
@@ -1011,7 +1024,7 @@ fn placement_zones(
             vec![zone],
         )]))?);
     }
-    compute_zones(&required(get, "DURABLE_ACTORS_GKE_ZONES")?)
+    compute_zones(&required(get, "DURABLE_ACTORS_KUBERNETES_ZONES")?)
 }
 
 fn compute_zones(value: &str) -> Result<BTreeMap<String, Vec<String>>> {
@@ -1036,7 +1049,7 @@ fn compute_zones(value: &str) -> Result<BTreeMap<String, Vec<String>>> {
         .collect();
     ensure!(
         !zones.is_empty(),
-        "at least one GKE placement zone is required"
+        "at least one Kubernetes placement zone is required"
     );
     for (region, placements) in &zones {
         ensure!(
@@ -1054,7 +1067,7 @@ fn compute_zones(value: &str) -> Result<BTreeMap<String, Vec<String>>> {
         for zone in placements {
             ensure!(
                 super::regions::storage_region(zone)? == region,
-                "GKE zone does not match canonical region {region}"
+                "Kubernetes zone does not match canonical region {region}"
             );
         }
     }
@@ -1167,6 +1180,6 @@ mod tests;
 
 fn runtime_image(get: &mut impl FnMut(&str) -> Option<String>, name: &str) -> Result<String> {
     let image = required(get, name)?;
-    crate::sandbox::gke::validate_image(&image).with_context(|| format!("invalid {name}"))?;
+    crate::sandbox::validate_image(&image).with_context(|| format!("invalid {name}"))?;
     Ok(image)
 }
