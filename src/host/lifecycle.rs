@@ -17,7 +17,7 @@ use crate::{
 
 use super::actor_host::ActorStatus;
 
-const REPORT_TIMEOUT: Duration = Duration::from_secs(1);
+const REPORT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[async_trait]
 pub(super) trait LifecycleTransport: Send + Sync {
@@ -71,7 +71,7 @@ impl HostLifecycle {
 
     pub(super) async fn stop(mut self) {
         let _ = self.commands.try_send(LifecycleKind::Stopped);
-        let _ = tokio::time::timeout(Duration::from_secs(3), &mut self.task).await;
+        let _ = tokio::time::timeout(REPORT_TIMEOUT + Duration::from_secs(1), &mut self.task).await;
     }
 }
 

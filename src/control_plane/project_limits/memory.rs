@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -7,7 +7,10 @@ use std::{
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
 
-use super::{Activation, AdmissionRejected, ProjectLimits, ReservationStore};
+use super::{
+    Activation, AdmissionRejected, LAUNCH_LEASE_MS, ProjectLimits, REPORT_LEASE_MS,
+    ReservationStore,
+};
 use crate::{
     actor_lifecycle::{LifecycleEvent, LifecycleKind},
     clock::Clock,
@@ -49,10 +52,16 @@ impl ReservationStore for MemoryReservations {
             }
         );
         project.consume(limits, now)?;
-        project.active.insert(activation.clone());
         project
-            .sessions
-            .insert(activation.clone(), Session::default());
+            .active
+            .insert(activation.clone(), now.saturating_add(LAUNCH_LEASE_MS));
+        project.sessions.insert(
+            activation.clone(),
+            Session {
+                forget_at: self.forget_at(now),
+                ..Session::default()
+            },
+        );
         Ok(())
     }
 
@@ -81,19 +90,27 @@ impl ReservationStore for MemoryReservations {
         state.epoch = event.report.owner_epoch;
         state.sequence = event.report.sequence;
         state.stopped = event.report.kind == LifecycleKind::Stopped;
+        state.forget_at = self.forget_at(now);
         if state.stopped {
-            state.forget_at = now.saturating_add(self.retention.as_millis() as u64);
             project.active.remove(&activation);
         } else {
-            project.active.insert(activation);
+            project
+                .active
+                .insert(activation, now.saturating_add(REPORT_LEASE_MS));
         }
         Ok(())
     }
 }
 
+impl MemoryReservations {
+    fn forget_at(&self, now: u64) -> u64 {
+        now.saturating_add(self.retention.as_millis() as u64)
+    }
+}
+
 #[derive(Default)]
 struct Project {
-    active: HashSet<Activation>,
+    active: HashMap<Activation, u64>,
     sessions: HashMap<Activation, Session>,
     tokens: Option<f64>,
     refilled_at: u64,
@@ -101,8 +118,8 @@ struct Project {
 
 impl Project {
     fn prune(&mut self, now: u64) {
-        self.sessions
-            .retain(|_, state| !state.stopped || state.forget_at > now);
+        self.active.retain(|_, expires_at| *expires_at > now);
+        self.sessions.retain(|_, state| state.forget_at > now);
     }
 
     fn consume(&mut self, limits: ProjectLimits, now: u64) -> Result<()> {

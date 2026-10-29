@@ -88,7 +88,9 @@ async fn reservations_enforce_capacity_until_the_actor_stops() -> Result<()> {
         assert_quota(store.reserve(&second, limits).await, 1);
         let lifecycle = LifecycleStore::default()
             .with_observer(Arc::new(ActorAdmission::new(limits, store.clone())));
-        lifecycle.record(stopped(&first)).await?;
+        lifecycle
+            .record(report(&first, LifecycleKind::Stopped))
+            .await?;
         store.reserve(&second, limits).await?;
         store
             .reserve(&activation("other", "one", "first"), limits)
@@ -119,10 +121,36 @@ async fn stopping_frees_capacity_but_waking_again_consumes_another_start_token()
     let first = activation("p", "same-actor", "first");
     let second = activation("p", "same-actor", "second");
     store.reserve(&first, limits).await?;
-    store.observe(&stopped(&first)).await?;
+    store
+        .observe(&report(&first, LifecycleKind::Stopped))
+        .await?;
     assert_rate(store.reserve(&second, limits).await);
     clock.0.store(2000, Ordering::SeqCst);
     store.reserve(&second, limits).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn slots_expire_unless_reports_renew_them() -> Result<()> {
+    let clock = Arc::new(TestClock(AtomicU64::new(0)));
+    let store = MemoryReservations::new(clock.clone(), RETENTION);
+    let limits = limits(1, 50, 100);
+    let live = activation("p", "one", "live");
+    let lost = activation("p", "two", "lost");
+    let next = activation("p", "three", "next");
+    store.reserve(&live, limits).await?;
+    clock.0.store(LAUNCH_LEASE_MS - 1, Ordering::SeqCst);
+    store
+        .observe(&report(&live, LifecycleKind::Heartbeat))
+        .await?;
+    clock.0.store(LAUNCH_LEASE_MS + 1, Ordering::SeqCst);
+    assert_quota(store.reserve(&next, limits).await, 1);
+    clock
+        .0
+        .store(LAUNCH_LEASE_MS - 1 + REPORT_LEASE_MS, Ordering::SeqCst);
+    store.reserve(&lost, limits).await?;
+    clock.0.fetch_add(LAUNCH_LEASE_MS, Ordering::SeqCst);
+    store.reserve(&next, limits).await?;
     Ok(())
 }
 
@@ -176,17 +204,17 @@ fn activation(project: &str, actor: &str, session: &str) -> Activation {
     )
 }
 
-fn stopped(activation: &Activation) -> LifecycleEvent {
+fn report(activation: &Activation, kind: LifecycleKind) -> LifecycleEvent {
     LifecycleEvent {
         organization_id: None,
-        event_id: format!("{}:stop", activation.session),
+        event_id: format!("{}:{kind:?}", activation.session),
         actor: activation.actor.clone(),
         host_id: activation.host.clone(),
         session_id: activation.session.clone(),
         region: "north-america-east".into(),
         received_at_ms: 1000,
         report: LifecycleReport {
-            kind: LifecycleKind::Stopped,
+            kind,
             owner_epoch: 1,
             sequence: 1,
             started_at_ms: 1000,

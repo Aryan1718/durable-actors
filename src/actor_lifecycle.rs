@@ -17,7 +17,7 @@ use crate::{
 };
 
 pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
-const STALE_AFTER_MS: u64 = 35_000;
+pub(crate) const STALE_AFTER_MS: u64 = 35_000;
 
 mod pubsub;
 pub(crate) mod reconciliation;

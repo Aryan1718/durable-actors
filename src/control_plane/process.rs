@@ -201,7 +201,7 @@ async fn control_plane_routes(
         let reservations: Arc<dyn ReservationStore> = match &redis {
             Some(redis) => Arc::new(RedisReservations::new(
                 redis.clone(),
-                "durable-actors:admission:v1",
+                "durable-actors:admission:v2",
                 retention,
             )),
             None => Arc::new(MemoryReservations::new(

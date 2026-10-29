@@ -3,7 +3,10 @@ use std::time::Duration;
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 
-use super::{Activation, AdmissionRejected, ProjectLimits, ReservationStore};
+use super::{
+    Activation, AdmissionRejected, LAUNCH_LEASE_MS, ProjectLimits, REPORT_LEASE_MS,
+    ReservationStore,
+};
 use crate::{actor_lifecycle::LifecycleEvent, redis_client::Redis};
 
 pub(in crate::control_plane) struct RedisReservations {
@@ -24,6 +27,10 @@ impl RedisReservations {
     fn prefix(&self, project: &str) -> String {
         format!("{}:{{{project}}}", self.namespace)
     }
+
+    fn retention_ms(&self) -> u64 {
+        self.retention.as_millis().max(1) as u64
+    }
 }
 
 #[async_trait]
@@ -41,7 +48,9 @@ impl ReservationStore for RedisReservations {
             .arg(member)
             .arg(limits.max_active_actors)
             .arg(limits.starts_per_second)
-            .arg(limits.start_burst);
+            .arg(limits.start_burst)
+            .arg(LAUNCH_LEASE_MS)
+            .arg(self.retention_ms());
         let (code, retry): (i32, u64) = self.redis.run(command).await?;
         match code {
             0 => Ok(()),
@@ -84,7 +93,8 @@ impl ReservationStore for RedisReservations {
             .arg(event.report.owner_epoch)
             .arg(event.report.sequence)
             .arg(event.report.kind == crate::actor_lifecycle::LifecycleKind::Stopped)
-            .arg(self.retention.as_millis().max(1) as u64);
+            .arg(self.retention_ms())
+            .arg(REPORT_LEASE_MS);
         let _: i32 = self.redis.run(command).await?;
         Ok(())
     }

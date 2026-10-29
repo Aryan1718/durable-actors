@@ -15,6 +15,11 @@ mod redis;
 pub(super) use memory::MemoryReservations;
 pub(super) use redis::RedisReservations;
 
+// Slots are leases so lost stop reports, crashed hosts, and cancelled launches cannot leak them.
+// A launch outlasts the slowest sandbox start; reports must arrive within the heartbeat staleness window.
+const LAUNCH_LEASE_MS: u64 = 180_000;
+const REPORT_LEASE_MS: u64 = crate::actor_lifecycle::STALE_AFTER_MS;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProjectLimits {
     pub max_active_actors: u32,
