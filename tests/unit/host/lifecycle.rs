@@ -45,17 +45,23 @@ async fn reports_activation_heartbeat_and_graceful_shutdown() -> Result<()> {
     assert_eq!(started.owner_epoch, 7);
     assert_eq!(started.sequence, 1);
     assert!(started.occurred_at_ms >= started.started_at_ms);
+    let changed_at = tokio::time::Instant::now();
     status.send_modify(|status| {
+        status.last_active_at_ms = Some(started.occurred_at_ms);
         status.waiting.push(crate::host_leases::WaitingOperation {
             id: "request".into(),
             operation: "increment".into(),
         })
     });
     let heartbeat = received.recv().await.unwrap();
+    assert!(changed_at.elapsed() < HEARTBEAT_INTERVAL);
     assert_eq!(heartbeat.kind, LifecycleKind::Heartbeat);
     assert_eq!(heartbeat.sequence, 2);
     assert_eq!(heartbeat.resident, Some(true));
     assert_eq!(heartbeat.waiting[0].operation, "increment");
+    assert_eq!(heartbeat.last_active_at_ms, Some(started.occurred_at_ms));
+    drop(status);
+    tokio::task::yield_now().await;
     lifecycle.draining();
     lifecycle.stop().await;
     let draining = received.recv().await.unwrap();

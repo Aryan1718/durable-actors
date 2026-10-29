@@ -119,6 +119,7 @@ fn event(kind: LifecycleKind, sequence: u64, time: u64) -> LifecycleEvent {
             occurred_at_ms: time,
             resources: Default::default(),
             resident: Some(kind != LifecycleKind::Stopped),
+            last_active_at_ms: None,
             waiting: Vec::new(),
         },
     }

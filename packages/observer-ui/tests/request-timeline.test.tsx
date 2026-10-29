@@ -3,7 +3,7 @@ import React, { act } from "react"
 import assert from "node:assert/strict"
 import { afterEach, test } from "node:test"
 
-import type { RequestTrace, RequestTracePage } from "../src/client.js"
+import type { ActorInventory, RequestTrace, RequestTracePage } from "../src/client.js"
 
 import "./dom.js"
 
@@ -40,12 +40,13 @@ function fixture(records: RequestTrace[]) {
         },
         listRequests: async () => page
     }
-    return { client, publish: (records: RequestTrace[]) => publish({ ...page, records }) }
+    return { client, publish: (records: RequestTrace[], snapshot = false) => publish({ ...page, records, snapshot }) }
 }
 
 test("repeated methods share a row while interleaved calls remain individually selectable", async () => {
     const source = fixture([{ ...trace, sequence: 3, requestId: "third", startedAtMs: 1300 }, trace, { ...trace, sequence: 2, requestId: "second", operation: "save", startedAtMs: 1050 }])
     const view = render(<RequestObserver client={source.client} />)
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
     const timeline = await view.findByRole("group", { name: "Invocation waterfall" })
     const loads = within(timeline).getAllByRole("button", { name: /Inspect load request/ })
     const row = loads[0]!.closest(".request-waterfall-row")!
@@ -69,6 +70,72 @@ test("repeated methods share a row while interleaved calls remain individually s
     assert.ok(within(row as HTMLElement).getByText("3 calls"))
 })
 
+test("published methods keep rows and order with no calls, new activity, empty history, and retention", async () => {
+    const source = fixture([])
+    const inventory: ActorInventory = {
+        connectionsComplete: true,
+        actors: [{ actorName: "Room", methods: ["save", "load", "neverCalled"], live: 1, dormant: 0, unknown: 0, instances: [{ actorId: "lobby", status: "live", connections: [] }] }]
+    }
+    const client = { ...source.client, listActors: async () => inventory }
+    const view = render(<RequestObserver client={client} actor={{ actorName: "Room", actorId: "lobby" }} />)
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
+    const timeline = await view.findByRole("group", { name: "Invocation waterfall" })
+    const labels = () => [...timeline.querySelectorAll(".request-waterfall-label strong")].map(label => label.textContent)
+    const expected = ["load", "neverCalled", "save", "onConnect", "onDisconnect", "onMessage"]
+    assert.deepEqual(labels(), expected)
+    assert.equal(within(timeline).getAllByText("0 calls").length, expected.length)
+    await act(async () => source.publish([{ ...trace, operation: "save" }]))
+    assert.deepEqual(labels(), expected)
+    const save = within(timeline).getByRole("group", { name: "save method calls on Room / lobby" })
+    assert.ok(within(save).getByText("1 call"))
+    fireEvent.click(view.getByRole("button", { name: "History" }))
+    await waitFor(() => assert.equal(within(timeline).queryByRole("button", { name: /Inspect save request/ }), null))
+    assert.deepEqual(labels(), expected)
+    assert.ok(within(save).getByText("0 calls"))
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
+    await act(async () => source.publish([], true))
+    assert.deepEqual(labels(), expected)
+    assert.equal(within(timeline).getAllByText("0 calls").length, expected.length)
+    assert.equal(view.queryByText("Room / elsewhere"), null)
+})
+
+test("global timelines ignore idle inventory and include complete methods for live and saved request instances", async () => {
+    const source = fixture([trace])
+    const inventory: ActorInventory = {
+        connectionsComplete: true,
+        actors: [
+            {
+                actorName: "Room",
+                methods: ["save", "load", "neverCalled"],
+                live: 0,
+                dormant: 10_000,
+                unknown: 0,
+                instances: Array.from({ length: 10_000 }, (_, i) => ({ actorId: `idle-${i}`, status: "dormant", connections: [] }))
+            }
+        ]
+    }
+    const client = {
+        ...source.client,
+        listActors: async () => inventory,
+        listRequests: async () => ({ epoch: "history", cursor: 1, capacity: 500, evicted: 0, dropped: 0, records: [{ ...trace, actorId: "archived", operation: "save" }] })
+    }
+    const view = render(<RequestObserver client={client} />)
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
+    const timeline = await view.findByRole("group", { name: "Invocation waterfall" })
+    await waitFor(() => assert.equal(timeline.querySelectorAll(".request-waterfall-row").length, 6))
+    assert.equal(view.queryByText(/idle-/), null)
+    fireEvent.click(view.getByRole("button", { name: "History" }))
+    await view.findByRole("button", { name: /Inspect save request on Room \/ archived/ })
+    assert.equal(timeline.querySelectorAll(".request-waterfall-row").length, 12)
+    assert.ok(within(timeline).getByRole("group", { name: "neverCalled method calls on Room / archived" }))
+    assert.equal(view.queryByText(/idle-/), null)
+    await act(async () => source.publish([], true))
+    assert.equal(timeline.querySelectorAll(".request-waterfall-row").length, 6)
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
+    assert.equal(view.queryByRole("group", { name: "Invocation waterfall" }), null)
+    assert.ok(view.getByText("No requests yet"))
+})
+
 test("method rows keep different projects, actor classes, instances and event kinds separate", async () => {
     const { client } = fixture([
         trace,
@@ -79,6 +146,7 @@ test("method rows keep different projects, actor classes, instances and event ki
         { ...trace, sequence: 6, requestId: "overlap", startedAtMs: 1050 }
     ])
     const view = render(<RequestObserver client={client} />)
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
     const timeline = await view.findByRole("group", { name: "Invocation waterfall" })
     const rows = timeline.querySelectorAll(".request-waterfall-row")
     assert.equal(rows.length, 5)
@@ -93,6 +161,7 @@ test("request details show cold and warm host startup context", async () => {
     ] as const) {
         const { client } = fixture([{ ...trace, hostState }])
         const view = render(<RequestObserver client={client} />)
+        fireEvent.click(view.getByRole("button", { name: "Live" }))
         const trigger = await view.findByRole("button", { name: /Inspect load request/ })
         fireEvent.click(trigger)
         const details = await view.findByRole("dialog", { name: "Request details" })
@@ -105,6 +174,7 @@ test("request details show cold and warm host startup context", async () => {
 test("request details open a right-side drawer from the waterfall and table, then restore focus on Escape", async () => {
     const { client } = fixture([trace])
     const view = render(<RequestObserver client={client} />)
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
     await view.findByRole("group", { name: "Invocation waterfall" })
     for (const layout of ["Waterfall", "Table"]) {
         fireEvent.click(view.getByRole("button", { name: layout }))
@@ -125,6 +195,7 @@ test("request details open a right-side drawer from the waterfall and table, the
 test("waterfall places calls chronologically on one scale with queue time and gaps", async () => {
     const { client } = fixture([{ ...trace, sequence: 2, requestId: "second", operation: "save", startedAtMs: 1300, durationMs: 100, outcome: "failed" }, trace])
     const view = render(<RequestObserver client={client} />)
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
     const timeline = await view.findByRole("group", { name: "Invocation waterfall" })
     const calls = within(timeline).getAllByRole("button", { name: /Inspect .* request/ })
     assert.deepEqual(
@@ -154,6 +225,7 @@ test("gaps follow the latest finish on the same actor, including overlapping req
         { ...trace, sequence: 4, operation: "after", startedAtMs: 1600 }
     ])
     const view = render(<RequestObserver client={client} />)
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
     const timeline = await view.findByRole("group", { name: "Invocation waterfall" })
     assert.ok(within(timeline).getByRole("button", { name: /Overlapping/ }))
     assert.ok(within(timeline).getByRole("button", { name: /100 ms gap/ }))
@@ -164,6 +236,7 @@ test("waterfall handles instant requests, unavailable queue timings and every ou
     const outcomes: RequestTrace["outcome"][] = ["completed", "failed", "rejected", "rerouted", "interrupted"]
     const { client } = fixture(outcomes.map((outcome, sequence) => ({ ...trace, sequence, outcome, durationMs: 0, queueWaitMs: null })))
     const view = render(<RequestObserver client={client} />)
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
     const timeline = await view.findByRole("group", { name: "Invocation waterfall" })
     assert.equal(within(timeline).getAllByRole("button", { name: /Inspect .* request/ }).length, 5)
     assert.doesNotMatch(timeline.innerHTML, /NaN|Infinity/)
@@ -174,6 +247,7 @@ test("waterfall handles instant requests, unavailable queue timings and every ou
 test("actor waterfall respects scope, pause, history and the table toggle", async () => {
     const source = fixture([trace, { ...trace, sequence: 2, actorId: "elsewhere", operation: "other" }])
     const view = render(<RequestObserver client={source.client} actor={{ actorName: "Room", actorId: "lobby" }} />)
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
     await view.findByRole("group", { name: "Invocation waterfall" })
     assert.equal(view.queryByText("other"), null)
     fireEvent.click(view.getByRole("button", { name: "Pause" }))
@@ -186,6 +260,7 @@ test("actor waterfall respects scope, pause, history and the table toggle", asyn
     fireEvent.click(view.getByRole("button", { name: "Waterfall" }))
     fireEvent.click(view.getByRole("button", { name: "History" }))
     await view.findByText("load")
-    assert.equal(view.queryByText("update"), null)
+    assert.ok(view.getByText("update"))
+    assert.ok(within(view.getByRole("group", { name: "update method calls on Room / lobby" })).getByText("0 calls"))
     assert.ok(view.getByRole("group", { name: "Invocation waterfall" }))
 })

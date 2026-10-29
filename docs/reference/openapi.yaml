@@ -372,6 +372,33 @@ paths:
                 "401": { $ref: "#/components/responses/Unauthenticated" }
                 "500": { $ref: "#/components/responses/Internal" }
                 "503": { $ref: "#/components/responses/Unavailable" }
+    /v1/projects/{project_id}/observe/residency:
+        parameters:
+            - { $ref: "#/components/parameters/ProjectId" }
+        get:
+            operationId: listActorResidency
+            tags: [Observability]
+            summary: Get instance residency over time
+            description: Lifecycle periods clipped to the selected range. Missing reports become unknown after 35 seconds. Stops remain dormant until reactivation. Reads at most the latest 10000 reports, including the last report before the range for each instance. Time before retained evidence is omitted.
+            parameters:
+                - name: actorName
+                  in: query
+                  required: true
+                  schema: { type: string, pattern: "^[A-Za-z0-9._-]{1,48}$" }
+                - { $ref: "#/components/parameters/FromMs" }
+                - { $ref: "#/components/parameters/ToMs" }
+            responses:
+                "200":
+                    description: Residency periods and whether the report limit was reached.
+                    headers:
+                        Cache-Control: { $ref: "#/components/headers/NoStore" }
+                    content:
+                        application/json:
+                            schema: { $ref: "#/components/schemas/ResidencyHistory" }
+                "400": { $ref: "#/components/responses/InvalidRequest" }
+                "401": { $ref: "#/components/responses/Unauthenticated" }
+                "500": { $ref: "#/components/responses/Internal" }
+                "503": { $ref: "#/components/responses/Unavailable" }
     /v1/projects/{project_id}/observe/events:
         parameters:
             - { $ref: "#/components/parameters/ProjectId" }
@@ -1199,6 +1226,10 @@ components:
                         required: [actorName, live, dormant, unknown, instances]
                         properties:
                             actorName: { type: string }
+                            methods:
+                                type: array
+                                items: { type: string }
+                                description: Published RPC method names, including methods with no calls. Omitted when no deployment contract is available.
                             live: { type: integer, minimum: 0 }
                             dormant: { type: integer, minimum: 0 }
                             unknown: { type: integer, minimum: 0 }
@@ -1210,6 +1241,10 @@ components:
                                     properties:
                                         actorId: { type: string }
                                         status: { type: string, enum: [live, dormant, unknown] }
+                                        lastActiveAtMs:
+                                            type: [integer, "null"]
+                                            minimum: 0
+                                            description: Most recent request admission or completion in Unix milliseconds. Null when unavailable; lifecycle heartbeats do not update it.
                                         connections:
                                             type: array
                                             items:
@@ -1226,6 +1261,21 @@ components:
                                                 properties:
                                                     id: { type: string }
                                                     operation: { type: string }
+        ResidencyHistory:
+            type: object
+            required: [periods, truncated]
+            properties:
+                truncated: { type: boolean }
+                periods:
+                    type: array
+                    items:
+                        type: object
+                        required: [actorId, status, fromMs, toMs]
+                        properties:
+                            actorId: { type: string }
+                            status: { type: string, enum: [live, dormant, unknown] }
+                            fromMs: { type: integer, minimum: 0 }
+                            toMs: { type: integer, minimum: 0 }
         TracePage:
             type: object
             required: [epoch, cursor, capacity, evicted, dropped, persistenceFailed, records, nextCursor, resumeCursor, reset]

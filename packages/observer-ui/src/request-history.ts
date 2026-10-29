@@ -24,14 +24,18 @@ export function useRequestHistory(client: Pick<ObserverClient, "listRequests">, 
         async function fetchPage(cursor?: string) {
             try {
                 if (!client.listRequests) throw new Error("History is unavailable")
-                const incoming = await client.listRequests({ ...query, cursor }, controller.signal)
-                if (controller.signal.aborted) return
-                setPage(current => {
-                    if (!cursor || !current || incoming.reset || current.epoch !== incoming.epoch) return incoming
-                    const records = new Map(current.records.map(record => [record.eventId ?? record.sequence, record]))
-                    for (const record of incoming.records) records.set(record.eventId ?? record.sequence, record)
-                    return { ...incoming, reset: current.reset || incoming.reset, records: [...records.values()] }
-                })
+                do {
+                    const incoming = await client.listRequests({ limit: 500, ...query, cursor }, controller.signal)
+                    if (controller.signal.aborted) return
+                    const append = !!cursor
+                    setPage(current => {
+                        if (!append || !current || incoming.reset || current.epoch !== incoming.epoch) return incoming
+                        const records = new Map(current.records.map(record => [record.eventId ?? record.sequence, record]))
+                        for (const record of incoming.records) records.set(record.eventId ?? record.sequence, record)
+                        return { ...incoming, reset: current.reset || incoming.reset, records: [...records.values()] }
+                    })
+                    cursor = incoming.nextCursor ?? undefined
+                } while (cursor)
             } catch {
                 if (!controller.signal.aborted) setFailed(true)
             } finally {
@@ -42,5 +46,5 @@ export function useRequestHistory(client: Pick<ObserverClient, "listRequests">, 
         load.current()
         return () => controller.abort()
     }, [client, query])
-    return { page, loading, failed, loadOlder: () => load.current(page?.nextCursor ?? undefined), retry: () => load.current(page?.nextCursor ?? undefined) }
+    return { page, loading, failed, retry: () => load.current(page?.nextCursor ?? undefined) }
 }

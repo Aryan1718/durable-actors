@@ -4,7 +4,7 @@ import { ChartNoAxesGantt, List, Pause, Play, RefreshCw, X } from "lucide-react"
 
 import { RequestTimeline } from "./RequestTimeline.js"
 import { TimeRangePicker } from "./TimeRangePicker.js"
-import type { ObserverClient, RequestTrace, RequestTracePage } from "./client.js"
+import type { ActorInventory, ObserverClient, RequestTrace, RequestTracePage } from "./client.js"
 import type { RequestHistoryQuery as HistoryFilters } from "./client.js"
 import { Badge } from "./components/ui/badge.js"
 import { Button } from "./components/ui/button.js"
@@ -12,21 +12,22 @@ import { Drawer, DrawerClose, DrawerContent, DrawerDescription, DrawerHeader, Dr
 import { Input } from "./components/ui/input.js"
 import { NativeSelect, NativeSelectOption } from "./components/ui/native-select.js"
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "./components/ui/table.js"
-import { useRequests } from "./observer-hooks.js"
+import { useInventory, useRequests } from "./observer-hooks.js"
 import { useRequestHistory } from "./request-history.js"
-import { duration, gapLabel, requestTimeline } from "./request-timeline.js"
+import { duration, gapLabel, requestTimeline, requestTimelineLanes } from "./request-timeline.js"
 import { defaultTimeRange, resolveRange } from "./time-range.js"
 import type { TimeRange } from "./time-range.js"
 
 interface RequestObserverProps {
     focus?: { requestId?: string; connectionId?: string }
-    client: Pick<ObserverClient, "watchRequests" | "listRequests">
+    client: Pick<ObserverClient, "watchRequests" | "listRequests"> & Partial<Pick<ObserverClient, "listActors" | "watchActors">>
     actor?: Pick<RequestTrace, "actorName" | "actorId">
+    inventory?: ActorInventory
     timeRange?: TimeRange
     onTimeRangeChange?: (range: TimeRange) => void
 }
 
-function RequestObserver({ client, actor, timeRange, onTimeRangeChange, focus }: RequestObserverProps) {
+function RequestObserver({ client, actor, inventory: providedInventory, timeRange, onTimeRangeChange, focus }: RequestObserverProps) {
     const [query, setQuery] = useState<HistoryFilters>()
     const [localRange, setLocalRange] = useState<TimeRange>(defaultTimeRange)
     const range = timeRange ?? localRange
@@ -37,6 +38,7 @@ function RequestObserver({ client, actor, timeRange, onTimeRangeChange, focus }:
     )
     const history = useRequestHistory(client, scopedQuery)
     const { page, failed, retry } = useRequests(client)
+    const { inventory } = useInventory(client, !providedInventory)
     const [frozen, setFrozen] = useState<RequestTracePage>()
     const [selected, setSelected] = useState<RequestTrace>()
     const [view, setView] = useState<"waterfall" | "table">("waterfall")
@@ -44,11 +46,12 @@ function RequestObserver({ client, actor, timeRange, onTimeRangeChange, focus }:
     const trigger = useRef<HTMLButtonElement | null>(null)
     const Heading = actor ? "h3" : "h1"
     const shown = query ? history.page : (frozen ?? page)
-    const statusPage = page ?? history.page
+    const statusPage = query ? history.page : page
     const records = (shown?.records ?? []).filter(record => !actor || (record.actorName === actor.actorName && record.actorId === actor.actorId))
+    const lanes = requestTimelineLanes(providedInventory ?? inventory, [...((frozen ?? page)?.records ?? []), ...(query ? records : [])], actor)
     useEffect(() => {
         setFrozen(undefined)
-        setQuery(undefined)
+        setQuery(client.listRequests ? {} : undefined)
     }, [client, actor?.actorName, actor?.actorId])
     useEffect(() => {
         if (focus) setQuery(focus)
@@ -59,7 +62,7 @@ function RequestObserver({ client, actor, timeRange, onTimeRangeChange, focus }:
             {(query?.requestId || query?.connectionId) && (
                 <p>
                     Showing {query.requestId ? `request ${query.requestId}` : `connection ${query?.connectionId}`}{" "}
-                    <Button variant="link" onClick={() => setQuery(undefined)}>
+                    <Button variant="link" onClick={() => setQuery({})}>
                         Clear filter
                     </Button>
                 </p>
@@ -122,7 +125,7 @@ function RequestObserver({ client, actor, timeRange, onTimeRangeChange, focus }:
             {query && <HistoryFilters query={query} range={range} onRangeChange={setRange} loading={history.loading} onSearch={setQuery} scoped={!!actor} />}
             {query && history.failed && (
                 <div className="la-observer-error" role="alert">
-                    Request history unavailable.{" "}
+                    {history.page ? "Request history is incomplete. Some events could not be loaded." : "Request history unavailable."}{" "}
                     <Button variant="outline" onClick={history.retry}>
                         Retry history
                     </Button>
@@ -148,9 +151,10 @@ function RequestObserver({ client, actor, timeRange, onTimeRangeChange, focus }:
                     Some older events are no longer retained. Showing available history.
                 </div>
             )}
-            {view === "waterfall" && records.length > 0 && (
+            {view === "waterfall" && (records.length > 0 || lanes.length > 0) && (
                 <RequestTimeline
                     records={records}
+                    lanes={lanes}
                     selected={selected}
                     onSelect={(record, element) => {
                         trigger.current = element
@@ -219,7 +223,7 @@ function RequestObserver({ client, actor, timeRange, onTimeRangeChange, focus }:
                         </TableBody>
                     </Table>
                 )}
-                {!records.length && (
+                {!records.length && (view === "table" || !lanes.length) && (
                     <div className="la-request-empty" role="status">
                         <strong>
                             {query
@@ -242,28 +246,13 @@ function RequestObserver({ client, actor, timeRange, onTimeRangeChange, focus }:
                     </div>
                 )}
             </div>
-            {query && shown?.nextCursor && (
-                <Button className="la-request-load-older" variant="outline" disabled={history.loading} onClick={history.loadOlder}>
-                    {history.loading ? "Loading…" : "Load older"}
-                </Button>
+            {query && shown && (
+                <p className="la-request-note" role="status">
+                    {records.length.toLocaleString()} events loaded{history.loading ? "; loading more…" : history.failed ? "; history is incomplete." : " in this range."}
+                </p>
             )}
-            <div className="la-observer-footnote">
-                <span className="la-observer-refresh-status">
-                    {!query && <span className={`la-observer-dot ${failed ? "la-observer-dot-unknown" : "la-observer-dot-live"}`} />}
-                    {query ? "Saved history" : frozen ? "Display paused · collection continues" : failed ? "Reconnecting…" : page ? "Live updates" : "Connecting…"}
-                </span>
-                <span>
-                    {query
-                        ? `${records.length.toLocaleString()} saved requests shown`
-                        : actor
-                          ? `${records.length} matching requests from the latest ${shown?.capacity ?? 500} on this control plane.`
-                          : `Latest ${shown?.capacity ?? 500} requests on this control plane.`}
-                </span>
-            </div>
+            {!query && client.listRequests && <p className="la-request-note">Live shows the latest {shown?.capacity ?? 500} events. Use History to load every retained event in a time range.</p>}
             {!query && !!shown?.evicted && <p className="la-request-note">{shown.evicted.toLocaleString()} older records have left this history window.</p>}
-            <p className="la-request-note">
-                Total includes queue wait, actor processing, and persistence. Queue wait includes the WebSocket message queue. Timings exclude the caller’s network round trip.
-            </p>
             <Drawer
                 direction="right"
                 autoFocus

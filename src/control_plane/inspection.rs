@@ -35,6 +35,10 @@ pub(super) fn local_router(inspector: ActorInspector, admin: AdminService) -> Ro
             get(actor_inventory),
         )
         .route(
+            "/v1/projects/{project_id}/observe/residency",
+            get(residency_history),
+        )
+        .route(
             "/v1/projects/{project_id}/observe/events",
             get(actor_events),
         )
@@ -130,12 +134,13 @@ async fn read_inventory(
         if let Some(actors) = contract.contract["actors"].as_array() {
             for actor in actors {
                 if let Some(name) = actor["actorName"].as_str() {
-                    rows.entry(name.to_owned()).or_insert_with(|| {
+                    let row = rows.entry(name.to_owned()).or_insert_with(|| {
                         crate::placement::ActorInventory {
                             actor_name: name.to_owned(),
                             ..Default::default()
                         }
                     });
+                    row.methods = Some(contract.rpc_methods(name)?);
                 }
             }
         }
@@ -201,6 +206,48 @@ async fn actor_events(
             .keep_alive(KeepAlive::new().interval(Duration::from_secs(10))),
     )
         .into_response())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ResidencyQuery {
+    actor_name: String,
+    from_ms: Option<u64>,
+    to_ms: Option<u64>,
+}
+
+async fn residency_history(
+    State(state): State<InspectionApi>,
+    path: Path<ProjectPath>,
+    query: Result<Query<ResidencyQuery>, QueryRejection>,
+) -> Result<Response, ApiError> {
+    use crate::clock::{Clock, SystemClock};
+    let project = project_id(path)?;
+    let Query(query) = query.map_err(ApiError::bad_request)?;
+    crate::request_traces::history::HistoryQuery {
+        actor_name: Some(query.actor_name.clone()),
+        from_ms: query.from_ms,
+        to_ms: query.to_ms,
+        ..Default::default()
+    }
+    .validate()
+    .map_err(ApiError::bad_request)?;
+    let to = query
+        .to_ms
+        .unwrap_or(SystemClock.now_ms().map_err(ApiError::internal)?);
+    let history = tokio::time::timeout(
+        Duration::from_secs(25),
+        state.inspector.inventory.residency_history(
+            &project,
+            &query.actor_name,
+            query.from_ms.unwrap_or(0),
+            to,
+        ),
+    )
+    .await
+    .map_err(|_| ApiError::unavailable("Residency history timed out"))?
+    .map_err(ApiError::internal)?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(history)).into_response())
 }
 
 async fn overview_metrics(

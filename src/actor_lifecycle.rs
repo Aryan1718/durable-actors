@@ -17,10 +17,11 @@ use crate::{
 };
 
 pub(crate) const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
-const STALE_AFTER_MS: u64 = 35_000;
+pub(crate) const STALE_AFTER_MS: u64 = 35_000;
 
 mod pubsub;
 pub(crate) mod reconciliation;
+mod residency;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -41,6 +42,8 @@ pub(crate) struct LifecycleReport {
     pub occurred_at_ms: u64,
     pub resources: ResourceLimits,
     pub resident: Option<bool>,
+    #[serde(default)]
+    pub last_active_at_ms: Option<u64>,
     pub waiting: Vec<WaitingOperation>,
 }
 
@@ -100,6 +103,23 @@ impl UsageUpdate {
 pub(crate) trait LifecyclePersistence: Send + Sync {
     async fn record(&self, event: &LifecycleEvent) -> Result<()>;
     async fn latest(&self, project: &str) -> Result<Vec<LifecycleEvent>>;
+    async fn history(
+        &self,
+        project: &str,
+        actor_name: &str,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<LifecycleEvent>> {
+        let _ = from;
+        Ok(self
+            .latest(project)
+            .await?
+            .into_iter()
+            .filter(|event| {
+                event.actor.actor_name == actor_name && event.report.occurred_at_ms <= to
+            })
+            .collect())
+    }
 }
 
 #[async_trait]
@@ -268,6 +288,7 @@ impl ActorInventoryReader for LifecycleStore {
             actor.instances.push(ActorInstanceOverview {
                 actor_id: event.actor.actor_id,
                 status,
+                last_active_at_ms: event.report.last_active_at_ms,
                 connections: Vec::new(),
                 waiting: match status {
                     ActorResidency::Unknown => None,
@@ -282,6 +303,20 @@ impl ActorInventoryReader for LifecycleStore {
             actors: actors.into_values().collect(),
             connections_complete: true,
         })
+    }
+
+    async fn residency_history(
+        &self,
+        project: &str,
+        actor_name: &str,
+        from_ms: u64,
+        to_ms: u64,
+    ) -> Result<crate::placement::ResidencyHistory> {
+        let events = self
+            .persistence
+            .history(project, actor_name, from_ms, to_ms)
+            .await?;
+        Ok(residency::history(events, from_ms, to_ms))
     }
 }
 
@@ -299,14 +334,18 @@ fn residency(event: &LifecycleEvent, now: u64) -> ActorResidency {
     }
 }
 
-struct MemoryLifecyclePersistence(Cache<ActorKey, LifecycleEvent>);
+struct MemoryLifecyclePersistence(
+    Cache<ActorKey, LifecycleEvent>,
+    Cache<(ActorKey, String), LifecycleEvent>,
+);
 
 impl Default for MemoryLifecyclePersistence {
     fn default() -> Self {
         Self(
+            Cache::builder().max_capacity(10_000).build(),
             Cache::builder()
-                .max_capacity(10_000)
-                .time_to_idle(Duration::from_secs(86_400))
+                .max_capacity(100_000)
+                .time_to_live(Duration::from_secs(86_400))
                 .build(),
         )
     }
@@ -315,6 +354,9 @@ impl Default for MemoryLifecyclePersistence {
 #[async_trait]
 impl LifecyclePersistence for MemoryLifecyclePersistence {
     async fn record(&self, event: &LifecycleEvent) -> Result<()> {
+        self.1
+            .insert((event.actor.clone(), event.event_id.clone()), event.clone())
+            .await;
         self.0
             .entry(event.actor.clone())
             .and_compute_with(|previous| async move {
@@ -342,6 +384,53 @@ impl LifecyclePersistence for MemoryLifecyclePersistence {
         events.sort_by(|a, b| {
             (&a.actor.actor_name, &a.actor.actor_id).cmp(&(&b.actor.actor_name, &b.actor.actor_id))
         });
+        Ok(events)
+    }
+
+    async fn history(
+        &self,
+        project: &str,
+        actor_name: &str,
+        from: u64,
+        to: u64,
+    ) -> Result<Vec<LifecycleEvent>> {
+        let mut before = BTreeMap::<String, LifecycleEvent>::new();
+        let mut events = Vec::new();
+        for event in self
+            .1
+            .iter()
+            .map(|(_, event)| event)
+            .chain(self.0.iter().map(|(_, event)| event))
+        {
+            if event.actor.project_id != project
+                || event.actor.actor_name != actor_name
+                || event.report.occurred_at_ms > to
+            {
+                continue;
+            }
+            if event.report.occurred_at_ms >= from {
+                events.push(event);
+            } else {
+                let previous = before
+                    .entry(event.actor.actor_id.clone())
+                    .or_insert_with(|| event.clone());
+                if (event.report.owner_epoch, event.report.sequence)
+                    > (previous.report.owner_epoch, previous.report.sequence)
+                {
+                    *previous = event;
+                }
+            }
+        }
+        events.extend(before.into_values());
+        events.sort_by(|a, b| {
+            (&b.report.occurred_at_ms, &b.actor.actor_id, &b.event_id).cmp(&(
+                &a.report.occurred_at_ms,
+                &a.actor.actor_id,
+                &a.event_id,
+            ))
+        });
+        events.dedup_by(|a, b| a.actor == b.actor && a.event_id == b.event_id);
+        events.truncate(residency::EVENT_LIMIT + 1);
         Ok(events)
     }
 }

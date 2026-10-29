@@ -32,6 +32,10 @@ class ControlPlaneClient {
         return this.requestJson("GET", `${this.projectPath()}/observe/actors`)
     }
 
+    listResidency(query: URLSearchParams, signal?: AbortSignal): Promise<unknown> {
+        return this.requestJson("GET", `${this.projectPath()}/observe/residency?${query}`, undefined, 30_000, signal)
+    }
+
     async openActorStream(signal: AbortSignal): Promise<Response> {
         return this.openStream(`${this.projectPath()}/observe/events`, signal)
     }

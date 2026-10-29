@@ -1,8 +1,10 @@
-import { useState } from "react"
 import type { FocusEvent as ReactFocusEvent, MouseEvent as ReactMouseEvent } from "react"
 
+import { InstanceTimeline, InstanceTimelineBar, InstanceTimelineRow, useTimelineHover } from "./InstanceTimeline.js"
 import { formatDuration, metadataSummary, sessionDuration } from "./socket-sessions.js"
 import type { SocketSession } from "./socket-sessions.js"
+
+export { timelineTicks } from "./InstanceTimeline.js"
 
 export interface SocketTimelineProps {
     sessions: SocketSession[]
@@ -28,131 +30,79 @@ interface Placed {
     unknownStart: boolean
 }
 
-const laneHeight = 18
-const lanePadding = 8
 const maxLanes = 40
-const minute = 60_000
-const hour = 60 * minute
-const day = 24 * hour
-const tickSteps = [
-    1_000,
-    2_000,
-    5_000,
-    10_000,
-    15_000,
-    30_000,
-    minute,
-    2 * minute,
-    5 * minute,
-    10 * minute,
-    15 * minute,
-    30 * minute,
-    hour,
-    2 * hour,
-    3 * hour,
-    6 * hour,
-    12 * hour,
-    day,
-    2 * day,
-    7 * day
-]
 
 export function SocketTimeline({ sessions, start, end, endLabel = "now", selected, onSelect }: SocketTimelineProps) {
-    const [hover, setHover] = useState<{ session: SocketSession; left: number; top: number; below: boolean }>()
+    const { hover, show, hide } = useTimelineHover<SocketSession>()
     const lanes = packLanes(sessions, start, end)
     const visible = lanes.slice(0, maxLanes)
-    const span = Math.max(1, end - start)
-    const ticks = timelineTicks(start, end)
-    const step = tickStep(span)
-    const position = (time: number) => `${((Math.min(Math.max(time, start), end) - start) / span) * 100}%`
-    const show = (session: SocketSession, target: HTMLElement) => {
-        const bar = target.getBoundingClientRect()
-        const frame = target.closest(".socket-timeline")!.getBoundingClientRect()
-        const below = bar.top - frame.top < 150
-        setHover({
-            session,
-            left: Math.min(Math.max(bar.left - frame.left + bar.width / 2, 120), frame.width - 120),
-            top: below ? bar.bottom - frame.top : bar.top - frame.top,
-            below
-        })
-    }
     return (
-        <div className="socket-timeline" role="group" aria-label="Connection timeline" onMouseLeave={() => setHover(undefined)}>
-            <div className="socket-timeline-axis" aria-hidden="true">
-                <span />
-                <div>
-                    {ticks.map(tick => (
-                        <span key={tick} style={{ left: position(tick) }}>
-                            {tickLabel(tick, step)}
-                        </span>
-                    ))}
-                    <span className="socket-timeline-now">{endLabel}</span>
-                </div>
-            </div>
-            <div className="socket-timeline-body">
-                <div className="socket-timeline-grid" aria-hidden="true">
-                    {ticks.map(tick => (
-                        <i key={tick} style={{ left: position(tick) }} />
-                    ))}
-                </div>
-                {visible.map(lane => (
-                    <div key={lane.key} className="socket-timeline-row">
-                        <div className="socket-timeline-label" title={`${lane.actorName} / ${lane.actorId}`}>
-                            <span>{lane.actorName}</span>
-                            <strong>{lane.actorId}</strong>
-                        </div>
-                        <div className="socket-timeline-lanes" style={{ height: lane.rows.length * laneHeight + lanePadding * 2 }}>
-                            {lane.rows.flatMap((row, index) =>
-                                row.map(placed => (
-                                    <button
-                                        key={placed.session.connectionId}
-                                        type="button"
-                                        className={`socket-bar socket-bar-${placed.session.status}${placed.openEnded ? " socket-bar-open-ended" : ""}${placed.unknownStart ? " socket-bar-unknown-start" : ""}`}
-                                        data-state={selected === placed.session ? "selected" : undefined}
-                                        style={{ left: position(placed.from), width: `${((placed.to - placed.from) / span) * 100}%`, top: lanePadding + index * laneHeight }}
-                                        aria-label={barLabel(placed.session, end)}
-                                        onClick={event => onSelect(placed.session, event.currentTarget)}
-                                        onMouseEnter={(event: ReactMouseEvent<HTMLElement>) => show(placed.session, event.currentTarget)}
-                                        onFocus={(event: ReactFocusEvent<HTMLElement>) => show(placed.session, event.currentTarget)}
-                                        onBlur={() => setHover(undefined)}
-                                    />
-                                ))
-                            )}
-                        </div>
-                    </div>
-                ))}
-                {lanes.length > maxLanes && (
+        <InstanceTimeline
+            start={start}
+            end={end}
+            endLabel={endLabel}
+            label="Connection timeline"
+            onMouseLeave={hide}
+            footer={
+                lanes.length > maxLanes && (
                     <p className="socket-timeline-more">
                         {(lanes.length - maxLanes).toLocaleString()} more {lanes.length - maxLanes === 1 ? "instance is" : "instances are"} listed in the table below.
                     </p>
-                )}
-            </div>
-            {hover && (
-                <div role="tooltip" className={`socket-tooltip${hover.below ? " socket-tooltip-below" : ""}`} style={{ left: hover.left, top: hover.top }}>
-                    <TooltipMetadata metadata={hover.session.metadata} />
-                    <dl>
-                        <dt>Connection</dt>
-                        <dd>{shortId(hover.session.connectionId)}</dd>
-                        <dt>Instance</dt>
-                        <dd>
-                            {hover.session.actorName} / {hover.session.actorId}
-                        </dd>
-                        <dt>Status</dt>
-                        <dd>{statusLabel(hover.session.status)}</dd>
-                        <dt>Opened</dt>
-                        <dd>
-                            {hover.session.openedAtMs === null
-                                ? "Before retained history"
-                                : `${hover.session.estimatedStart ? "≈ " : ""}${new Date(hover.session.openedAtMs).toLocaleTimeString([], { hour12: false })}`}
-                        </dd>
-                        <dt>Duration</dt>
-                        <dd>{durationLabel(hover.session, end)}</dd>
-                        <dt>Messages</dt>
-                        <dd>{hover.session.messages.toLocaleString()}</dd>
-                    </dl>
-                </div>
-            )}
-        </div>
+                )
+            }
+            overlay={
+                hover && (
+                    <div role="tooltip" className={`socket-tooltip${hover.below ? " socket-tooltip-below" : ""}`} style={{ left: hover.left, top: hover.top }}>
+                        <TooltipMetadata metadata={hover.item.metadata} />
+                        <dl>
+                            <dt>Connection</dt>
+                            <dd>{shortId(hover.item.connectionId)}</dd>
+                            <dt>Instance</dt>
+                            <dd>
+                                {hover.item.actorName} / {hover.item.actorId}
+                            </dd>
+                            <dt>Status</dt>
+                            <dd>{statusLabel(hover.item.status)}</dd>
+                            <dt>Opened</dt>
+                            <dd>
+                                {hover.item.openedAtMs === null
+                                    ? "Before retained history"
+                                    : `${hover.item.estimatedStart ? "≈ " : ""}${new Date(hover.item.openedAtMs).toLocaleTimeString([], { hour12: false })}`}
+                            </dd>
+                            <dt>Duration</dt>
+                            <dd>{durationLabel(hover.item, end)}</dd>
+                            <dt>Messages</dt>
+                            <dd>{hover.item.messages.toLocaleString()}</dd>
+                        </dl>
+                    </div>
+                )
+            }
+        >
+            {scale =>
+                visible.map(lane => (
+                    <InstanceTimelineRow key={lane.key} actorName={lane.actorName} actorId={lane.actorId} tracks={lane.rows.length}>
+                        {lane.rows.flatMap((row, index) =>
+                            row.map(placed => (
+                                <InstanceTimelineBar
+                                    key={placed.session.connectionId}
+                                    scale={scale}
+                                    from={placed.from}
+                                    to={placed.to}
+                                    track={index}
+                                    className={`socket-bar-${placed.session.status}${placed.openEnded ? " socket-bar-open-ended" : ""}${placed.unknownStart ? " socket-bar-unknown-start" : ""}`}
+                                    data-state={selected === placed.session ? "selected" : undefined}
+                                    aria-label={barLabel(placed.session, end)}
+                                    onClick={event => onSelect(placed.session, event.currentTarget)}
+                                    onMouseEnter={(event: ReactMouseEvent<HTMLElement>) => show(placed.session, event.currentTarget)}
+                                    onFocus={(event: ReactFocusEvent<HTMLElement>) => show(placed.session, event.currentTarget)}
+                                    onBlur={hide}
+                                />
+                            ))
+                        )}
+                    </InstanceTimelineRow>
+                ))
+            }
+        </InstanceTimeline>
     )
 }
 
@@ -184,7 +134,7 @@ export function packLanes(sessions: SocketSession[], start: number, end: number)
         .filter(item => item.to > start)
         .sort((a, b) => a.from - b.from || a.to - b.to)
     for (const item of placed) {
-        const key = `${item.session.actorName} ${item.session.actorId}`
+        const key = `${item.session.actorName}\u0000${item.session.actorId}`
         const lane = lanes.get(key) ?? { key, actorName: item.session.actorName, actorId: item.session.actorId, rows: [] }
         lanes.set(key, lane)
         const row = lane.rows.find(row => row.at(-1)!.to + minimumGap(start, end) <= item.from)
@@ -212,24 +162,6 @@ function minimumGap(start: number, end: number) {
 
 function latest(lane: Lane) {
     return Math.max(...lane.rows.flat().map(item => item.to))
-}
-
-export function timelineTicks(start: number, end: number): number[] {
-    const step = tickStep(Math.max(1, end - start))
-    const ticks: number[] = []
-    for (let tick = Math.floor(start / step) * step + step; tick < end - step * 0.35; tick += step) ticks.push(tick)
-    return ticks
-}
-
-function tickStep(span: number) {
-    return tickSteps.find(step => span / step <= 9) ?? tickSteps.at(-1)!
-}
-
-function tickLabel(tick: number, step: number) {
-    const date = new Date(tick)
-    if (step >= day) return date.toLocaleDateString([], { month: "short", day: "numeric" })
-    if (step >= minute) return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false })
-    return date.toLocaleTimeString([], { hour12: false })
 }
 
 export function statusLabel(status: SocketSession["status"]) {

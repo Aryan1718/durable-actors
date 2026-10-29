@@ -72,7 +72,7 @@ Hosted control planes enable per-project limits by default; local development re
 | `DURABLE_ACTORS_PROJECT_ACTOR_STARTS_PER_SECOND` | `50` | Sustained start rate, including waking dormant actors. |
 | `DURABLE_ACTORS_PROJECT_ACTOR_START_BURST` | `100` | Start-token capacity, initially full. |
 
-Positive integer limits also map to the Helm chart's `projectLimits` values. Each invocation, WebSocket, or alarm that starts a sandbox consumes one start token and active slot; warm deliveries consume neither. A confirmed lifecycle stop releases its slot. Rejections return `429` with `actor_quota_exceeded` or `actor_start_rate_limited`; rate rejections include `Retry-After`. Backend failures block new starts with `503`.
+Positive integer limits also map to the Helm chart's `projectLimits` values. Each invocation, WebSocket, or alarm that starts a sandbox consumes one start token and active slot; warm deliveries consume neither. A confirmed lifecycle stop releases its slot; a slot also expires 35 seconds after its host's last report, or 3 minutes after launch if the host never reports. Rejections return `429` with `actor_quota_exceeded` or `actor_start_rate_limited`; rate rejections include `Retry-After`. Backend failures block new starts with `503`.
 
 Operators can override hosted defaults directly in PostgreSQL without restarting:
 

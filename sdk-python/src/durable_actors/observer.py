@@ -24,6 +24,7 @@ from .client import Client
 
 RESOURCES = {
     "actors",
+    "residency",
     "events",
     "requests/events",
     "state",

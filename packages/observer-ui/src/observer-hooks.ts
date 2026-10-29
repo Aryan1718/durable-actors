@@ -2,12 +2,16 @@ import { useEffect, useState } from "react"
 
 import type { ActorInventory, ObserverClient, RequestTracePage } from "./client.js"
 
-export function useInventory(client: ObserverClient) {
+export function useInventory(client: Partial<Pick<ObserverClient, "listActors" | "watchActors">>, enabled = true) {
     const [attempt, setAttempt] = useState(0)
-    const [snapshot, setSnapshot] = useState<{ client: ObserverClient; inventory: ActorInventory; updatedAt: number }>()
+    const [snapshot, setSnapshot] = useState<{ client: typeof client; inventory: ActorInventory; updatedAt: number }>()
     const [loading, setLoading] = useState(true)
     const [failed, setFailed] = useState(false)
     useEffect(() => {
+        if (!enabled || (!client.listActors && !client.watchActors)) {
+            setLoading(false)
+            return
+        }
         const controller = new AbortController()
         let timer: ReturnType<typeof setTimeout> | undefined
         let retryDelay = 1_000
@@ -32,7 +36,7 @@ export function useInventory(client: ObserverClient) {
                     if (!controller.signal.aborted) throw new Error("Stream ended")
                 } else {
                     setLoading(true)
-                    receive(await client.listActors(controller.signal))
+                    receive(await client.listActors!(controller.signal))
                 }
             } catch {
                 if (!controller.signal.aborted) setFailed(true)
@@ -44,7 +48,7 @@ export function useInventory(client: ObserverClient) {
                 }
             }
         }
-    }, [client, attempt])
+    }, [client, attempt, enabled])
     return {
         updatedAt: snapshot?.client === client ? snapshot.updatedAt : undefined,
         inventory: snapshot?.client === client ? snapshot.inventory : undefined,

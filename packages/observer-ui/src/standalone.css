@@ -322,54 +322,17 @@ main {
     justify-content: space-between;
     align-items: center;
     gap: 16px;
-    margin-bottom: 16px;
+    margin-bottom: 8px;
 }
 .overview-section-heading h2 {
     font-size: 15px;
     font-weight: 550;
-}
-.overview-section-heading h2 > span {
-    font: 11px var(--console-mono);
-    color: var(--muted-foreground);
-    margin-left: 4px;
 }
 .overview-panel {
     background: var(--card);
     border: 1px solid var(--border);
     border-radius: 7px;
     overflow: hidden;
-}
-.overview-filterbar {
-    padding: 12px 16px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-    border-bottom: 1px solid var(--border);
-}
-.overview-search {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-    width: 290px;
-}
-.overview-search > svg {
-    width: 14px;
-    height: 14px;
-    color: var(--muted-foreground);
-    flex-shrink: 0;
-}
-.overview-search input {
-    border: 0;
-    background: none;
-    box-shadow: none;
-    font-size: 12px;
-    padding: 0 3px;
-    height: 28px;
-}
-.overview-filterbar > input {
-    max-width: 390px;
 }
 .overview-table-scroll {
     overflow-x: auto;
@@ -382,9 +345,6 @@ main {
     text-align: right;
     font-size: 12px;
     font-variant-numeric: tabular-nums;
-}
-.overview-class-column {
-    width: 24%;
 }
 .overview-table th,
 .overview-table td {
@@ -408,20 +368,6 @@ main {
 .overview-table td:nth-child(7) {
     border-left: 1px solid var(--border);
 }
-.overview-table .overview-groups th {
-    padding: 12px 12px 3px;
-    border-bottom: 0;
-    text-align: left;
-    font: 9px var(--console-mono);
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-}
-.overview-table .overview-groups th + th {
-    border-left: 1px solid var(--border);
-}
-.overview-table .overview-groups + tr th {
-    padding-top: 6px;
-}
 .overview-table tbody td {
     height: 56px;
     padding-top: 5px;
@@ -436,26 +382,6 @@ main {
 }
 .overview-table tr:last-child td {
     border-bottom: 0;
-}
-.overview-class-link {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 24px;
-    border: 0;
-    background: none;
-    padding: 3px 0;
-    width: 100%;
-    font: 12px var(--console-mono);
-    text-align: left;
-}
-.overview-class-link > span {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.overview-class-link:hover {
-    color: var(--success);
 }
 .overview-signal {
     display: inline-flex;
@@ -475,53 +401,6 @@ main {
 .signal-bad {
     color: var(--danger);
     background: color-mix(in srgb, var(--danger) 10%, var(--card));
-}
-.overview-thresholds {
-    position: relative;
-    color: var(--muted-foreground);
-    font-size: 11px;
-}
-.overview-thresholds summary {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 6px 0;
-    list-style: none;
-}
-.overview-thresholds summary::-webkit-details-marker {
-    display: none;
-}
-.threshold-dots {
-    display: flex;
-    gap: 4px;
-}
-.threshold-dots i {
-    display: block;
-    width: 6px;
-    height: 6px;
-    border-radius: 50%;
-    background: var(--success);
-}
-.threshold-dots i:nth-child(2) {
-    background: var(--warning);
-}
-.threshold-dots i:nth-child(3) {
-    background: var(--danger);
-}
-.overview-thresholds > div {
-    position: absolute;
-    right: 0;
-    top: 34px;
-    width: min(320px, calc(100vw - 40px));
-    z-index: 2;
-    padding: 18px;
-    background: var(--card);
-    border: 1px solid var(--border);
-    border-radius: 7px;
-}
-.overview-thresholds p {
-    font-size: 12px;
-    margin-top: 10px;
 }
 .overview-empty {
     text-align: center;
@@ -591,188 +470,6 @@ main {
     height: 33px;
     padding: 0 12px;
     font-size: 11px;
-}
-.socket-timeline-panel {
-    margin-bottom: 14px;
-    overflow: visible;
-}
-.socket-panel-heading {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    flex-wrap: wrap;
-    gap: 12px;
-    padding: 14px 18px;
-    border-bottom: 1px solid var(--border);
-}
-.socket-panel-heading h2 {
-    font-size: 13px;
-    font-weight: 550;
-}
-.socket-panel-heading h2 > span {
-    font: 11px var(--console-mono);
-    color: var(--muted-foreground);
-    margin-left: 6px;
-}
-.socket-legend {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 18px;
-    margin: 0;
-    padding: 0;
-    list-style: none;
-    font-size: 11px;
-    color: var(--muted-foreground);
-}
-.socket-legend li {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-}
-.socket-swatch {
-    display: inline-block;
-    width: 10px;
-    height: 10px;
-    border-radius: 3px;
-    background: var(--socket-closed);
-    flex-shrink: 0;
-}
-.socket-swatch-open {
-    background: var(--socket-open);
-}
-.socket-swatch-lost {
-    background: var(--socket-lost);
-    background-image: repeating-linear-gradient(135deg, transparent 0 2px, var(--card) 2px 3px);
-}
-.socket-timeline {
-    position: relative;
-    padding: 0 18px 14px;
-    font-size: 11px;
-}
-.socket-timeline-axis,
-.socket-timeline-row {
-    display: grid;
-    grid-template-columns: 200px minmax(0, 1fr);
-    gap: 16px;
-}
-.socket-timeline-axis {
-    height: 34px;
-    color: var(--muted-foreground);
-    font: 10px var(--console-mono);
-}
-.socket-timeline-axis > div {
-    position: relative;
-    border-bottom: 1px solid var(--border);
-}
-.socket-timeline-axis > div > span {
-    position: absolute;
-    bottom: 8px;
-    transform: translateX(-50%);
-    white-space: nowrap;
-}
-.socket-timeline-axis .socket-timeline-now {
-    right: 0;
-    left: auto;
-    transform: none;
-    color: var(--foreground);
-}
-.socket-timeline-body {
-    position: relative;
-    max-height: 420px;
-    overflow: hidden auto;
-}
-.socket-timeline-grid {
-    position: absolute;
-    inset: 0 0 0 216px;
-    pointer-events: none;
-}
-.socket-timeline-grid i {
-    position: absolute;
-    top: 0;
-    bottom: 0;
-    width: 1px;
-    background: var(--border);
-}
-.socket-timeline-row + .socket-timeline-row {
-    border-top: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
-}
-.socket-timeline-label {
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-    gap: 2px;
-    min-width: 0;
-    padding: 6px 0;
-    font-family: var(--console-mono);
-    color: var(--muted-foreground);
-}
-.socket-timeline-label span,
-.socket-timeline-label strong {
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-}
-.socket-timeline-label strong {
-    font-weight: 500;
-    color: var(--foreground);
-}
-.socket-timeline-lanes {
-    position: relative;
-    border-right: 1px solid var(--foreground);
-    min-height: 34px;
-}
-.socket-bar {
-    position: absolute;
-    height: 12px;
-    min-width: 6px;
-    padding: 0;
-    border: 0;
-    border-radius: 4px;
-    background: var(--socket-closed);
-    box-shadow: 0 0 0 2px var(--card);
-    cursor: pointer;
-}
-.socket-bar-open {
-    background: var(--socket-open);
-    border-start-end-radius: 0;
-    border-end-end-radius: 0;
-}
-.socket-bar-lost,
-.socket-bar-unknown {
-    background: var(--socket-lost);
-    background-image: repeating-linear-gradient(135deg, transparent 0 3px, var(--card) 3px 4px);
-}
-.socket-bar-unknown-start {
-    border-start-start-radius: 0;
-    border-end-start-radius: 0;
-    mask-image: linear-gradient(90deg, transparent, #000 14px);
-}
-.socket-bar-open::after {
-    content: "";
-    position: absolute;
-    top: 50%;
-    right: 2px;
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    background: var(--card);
-    border: 2px solid var(--socket-open);
-    transform: translateY(-50%);
-    animation: socket-pulse 1.6s ease-in-out infinite alternate;
-}
-.socket-bar:hover,
-.socket-bar:focus-visible,
-.socket-bar[data-state="selected"] {
-    filter: brightness(1.15);
-    outline: 2px solid var(--ring);
-    outline-offset: 2px;
-}
-.socket-timeline-more {
-    padding: 10px 0 4px 216px;
-    font-size: 11px;
-}
-.socket-timeline-empty {
-    padding: 36px 20px;
 }
 .socket-tooltip {
     position: absolute;
@@ -1028,7 +725,6 @@ main {
     .overview-updated {
         flex-basis: 100%;
     }
-    .overview-filterbar,
     .socket-filterbar {
         flex-wrap: wrap;
         gap: 10px;
@@ -1036,33 +732,12 @@ main {
     .socket-metrics {
         grid-template-columns: 1fr;
     }
-    .socket-timeline-axis,
-    .socket-timeline-row {
-        grid-template-columns: 120px minmax(0, 1fr);
-        gap: 10px;
-    }
-    .socket-timeline-grid {
-        inset-inline-start: 130px;
-    }
-    .socket-timeline-more {
-        padding-left: 130px;
-    }
-    .overview-search {
-        width: 100%;
-    }
     .overview select,
     .overview input,
     .overview-controls > button:not(.overview-range),
     .theme-toggle,
-    .overview-class-link,
-    .overview-thresholds summary {
+    .overview-actor-list button {
         min-height: 44px;
-    }
-    .overview-class-link {
-        min-width: 140px;
-    }
-    .overview-thresholds > div {
-        top: 46px;
     }
     .overview-table th,
     .overview-table td {

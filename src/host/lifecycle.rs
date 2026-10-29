@@ -17,7 +17,7 @@ use crate::{
 
 use super::actor_host::ActorStatus;
 
-const REPORT_TIMEOUT: Duration = Duration::from_secs(1);
+const REPORT_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[async_trait]
 pub(super) trait LifecycleTransport: Send + Sync {
@@ -57,6 +57,7 @@ impl HostLifecycle {
                 occurred_at_ms: 0,
                 resources,
                 resident: None,
+                last_active_at_ms: None,
                 waiting: Vec::new(),
             },
         };
@@ -70,7 +71,7 @@ impl HostLifecycle {
 
     pub(super) async fn stop(mut self) {
         let _ = self.commands.try_send(LifecycleKind::Stopped);
-        let _ = tokio::time::timeout(Duration::from_secs(3), &mut self.task).await;
+        let _ = tokio::time::timeout(REPORT_TIMEOUT + Duration::from_secs(1), &mut self.task).await;
     }
 }
 
@@ -89,6 +90,7 @@ struct Reporter {
 
 impl Reporter {
     async fn run(mut self, mut commands: mpsc::Receiver<LifecycleKind>) {
+        let mut residency = self.executor.residency_changes();
         self.send(LifecycleKind::Started).await;
         let mut interval = tokio::time::interval_at(
             tokio::time::Instant::now() + HEARTBEAT_INTERVAL,
@@ -96,11 +98,20 @@ impl Reporter {
         );
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         let mut draining = false;
+        let mut status_open = true;
         loop {
             let kind = tokio::select! {
                 biased;
                 command = commands.recv() => match command { Some(kind) => kind, None => break },
                 _ = interval.tick(), if !draining => LifecycleKind::Heartbeat,
+                changed = self.status.changed(), if !draining && status_open => {
+                    if changed.is_err() { status_open = false; continue; }
+                    LifecycleKind::Heartbeat
+                },
+                changed = residency_changed(&mut residency), if !draining => {
+                    if changed.is_err() { residency = None; continue; }
+                    LifecycleKind::Heartbeat
+                },
             };
             self.send(kind).await;
             if kind == LifecycleKind::Stopped {
@@ -118,7 +129,9 @@ impl Reporter {
         self.report.sequence += 1;
         self.report.occurred_at_ms = now;
         self.report.resident = self.executor.resident();
-        self.report.waiting = self.status.borrow().waiting.clone();
+        let status = self.status.borrow_and_update().clone();
+        self.report.waiting = status.waiting;
+        self.report.last_active_at_ms = status.last_active_at_ms;
         if kind == LifecycleKind::Stopped {
             self.report.resident = Some(false);
             self.report.waiting.clear();
@@ -131,6 +144,15 @@ impl Reporter {
         {
             tracing::warn!(?kind, %error, "host lifecycle report failed");
         }
+    }
+}
+
+async fn residency_changed(
+    changes: &mut Option<watch::Receiver<()>>,
+) -> Result<(), watch::error::RecvError> {
+    match changes {
+        Some(changes) => changes.changed().await,
+        None => std::future::pending().await,
     }
 }
 
