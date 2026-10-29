@@ -118,7 +118,7 @@ function historyPage(records = page.records, nextCursor?: string): RequestTraceP
     return { ...page, cursor: 200, records, nextCursor }
 }
 
-test("saved history sends typed filters and loads older pages without mixing live rows", async () => {
+test("saved history opens by default and loads every page without mixing live rows", async () => {
     const queries: RequestHistoryQuery[] = []
     const client = {
         watchRequests: async (receive: (page: RequestTracePage) => void, signal: AbortSignal) => {
@@ -136,12 +136,9 @@ test("saved history sends typed filters and loads older pages without mixing liv
         }
     }
     const view = render(<RequestObserver client={client} />)
-    await view.findByText("post")
-    fireEvent.click(view.getByRole("button", { name: "History" }))
     await view.findByText("saved call 0")
     assert.equal(view.queryByRole("button", { name: /Inspect post request/ }), null)
     assert.ok(within(view.getByRole("group", { name: /post method calls/ })).getByText("0 calls"))
-    fireEvent.click(view.getByRole("button", { name: "Load older" }))
     await view.findByText("older call")
     assert.ok(view.getByText("saved call 0"))
     assert.ok(queries[0]!.fromMs! >= Date.now() - 62 * 60_000 && queries[0]!.fromMs! <= Date.now() - 60 * 60_000)
@@ -228,19 +225,21 @@ test("instance requests filter both class and ID in live and saved history", asy
         }
     }
     const view = render(<RequestObserver client={client} actor={{ actorName: "Room", actorId: "lobby" }} />)
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
     fireEvent.click(view.getByRole("button", { name: "Table" }))
     await view.findByText("post")
     assert.equal(view.queryByText("wrong class"), null)
     assert.equal(view.queryByText("wrong instance"), null)
     fireEvent.click(view.getByRole("button", { name: "History" }))
     await view.findByRole("table", { name: "Saved requests" })
-    assert.equal(queries[0]!.actorName, "Room")
-    assert.equal(queries[0]!.actorId, "lobby")
+    assert.equal(queries.at(-1)!.actorName, "Room")
+    assert.equal(queries.at(-1)!.actorId, "lobby")
     assert.equal(view.queryByLabelText("Actor ID"), null)
     fireEvent.click(view.getByRole("button", { name: "Time range: Last hour" }))
+    const previous = queries.length
     fireEvent.click(view.getByRole("button", { name: "All retained" }))
-    await waitFor(() => assert.equal(queries.length, 2))
-    assert.equal(queries[1]!.fromMs, undefined, "all retained history drops the time bound")
+    await waitFor(() => assert.equal(queries.length, previous + 1))
+    assert.equal(queries.at(-1)!.fromMs, undefined, "all retained history drops the time bound")
 })
 
 test("request inspection keeps table rows intact and opens a separate details drawer", async () => {
@@ -264,4 +263,40 @@ test("request inspection keeps table rows intact and opens a separate details dr
     assert.ok(view.getByText("request-one"))
     fireEvent.click(view.getByRole("button", { name: "Close" }))
     assert.equal(view.queryByRole("dialog"), null)
+})
+
+test("a time range automatically includes onConnect and onDisconnect across more than a thousand events", async () => {
+    const queries: RequestHistoryQuery[] = []
+    const records = Array.from({ length: 1502 }, (_, i) => ({
+        ...page.records[0]!,
+        eventId: `event-${i}`,
+        sequence: 1502 - i,
+        operation: i === 0 ? "onDisconnect" : i === 1501 ? "onConnect" : "onMessage",
+        kind: "websocket" as const,
+        connectionId: "socket-one",
+        startedAtMs: 3000 - i
+    }))
+    const client = {
+        listRequests: async (query: RequestHistoryQuery) => {
+            queries.push(query)
+            const offset = Number(query.cursor ?? 0)
+            const end = Math.min(offset + 500, records.length)
+            return { ...historyPage(records.slice(offset, end), end < records.length ? String(end) : undefined), cursor: 1502 }
+        }
+    }
+    const view = render(<RequestObserver client={client} actor={{ actorName: "Room", actorId: "lobby" }} timeRange={{ kind: "absolute", fromMs: 1000, toMs: 3000 }} />)
+    await waitFor(() => assert.equal(view.container.querySelectorAll(".request-waterfall-bar").length, 1502))
+    assert.ok(view.getByRole("button", { name: /Inspect onConnect request/ }))
+    assert.ok(view.getByRole("button", { name: /Inspect onDisconnect request/ }))
+    assert.equal(view.queryByRole("button", { name: "Load older" }), null)
+    assert.deepEqual(
+        queries.map(query => query.cursor),
+        [undefined, "500", "1000", "1500"]
+    )
+    for (const query of queries) {
+        assert.equal(query.actorName, "Room")
+        assert.equal(query.actorId, "lobby")
+        assert.equal(query.fromMs, 1000)
+        assert.equal(query.toMs, 3000)
+    }
 })

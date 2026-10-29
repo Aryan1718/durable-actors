@@ -113,6 +113,7 @@ test("a state attribution link opens the corresponding request history", async (
 test("switching instance views preserves request inspection controls", async () => {
     const view = await inspect()
     await view.findByRole("group", { name: "Invocation waterfall" })
+    fireEvent.click(view.getByRole("button", { name: "Live" }))
     fireEvent.click(view.getByRole("button", { name: "Pause" }))
     fireEvent.click(view.getByRole("button", { name: "Table" }))
     const controls = within(view.getByRole("group", { name: "Instance view" }))

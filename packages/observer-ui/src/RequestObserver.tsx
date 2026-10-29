@@ -46,12 +46,12 @@ function RequestObserver({ client, actor, inventory: providedInventory, timeRang
     const trigger = useRef<HTMLButtonElement | null>(null)
     const Heading = actor ? "h3" : "h1"
     const shown = query ? history.page : (frozen ?? page)
-    const statusPage = page ?? history.page
+    const statusPage = query ? history.page : page
     const records = (shown?.records ?? []).filter(record => !actor || (record.actorName === actor.actorName && record.actorId === actor.actorId))
     const lanes = requestTimelineLanes(providedInventory ?? inventory, [...((frozen ?? page)?.records ?? []), ...(query ? records : [])], actor)
     useEffect(() => {
         setFrozen(undefined)
-        setQuery(undefined)
+        setQuery(client.listRequests ? {} : undefined)
     }, [client, actor?.actorName, actor?.actorId])
     useEffect(() => {
         if (focus) setQuery(focus)
@@ -62,7 +62,7 @@ function RequestObserver({ client, actor, inventory: providedInventory, timeRang
             {(query?.requestId || query?.connectionId) && (
                 <p>
                     Showing {query.requestId ? `request ${query.requestId}` : `connection ${query?.connectionId}`}{" "}
-                    <Button variant="link" onClick={() => setQuery(undefined)}>
+                    <Button variant="link" onClick={() => setQuery({})}>
                         Clear filter
                     </Button>
                 </p>
@@ -125,7 +125,7 @@ function RequestObserver({ client, actor, inventory: providedInventory, timeRang
             {query && <HistoryFilters query={query} range={range} onRangeChange={setRange} loading={history.loading} onSearch={setQuery} scoped={!!actor} />}
             {query && history.failed && (
                 <div className="la-observer-error" role="alert">
-                    Request history unavailable.{" "}
+                    {history.page ? "Request history is incomplete. Some events could not be loaded." : "Request history unavailable."}{" "}
                     <Button variant="outline" onClick={history.retry}>
                         Retry history
                     </Button>
@@ -246,11 +246,12 @@ function RequestObserver({ client, actor, inventory: providedInventory, timeRang
                     </div>
                 )}
             </div>
-            {query && shown?.nextCursor && (
-                <Button className="la-request-load-older" variant="outline" disabled={history.loading} onClick={history.loadOlder}>
-                    {history.loading ? "Loading…" : "Load older"}
-                </Button>
+            {query && shown && (
+                <p className="la-request-note" role="status">
+                    {records.length.toLocaleString()} events loaded{history.loading ? "; loading more…" : history.failed ? "; history is incomplete." : " in this range."}
+                </p>
             )}
+            {!query && client.listRequests && <p className="la-request-note">Live shows the latest {shown?.capacity ?? 500} events. Use History to load every retained event in a time range.</p>}
             {!query && !!shown?.evicted && <p className="la-request-note">{shown.evicted.toLocaleString()} older records have left this history window.</p>}
             <Drawer
                 direction="right"
