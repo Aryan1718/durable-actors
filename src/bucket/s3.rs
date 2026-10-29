@@ -22,6 +22,13 @@ use aws_sdk_s3::{
 };
 use std::{future::Future, time::Duration};
 
+/// Stops AWS clients in actor code from reading the node's instance credentials.
+pub(crate) const EXECUTOR_ENVIRONMENT: &[(&str, &str)] = &[("AWS_EC2_METADATA_DISABLED", "true")];
+
+pub(crate) fn is_credential_variable(name: &str) -> bool {
+    name.starts_with("AWS_") || matches!(name, "BOTO_CONFIG" | "BOTO_PATH")
+}
+
 const MULTIPART_PART_SIZE: usize = 5 * 1024 * 1024;
 const MAX_MULTIPART_PARTS: usize = 10_000;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);

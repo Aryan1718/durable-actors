@@ -21,6 +21,10 @@ pub(crate) use bundle::GcsBundle;
 
 use super::{Bucket, BucketObject, StorageRevision};
 
+pub(crate) fn is_credential_variable(name: &str) -> bool {
+    name == "GOOGLE_APPLICATION_CREDENTIALS"
+}
+
 pub struct GcsBucket {
     bucket: String,
     clients: GcsClients,

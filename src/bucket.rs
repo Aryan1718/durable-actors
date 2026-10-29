@@ -85,6 +85,17 @@ pub(crate) async fn replace(
     }
 }
 
+/// Whether a cloud client reads host credentials from this environment variable; actor code must
+/// not inherit it.
+pub(crate) fn is_credential_variable(name: &str) -> bool {
+    gcs::is_credential_variable(name) || s3::is_credential_variable(name)
+}
+
+/// Variables set for actor code so its cloud clients cannot fall back to the node's credentials.
+pub(crate) fn executor_environment() -> impl Iterator<Item = (&'static str, &'static str)> {
+    s3::EXECUTOR_ENVIRONMENT.iter().copied()
+}
+
 #[cfg(test)]
 #[path = "../tests/support/bucket.rs"]
 pub(crate) mod testing;

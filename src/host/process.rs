@@ -659,18 +659,15 @@ fn configure_executor_environment(
         .env_clear()
         .envs(inherited.into_iter().filter(|(name, _)| {
             let name = name.to_string_lossy().to_ascii_uppercase();
-            !name.starts_with("AWS_")
+            !crate::bucket::is_credential_variable(&name)
                 && !matches!(
                     name.as_str(),
-                    "BOTO_CONFIG"
-                        | "BOTO_PATH"
-                        | "GOOGLE_APPLICATION_CREDENTIALS"
-                        | "DURABLE_ACTORS_SPARE_TOKEN"
+                    "DURABLE_ACTORS_SPARE_TOKEN"
                         | "DURABLE_ACTORS_RUNTIME_CONFIG"
                         | "DURABLE_ACTORS_HOST_TOKEN"
                 )
         }))
-        .env("AWS_EC2_METADATA_DISABLED", "true");
+        .envs(crate::bucket::executor_environment());
 }
 
 #[cfg(test)]

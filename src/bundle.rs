@@ -33,10 +33,11 @@ impl ArtifactBundle {
     }
 
     pub fn decode(encoded: &str) -> Result<Self> {
-        if encoded.starts_with("gcs:") {
-            return Ok(Self::Gcs(GcsBundle::decode(encoded)?));
+        match encoded.split_once(':').map(|(provider, _)| provider) {
+            Some("gcs") => Ok(Self::Gcs(GcsBundle::decode(encoded)?)),
+            Some("s3") => Ok(Self::S3(S3Bundle::decode(encoded)?)),
+            _ => anyhow::bail!("unknown code artifact provider"),
         }
-        Ok(Self::S3(S3Bundle::decode(encoded)?))
     }
 
     pub fn entrypoint(&self) -> Result<&str> {
