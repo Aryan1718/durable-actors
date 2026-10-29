@@ -112,8 +112,11 @@
     "networkPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "properties": {"dnsCidrs": {"type": "array", "items": {"type": "string", "minLength": 1}}},
-      "required": ["dnsCidrs"]
+      "properties": {
+        "dnsCidrs": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "ipFamily": {"enum": ["IPv4", "IPv6"]}
+      },
+      "required": ["dnsCidrs", "ipFamily"]
     }
   },
   "required": [

@@ -41,10 +41,14 @@ spec:
         - {protocol: UDP, port: 53}
         - {protocol: TCP, port: 53}
     {{- end }}
+    # EKS clusters are single-stack, and the VPC CNI cannot apply rules for the other IP family.
     - to:
-        - ipBlock:
-            cidr: 0.0.0.0/0
-            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8, 100.64.0.0/10]
+        {{- if eq .Values.networkPolicy.ipFamily "IPv6" }}
         - ipBlock:
             cidr: ::/0
             except: ["::1/128", "fc00::/7", "fe80::/10"]
+        {{- else }}
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except: [10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.0.0/16, 127.0.0.0/8, 100.64.0.0/10]
+        {{- end }}

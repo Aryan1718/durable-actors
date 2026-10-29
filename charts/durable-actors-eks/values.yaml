@@ -56,3 +56,5 @@ sandboxNamespace: ""
 nodeSelector: {}
 networkPolicy:
   dnsCidrs: []
+  # The cluster's IP family: IPv4 or IPv6.
+  ipFamily: IPv4

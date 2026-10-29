@@ -43,7 +43,7 @@ test("writes S3 Express logs and archives them in the S3 bucket", () => {
     assert.ok(output.includes("logs--use2-az1--x-s3"))
 })
 
-test("runs one pool manager that reaps finished pods without building spares", () => {
+test("runs one pool manager with spares off by default", () => {
     const output = manifests()
     assert.match(output, /name: actors-durable-actors-pool-manager\n/)
     assert.match(output, /DURABLE_ACTORS_PROCESS_ROLE, value: pool_manager/)
@@ -56,7 +56,11 @@ test("isolates sandboxes in a release-specific namespace with constrained creden
     assert.match(output, /automountServiceAccountToken: false/)
     assert.match(output, /kind: NetworkPolicy/)
     assert.match(output, /169\.254\.0\.0\/16/)
+    assert.doesNotMatch(output, /cidr: ::\/0/)
     assert.match(output, /runAsNonRoot: true/)
+    const ipv6 = manifests({ networkPolicy: { ipFamily: "IPv6" } })
+    assert.match(ipv6, /cidr: ::\/0/)
+    assert.doesNotMatch(ipv6, /cidr: 0\.0\.0\.0\/0/)
 })
 
 for (const [name, overrides] of [
