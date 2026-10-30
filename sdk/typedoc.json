@@ -1,6 +1,6 @@
 {
     "$schema": "https://typedoc.org/schema.json",
-    "entryPoints": ["src/index.ts", "src/backend.ts", "src/proxy.ts", "src/localRuntime.ts"],
+    "entryPoints": ["src/index.ts", "src/backend.ts", "src/proxy.ts", "src/drizzle.ts", "src/localRuntime.ts"],
     "tsconfig": "tsconfig.build.json",
     "name": "durable-actors",
     "plugin": ["typedoc-plugin-missing-exports"],

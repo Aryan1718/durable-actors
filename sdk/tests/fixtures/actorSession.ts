@@ -1,4 +1,4 @@
-import { Actor, Atomic, Persisted } from "durable-actors"
+import { Actor, Persisted } from "durable-actors"
 
 class SessionCounter extends Actor {
     @Persisted private count = 0
@@ -8,9 +8,10 @@ class SessionCounter extends Actor {
         return this.count
     }
 
-    @Atomic
     async incrementAtomic(): Promise<number> {
-        return this.incrementTwice()
+        return this.db.transaction(async () => {
+            return this.incrementTwice()
+        })
     }
 
     async incrementTwice(): Promise<number> {
@@ -24,9 +25,10 @@ class SessionCounter extends Actor {
         throw new Error("failed after write")
     }
 
-    @Atomic
     async failAtomic(): Promise<void> {
-        return this.failAfterWrite()
+        return this.db.transaction(async () => {
+            return this.failAfterWrite()
+        })
     }
 
     async read(): Promise<number> {

@@ -64,6 +64,9 @@ class DatabaseProxy:
     async def replace_fields(self, fields: Document) -> None:
         await self.call({"op": "replace_fields", "fields": fields})
 
+    async def begin(self) -> None:
+        await self.call({"op": "exec", "sql": "BEGIN", "bindings": [], "immediate": False})
+
     async def commit(self) -> None:
         try:
             await self.call({"op": "commit"})

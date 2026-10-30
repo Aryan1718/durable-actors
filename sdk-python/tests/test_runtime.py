@@ -192,7 +192,7 @@ async def test_a_pending_sql_statement_does_not_block_other_completions():
 
     class ContendedDatabase(HostDatabase):
         async def call(self, call):
-            if call["op"] == "exec":
+            if call["op"] == "exec" and call["sql"].startswith("CREATE TABLE"):
                 entered.set()
                 await release.wait()
             if call["op"] == "replace_fields":

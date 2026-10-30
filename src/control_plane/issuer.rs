@@ -201,7 +201,7 @@ impl ActorJwtIssuer {
 
     pub(crate) fn issue_host(
         &self,
-        organization_id: Option<&str>,
+        organization_id: &str,
         host_id: &HostId,
         session_id: &str,
         host_config_key: &str,
@@ -213,7 +213,7 @@ impl ActorJwtIssuer {
         let expires_at_ms =
             now_ms.saturating_add(duration_millis(self.max_lifetime.min(HOST_TOKEN_TTL))?);
         self.issue(ActorJwtClaims {
-            organization_id: organization_id.map(str::to_owned),
+            organization_id: Some(organization_id.to_owned()),
             iss: self.issuer.clone(),
             aud: vec![
                 self.authority_audience.clone(),

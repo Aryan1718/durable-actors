@@ -648,7 +648,7 @@ async function createTypeScriptConsumer(actorName = "SessionCounter", preamble =
     await writeFile(path.join(root, "package.json"), JSON.stringify({ type: "module" }))
     await writeFile(
         path.join(source, "actors.ts"),
-        `import { Actor, Atomic, Persisted, Ephemeral } from ${JSON.stringify(path.join(compiledSdkRoot, "index.js"))}
+        `import { Actor, Persisted, Ephemeral } from ${JSON.stringify(path.join(compiledSdkRoot, "index.js"))}
 import { threadId } from "node:worker_threads"
 ${preamble}
 
@@ -669,21 +669,23 @@ export class ${actorName} extends Actor<{ userId: string }, { text: string }> {
         return threadId
     }
 
-    @Atomic
     async explode(): Promise<void> {
-        this.count = 999
-        throw new Error("failed")
+        return this.db.transaction(async () => {
+            this.count = 999
+            throw new Error("failed")
+        })
     }
 
     async onConnect(): Promise<void> {
         this.count += 1
     }
 
-    @Atomic
     async onMessage(socket: { metadata: { userId: string }, send(message: { text: string }): void }, message: { text: string }): Promise<void> {
-        this.count += 1
-        if (message.text === "fail") throw new Error("failed")
-        socket.send({ text: \`${"${socket.metadata.userId}"}:${"${message.text}"}\` })
+        return this.db.transaction(async () => {
+            this.count += 1
+            if (message.text === "fail") throw new Error("failed")
+            socket.send({ text: \`${"${socket.metadata.userId}"}:${"${message.text}"}\` })
+        })
     }
 }
 `

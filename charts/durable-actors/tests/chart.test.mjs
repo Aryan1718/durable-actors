@@ -53,12 +53,12 @@ test("starts one controller and one pool manager using one Standard bucket", () 
     assert.equal(output.match(/kind: Deployment\n/g).length, 2)
 })
 
-test("configures project actor capacity and start-rate limits", () => {
-    const output = manifests({ projectLimits: { enabled: false, maxActiveActors: 20000, actorStartsPerSecond: 100, actorStartBurst: 200 } })
-    assert.match(output, /DURABLE_ACTORS_PROJECT_LIMITS_ENABLED, value: "false"/)
-    assert.match(output, /DURABLE_ACTORS_PROJECT_MAX_ACTIVE_ACTORS, value: "20000"/)
-    assert.match(output, /DURABLE_ACTORS_PROJECT_ACTOR_STARTS_PER_SECOND, value: "100"/)
-    assert.match(output, /DURABLE_ACTORS_PROJECT_ACTOR_START_BURST, value: "200"/)
+test("configures organization actor capacity and start-rate limits", () => {
+    const output = manifests({ organizationLimits: { enabled: false, maxActiveActors: 20000, actorStartsPerSecond: 100, actorStartBurst: 200 } })
+    assert.match(output, /DURABLE_ACTORS_ORGANIZATION_LIMITS_ENABLED, value: "false"/)
+    assert.match(output, /DURABLE_ACTORS_ORGANIZATION_MAX_ACTIVE_ACTORS, value: "20000"/)
+    assert.match(output, /DURABLE_ACTORS_ORGANIZATION_ACTOR_STARTS_PER_SECOND, value: "100"/)
+    assert.match(output, /DURABLE_ACTORS_ORGANIZATION_ACTOR_START_BURST, value: "200"/)
 })
 
 test("isolates sandboxes in a release-specific namespace with constrained credentials and network access", () => {

@@ -1,8 +1,7 @@
-import { Actor, type ActorSocket, Atomic, Compute, Emittable, Ephemeral, Interleave, Persisted } from "durable-actors"
+import { Actor, type ActorSocket, Compute, Emittable, Ephemeral, Interleave, Persisted } from "durable-actors"
 
 @Compute({ cpu: 0.5, memoryMiB: 256, idleTimeoutMs: 60_000 })
 export class BankAccount extends Actor<Metadata, Incoming, Outgoing> {
-    
     @Persisted @Emittable balance = 0
     @Ephemeral private depositsSinceWake = 0
 
@@ -14,14 +13,15 @@ export class BankAccount extends Actor<Metadata, Incoming, Outgoing> {
         return this.depositsSinceWake
     }
 
-    @Atomic
     async deposit(amount: number): Promise<number> {
-        this.db.exec("CREATE TABLE IF NOT EXISTS ledger (amount INTEGER)")
-        this.balance += amount
-        this.depositsSinceWake += 1
-        this.db.exec("INSERT INTO ledger (amount) VALUES (?)", amount)
-        this.broadcast({ type: "balance", balance: this.balance }, { tags: ["customer"] })
-        return this.balance
+        return this.db.transaction(async () => {
+            this.db.exec("CREATE TABLE IF NOT EXISTS ledger (amount INTEGER)")
+            this.balance += amount
+            this.depositsSinceWake += 1
+            this.db.exec("INSERT INTO ledger (amount) VALUES (?)", amount)
+            this.broadcast({ type: "balance", balance: this.balance }, { tags: ["customer"] })
+            return this.balance
+        })
     }
 
     async onConnect(socket: Socket): Promise<void> {

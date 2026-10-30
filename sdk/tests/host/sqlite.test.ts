@@ -33,10 +33,12 @@ class SqliteCounter extends Actor {
     }
 
     async fail() {
-        ++this.count
-        this.db.exec("INSERT INTO entries (value) VALUES ('discarded')")
-        this.db.exec("CREATE TABLE discarded (id INTEGER)")
-        throw new Error("rollback both stores")
+        return this.db.transaction(async () => {
+            ++this.count
+            this.db.exec("INSERT INTO entries (value) VALUES ('discarded')")
+            this.db.exec("CREATE TABLE discarded (id INTEGER)")
+            throw new Error("rollback both stores")
+        })
     }
 
     async tables() {
@@ -48,7 +50,7 @@ class SqliteCounter extends Actor {
 
 const definition = registerActorClass(SqliteCounter, {
     actorName: "SqliteCounter",
-    atomicMethods: ["fail"],
+
     fields: [{ name: "count", persistence: Persistence.Persisted }]
 })
 
@@ -275,7 +277,7 @@ test("database handles keep writing after their invocation completes", async () 
     assert.deepEqual(Reflect.get(await invoke(restored.runtime, "read", [], "DetachedSqlite"), "result"), [{ id: 1 }])
 })
 
-test("background SQL is rejected while an @Atomic method holds the transaction", async () => {
+test("background SQL is rejected while an explicit transaction is open", async () => {
     let releaseBackground!: () => void
     let releaseAtomic!: () => void
     let entered!: () => void
@@ -296,14 +298,16 @@ test("background SQL is rejected while an @Atomic method holds the transaction",
         }
 
         async hold() {
-            this.db.exec("CREATE TABLE held (id INTEGER)")
-            entered()
-            await atomicGate
+            return this.db.transaction(async () => {
+                this.db.exec("CREATE TABLE held (id INTEGER)")
+                entered()
+                await atomicGate
+            })
         }
     }
     const atomic = registerActorClass(AtomicSqlite, {
         actorName: "AtomicSqlite",
-        atomicMethods: ["hold"],
+
         fields: []
     })
     const { runtime } = createRuntime(atomic)
@@ -311,7 +315,7 @@ test("background SQL is rejected while an @Atomic method holds the transaction",
     const held = invoke(runtime, "hold", [], "AtomicSqlite")
     await holding
     releaseBackground()
-    await assert.rejects(rejected, /while an @Atomic method runs/)
+    await assert.rejects(rejected, /in use by a db.transaction/)
     releaseAtomic()
     assert.equal((await held).type, "invoked")
 })

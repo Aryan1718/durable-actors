@@ -1,5 +1,5 @@
 use crate::actor::{DatabaseCall, DatabaseResult, SqlValue};
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Result, anyhow, bail};
 use rusqlite::{
     Connection, ToSql,
     hooks::{AuthAction, AuthContext, Authorization},
@@ -9,10 +9,13 @@ use serde_json::value::RawValue;
 use std::{
     collections::BTreeMap,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
-const TRANSACTIONS: &str = "actor invocations own SQLite transactions and database files";
+const FILES: &str = "actor invocations own SQLite database files";
 const RESERVED: &str = "SQLite runtime table names are reserved";
 const PRAGMAS: &str = "this SQLite pragma is managed by the actor runtime";
 const ALLOWED_PRAGMAS: [&str; 10] = [
@@ -34,7 +37,7 @@ pub(crate) struct SqliteDatabase {
 
 #[derive(Debug)]
 pub(crate) struct Executed {
-    pub result: DatabaseResult,
+    pub result: Result<DatabaseResult>,
     pub committed: bool,
 }
 
@@ -58,12 +61,9 @@ impl SqliteDatabase {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
-struct ChangeToken(u64, i64, i64);
-
 struct Engine {
     connection: Connection,
-    synced: ChangeToken,
+    committed: Arc<AtomicBool>,
 }
 
 impl Engine {
@@ -75,36 +75,35 @@ impl Engine {
         )?;
         let check: String = connection.query_row("PRAGMA quick_check", [], |row| row.get(0))?;
         anyhow::ensure!(check == "ok", "invalid actor SQLite database");
-        let synced = token(&connection)?;
-        Ok(Self { connection, synced })
+        let committed = Arc::new(AtomicBool::new(false));
+        let commit = committed.clone();
+        connection.commit_hook(Some(move || {
+            commit.store(true, Ordering::Relaxed);
+            false
+        }))?;
+        let rollback = committed.clone();
+        connection.rollback_hook(Some(move || rollback.store(false, Ordering::Relaxed)))?;
+        Ok(Self {
+            connection,
+            committed,
+        })
     }
 
     fn call(&mut self, call: DatabaseCall) -> Result<Executed> {
-        let immediate = call.immediate();
-        let before = token(&self.connection)?;
-        let mut opened = false;
         let result = match call {
-            DatabaseCall::Commit => {
-                let committed = self.commit()?;
-                return Ok(Executed {
-                    result: DatabaseResult::Done,
-                    committed,
-                });
-            }
-            DatabaseCall::Rollback => self.rollback()?,
-            DatabaseCall::Fields => self.fields()?,
+            DatabaseCall::Commit => self.finish("COMMIT"),
+            DatabaseCall::Rollback => self.finish("ROLLBACK"),
+            DatabaseCall::Fields => self.fields(),
             DatabaseCall::Alarm
             | DatabaseCall::SetAlarm { .. }
             | DatabaseCall::DeleteAlarm { .. } => {
                 unreachable!("alarm calls are handled by the control plane")
             }
-            call => {
-                opened = self.begin()?;
-                self.write(call)?
-            }
+            call => self.write(call),
         };
+        // A statement such as INSERT OR FAIL can commit rows even when it returns an error.
         let committed =
-            immediate && (opened || token(&self.connection)? != before) && self.commit()?;
+            self.committed.swap(false, Ordering::Relaxed) && self.connection.is_autocommit();
         Ok(Executed { result, committed })
     }
 
@@ -220,41 +219,12 @@ impl Engine {
         Ok(())
     }
 
-    fn begin(&self) -> Result<bool> {
+    fn finish(&self, sql: &str) -> Result<DatabaseResult> {
         if !self.connection.is_autocommit() {
-            return Ok(false);
+            self.connection.execute_batch(sql)?;
         }
-        self.connection
-            .execute_batch("BEGIN IMMEDIATE")
-            .context("failed to begin actor transaction")?;
-        Ok(true)
-    }
-
-    fn commit(&mut self) -> Result<bool> {
-        if !self.connection.is_autocommit() {
-            self.connection.execute_batch("COMMIT")?;
-        }
-        let current = token(&self.connection)?;
-        let changed = current != self.synced;
-        self.synced = current;
-        Ok(changed)
-    }
-
-    fn rollback(&mut self) -> Result<DatabaseResult> {
-        if !self.connection.is_autocommit() {
-            self.connection.execute_batch("ROLLBACK")?;
-        }
-        self.synced = token(&self.connection)?;
         Ok(DatabaseResult::Done)
     }
-}
-
-fn token(connection: &Connection) -> Result<ChangeToken> {
-    Ok(ChangeToken(
-        connection.total_changes(),
-        connection.query_row("PRAGMA schema_version", [], |row| row.get(0))?,
-        connection.query_row("PRAGMA user_version", [], |row| row.get(0))?,
-    ))
 }
 
 fn authorize(
@@ -273,10 +243,7 @@ fn authorize(
 
 fn denial(action: &AuthAction<'_>) -> Option<&'static str> {
     match action {
-        AuthAction::Transaction { .. }
-        | AuthAction::Savepoint { .. }
-        | AuthAction::Attach { .. }
-        | AuthAction::Detach { .. } => Some(TRANSACTIONS),
+        AuthAction::Attach { .. } | AuthAction::Detach { .. } => Some(FILES),
         AuthAction::Pragma { pragma_name, .. }
             if !ALLOWED_PRAGMAS.contains(&pragma_name.to_ascii_lowercase().as_str()) =>
         {

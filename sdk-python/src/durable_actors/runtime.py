@@ -93,6 +93,8 @@ class ActorRuntime:
         )
         token = scope_context.set(scope)
         try:
+            if not self.definition.reentrant_methods:
+                await self.database.begin()
             if socket_event:
                 args = await socket_arguments(command["event"], scope)
                 admit()
@@ -121,12 +123,17 @@ class ActorRuntime:
                 state = self.snapshot()
                 previous = self.last_state if self.definition.reentrant_methods else before
                 effects.extend(self.state_updates(previous, state, command))
-                await self.database.replace_fields(state)
+                if self.definition.reentrant_methods:
+                    await self.database.begin()
                 try:
+                    await self.database.replace_fields(state)
                     await self.database.commit()
                 except DatabaseCommitError as error:
                     self.fatal = failed("actor_database_failed", str(error))
                     return self.fatal
+                except BaseException:
+                    await self.database.rollback()
+                    raise
                 self.last_state = state
                 reply: Document = {"type": "websocket_handled" if socket_event else "invoked"}
                 if not socket_event:

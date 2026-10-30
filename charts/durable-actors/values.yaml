@@ -49,7 +49,7 @@ analytics:
     passwordSecretKey: ""
 usage:
   topic: ""
-projectLimits:
+organizationLimits:
   enabled: true
   maxActiveActors: 500
   actorStartsPerSecond: 50

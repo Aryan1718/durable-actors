@@ -19,7 +19,7 @@ mod local_build;
 mod local_watch;
 mod process;
 pub(crate) use process::RuntimeImages;
-mod project_limits;
+mod organization_limits;
 mod protocol;
 mod public_api;
 mod regions;
@@ -35,7 +35,7 @@ pub(crate) const MAX_CONTROL_PLANE_MESSAGE_BYTES: usize = SUPPORTED_CONTROL_PLAN
 pub(crate) const CONTROL_PLANE_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub use local::{DevOptions, serve_local};
-pub use project_limits::ProjectLimits;
+pub use organization_limits::OrganizationLimits;
 
 #[cfg(test)]
 pub(crate) use self::auth::ActorInvocationCapability;

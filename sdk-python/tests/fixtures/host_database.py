@@ -86,11 +86,8 @@ class HostDatabase:
         self.connection.close()
 
     def write(self, immediate, operation):
-        if not self.connection.in_transaction:
-            self.connection.execute("BEGIN IMMEDIATE")
-        before = self.change_token()
         result = operation() or {"type": "done"}
-        if immediate and self.change_token() != before:
+        if not self.connection.in_transaction:
             self.commit()
         return result
 

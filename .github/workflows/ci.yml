@@ -13,11 +13,10 @@ jobs:
         uses: ./.github/workflows/python.yml
 
     image:
-        name: Runtime image (${{ matrix.target }}, ${{ matrix.arch }})
+        name: Runtime images (${{ matrix.arch }})
         strategy:
             fail-fast: false
             matrix:
-                target: [control-plane, typescript, python]
                 arch: [amd64, arm64]
                 include:
                     - arch: amd64
@@ -36,16 +35,38 @@ jobs:
                   cache-key: durable-actors/runtime-${{ matrix.arch }}
                   nofallback: false
                   platforms: ${{ matrix.platform }}
-            - name: Build runtime image
+            - name: Build control-plane image
               uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v2.3.0
               with:
                   context: .
-                  target: ${{ matrix.target }}
+                  target: control-plane
                   platforms: ${{ matrix.platform }}
                   load: true
-                  tags: durable-actors:ci
-            - name: Check the image runtime
-              run: bash scripts/test-runtime-image.sh durable-actors:ci "${{ matrix.target }}"
+                  tags: durable-actors:ci-control-plane
+            - name: Check the control-plane image runtime
+              run: bash scripts/test-runtime-image.sh durable-actors:ci-control-plane "control-plane"
+
+            - name: Build typescript image
+              uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v2.3.0
+              with:
+                  context: .
+                  target: typescript
+                  platforms: ${{ matrix.platform }}
+                  load: true
+                  tags: durable-actors:ci-typescript
+            - name: Check the typescript image runtime
+              run: bash scripts/test-runtime-image.sh durable-actors:ci-typescript "typescript"
+
+            - name: Build python image
+              uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v2.3.0
+              with:
+                  context: .
+                  target: python
+                  platforms: ${{ matrix.platform }}
+                  load: true
+                  tags: durable-actors:ci-python
+            - name: Check the python image runtime
+              run: bash scripts/test-runtime-image.sh durable-actors:ci-python "python"
 
     rust:
         name: Rust runtime

@@ -428,7 +428,7 @@ impl Fixture {
             .register_deployment(
                 &HostLaunchSpec {
                     image_policy: Default::default(),
-                    organization_id: Some("org-test".into()),
+                    organization_id: "org-test".into(),
                     sandboxes: Default::default(),
                     project_id: "default".into(),
                     source: None,

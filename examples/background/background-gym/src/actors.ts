@@ -1,4 +1,4 @@
-import { Actor, Atomic, Resource } from "durable-actors"
+import { Actor, Resource } from "durable-actors"
 import type { ActorDatabase, ActorResource } from "durable-actors"
 
 export interface GymJob {
@@ -27,10 +27,11 @@ export class BackgroundGym extends Actor {
         return this.jobs.status()
     }
 
-    @Atomic
     async holdAtomic(ms: number): Promise<void> {
-        this.db.exec("INSERT INTO gym_holds (at) VALUES (?)", Date.now())
-        await sleep(ms)
+        return this.db.transaction(async () => {
+            this.db.exec("INSERT INTO gym_holds (at) VALUES (?)", Date.now())
+            await sleep(ms)
+        })
     }
 }
 

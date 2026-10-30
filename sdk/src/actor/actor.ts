@@ -58,7 +58,7 @@ abstract class Actor<Metadata = JsonValue, Incoming = JsonValue, Outgoing = Inco
         this.#context = RuntimeActorContext.bind(context, this)
     }
 
-    /** Actor-local SQLite, available from field initializers. Changes commit after a successful invocation. */
+    /** Actor-local SQLite. Statements autocommit unless grouped with `db.transaction`. */
     get db(): ActorDatabase {
         return this.#context.database
     }

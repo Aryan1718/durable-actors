@@ -1,8 +1,7 @@
-import { Actor, Atomic, Interleave, Persisted } from "durable-actors"
+import { Actor, Interleave, Persisted } from "durable-actors"
 
 export class PersistenceTests extends Actor {
     @Persisted private crashMarker = ""
-    @Persisted private events: string[] = []
 
     async testImmediate() {
         this.crashMarker = ""
@@ -13,15 +12,28 @@ export class PersistenceTests extends Actor {
         process.exit(1)
     }
 
-    @Atomic
     async atomicWriteThenCrash(marker: string): Promise<void> {
-        this.crashMarker = marker
-        process.exit(1)
+        return this.db.transaction(async () => {
+            this.crashMarker = marker
+            process.exit(1)
+        })
     }
 
     async getCrashMarker(): Promise<string> {
         return this.crashMarker
     }
+
+    async testAtomic(shouldFail: boolean) {
+        return this.db.transaction(async () => {
+            this.crashMarker = ""
+
+            if (shouldFail) throw new Error("Testing atomic rollback")
+        })
+    }
+}
+
+export class InterleaveTests extends Actor {
+    @Persisted private events: string[] = []
 
     @Interleave
     async testInterleave(label: string, delayMs: number): Promise<void> {
@@ -34,10 +46,7 @@ export class PersistenceTests extends Actor {
         return this.events
     }
 
-    @Atomic
-    async testAtomic(shouldFail: boolean) {
-        this.crashMarker = ""
-
-        if (shouldFail) throw new Error("Testing atomic rollback")
+    async crash(): Promise<void> {
+        process.exit(1)
     }
 }

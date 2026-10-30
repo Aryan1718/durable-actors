@@ -72,7 +72,7 @@ async fn organization_shutdown_retries_without_affecting_other_tenants() -> Resu
     ] {
         let mut spec = source();
         spec.project_id = project.into();
-        spec.organization_id = Some(organization.into());
+        spec.organization_id = organization.into();
         admin.register_test_deployment(&spec).await?;
     }
     admin

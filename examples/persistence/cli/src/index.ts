@@ -2,6 +2,7 @@ import { actors } from "../generated/index.js"
 
 const [command, ...args] = process.argv.slice(2)
 const suite = actors.PersistenceTests.get("demo")
+const interleave = actors.InterleaveTests.get("demo")
 if (command === "atomic-test" && (args.length === 0 || (args.length === 1 && args[0] === "--fail"))) {
     await suite.testAtomic(args[0] === "--fail")
     console.log("Crash marker cleared.")
@@ -14,11 +15,11 @@ if (command === "atomic-test" && (args.length === 0 || (args.length === 1 && arg
 } else if (command === "crash-read" && args.length === 0) {
     console.log(await suite.getCrashMarker())
 } else if (command === "interleave-test" && args.length === 0) {
-    await suite.getEvents()
-    await Promise.all([suite.testInterleave("slow", 3000), suite.testInterleave("fast", 100)])
-    console.log(await suite.getEvents())
+    await interleave.getEvents()
+    await Promise.all([interleave.testInterleave("slow", 3000), interleave.testInterleave("fast", 100)])
+    console.log(await interleave.getEvents())
 } else if (command === "events-read" && args.length === 0) {
-    console.log(await suite.getEvents())
+    console.log(await interleave.getEvents())
 } else {
     console.error("Usage: bun run --bun start atomic-test [--fail] | immediate-test | crash-write <marker> | atomic-crash-write <marker> | crash-read | interleave-test | events-read")
     process.exit(1)

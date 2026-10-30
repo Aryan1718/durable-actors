@@ -62,7 +62,7 @@ async fn run_activation(
     let session = uuid::Uuid::new_v4().to_string();
     let token = issuer
         .issue_host(
-            Some("org-test"),
+            "org-test",
             &host_id,
             &session,
             "test",

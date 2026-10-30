@@ -166,9 +166,12 @@ impl DatabaseSession {
                     .await?;
             }
         }
-        Ok(DatabaseReply::Executed {
-            result: executed.result,
-            committed: commit.then_some(cached.synced),
+        Ok(match executed.result {
+            Ok(result) => DatabaseReply::Executed {
+                result,
+                committed: commit.then_some(cached.synced),
+            },
+            Err(error) => DatabaseReply::Rejected(error),
         })
     }
 

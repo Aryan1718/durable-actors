@@ -255,7 +255,7 @@ async fn observability_requires_admin_credentials() -> Result<()> {
     let token = fixture
         .issuer
         .issue_host(
-            Some("org-test"),
+            "org-test",
             &fixture.host,
             &uuid::Uuid::new_v4().to_string(),
             "r1",
@@ -488,7 +488,7 @@ async fn inventory_includes_unused_deployed_types_without_loading_actors() -> Re
         .register_deployment(
             &super::admin::HostLaunchSpec {
                 image_policy: Default::default(),
-                organization_id: Some("org-test".into()),
+                organization_id: "org-test".into(),
                 sandboxes: Default::default(),
                 project_id: "default".into(),
                 source: None,

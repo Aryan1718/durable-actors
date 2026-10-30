@@ -15,23 +15,23 @@ test("interleaved writes overlap and survive a worker crash and full restart", {
     try {
         runtime = await startLocalActors(options)
         let client = connect(runtime.connection)
-        assert.deepEqual(await client.invoke("PersistenceTests", "interleave-test", "getEvents", []), [])
+        assert.deepEqual(await client.invoke("InterleaveTests", "interleave-test", "getEvents", []), [])
         await Promise.all([
-            client.invoke("PersistenceTests", "interleave-test", "testInterleave", ["slow", 3000]),
-            client.invoke("PersistenceTests", "interleave-test", "testInterleave", ["fast", 100])
+            client.invoke("InterleaveTests", "interleave-test", "testInterleave", ["slow", 3000]),
+            client.invoke("InterleaveTests", "interleave-test", "testInterleave", ["fast", 100])
         ])
-        const events = await client.invoke("PersistenceTests", "interleave-test", "getEvents", [])
+        const events = await client.invoke("InterleaveTests", "interleave-test", "getEvents", [])
         assert.deepEqual([...events].sort(), ["fast:end", "fast:start", "slow:end", "slow:start"])
         assert.ok(events.indexOf("slow:start") < events.indexOf("slow:end"))
         assert.ok(events.indexOf("fast:start") < events.indexOf("fast:end"))
         assert.ok(events.indexOf("fast:start") < events.indexOf("slow:end"), "calls must overlap")
         assert.ok(events.indexOf("slow:start") < events.indexOf("fast:end"), "calls must overlap")
-        await assert.rejects(client.invoke("PersistenceTests", "interleave-test", "writeThenCrash", ["interleave-crash"]), { code: "outcome_unknown" })
-        assert.deepEqual(await client.invoke("PersistenceTests", "interleave-test", "getEvents", []), events)
+        await assert.rejects(client.invoke("InterleaveTests", "interleave-test", "crash", []), { code: "outcome_unknown" })
+        assert.deepEqual(await client.invoke("InterleaveTests", "interleave-test", "getEvents", []), events)
         await runtime.stop()
         runtime = await startLocalActors(options)
         client = connect(runtime.connection)
-        assert.deepEqual(await client.invoke("PersistenceTests", "interleave-test", "getEvents", []), events)
+        assert.deepEqual(await client.invoke("InterleaveTests", "interleave-test", "getEvents", []), events)
     } finally {
         await runtime?.stop()
         await rm(dataDir, { recursive: true, force: true })

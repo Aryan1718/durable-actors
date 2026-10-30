@@ -16,7 +16,7 @@ Follow the example's README to install dependencies, copy `.env.example` to `.en
 
 [Persistence](persistence/README.md) groups the `persistence-tests` actor and its CLI. They exercise immediate writes, atomic rollback, interleaving, and crash recovery on actor port `7103`. No model API key is needed.
 
-[Background work](background/) groups the `background-gym` actor and its CLI. They exercise writes from work that outlives its invocation, idle eviction, and `@Atomic` overlap on actor port `7110`. No model API key is needed.
+[Background work](background/) groups the `background-gym` actor and its CLI. They exercise writes from work that outlives its invocation, idle eviction, and overlap with explicit transactions on actor port `7110`. No model API key is needed.
 
 ## Guide examples
 

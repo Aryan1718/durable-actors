@@ -455,13 +455,13 @@ for (const outcome of ["success", "rejection", "disconnect", "atomic", "method_f
                         if (outcome === "method_failure" || outcome === "atomic_failure") {
                             assert.equal(message.reply.type, "invoked")
                             assert.equal(message.reply.result, outcome === "atomic_failure" ? 0 : 1)
-                            assert.deepEqual(writes, [outcome === "method_failure"])
-                            assert.equal(database.commits, 1)
+                            assert.deepEqual(writes, [true])
+                            assert.equal(database.commits, outcome === "method_failure" ? 2 : 1)
                         } else if (outcome === "success" || outcome === "atomic") {
                             assert.equal(message.reply.type, "invoked")
                             assert.equal(message.reply.result, 2)
-                            assert.deepEqual(writes, outcome === "atomic" ? [false, false] : [true, true])
-                            assert.equal(database.commits, outcome === "atomic" ? 1 : 2)
+                            assert.deepEqual(writes, [true, true])
+                            assert.equal(database.commits, outcome === "atomic" ? 2 : 3)
                         } else {
                             assert.equal(message.reply.code, "actor_method_failed")
                             assert.match(message.reply.message, /durable storage rejected write/)
