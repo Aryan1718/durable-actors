@@ -370,12 +370,11 @@ jobs:
             version: ${{ needs.preflight.outputs.version }}
 
     image-build:
-        name: Build runtime image (${{ matrix.target }}, ${{ matrix.arch }})
+        name: Build runtime images (${{ matrix.arch }})
         needs: preflight
         strategy:
             fail-fast: false
             matrix:
-                target: [control-plane, typescript, python]
                 arch: [amd64, arm64]
                 include:
                     - arch: amd64
@@ -401,30 +400,88 @@ jobs:
                   nofallback: true
                   platforms: ${{ matrix.platform }}
 
-            - name: Build runtime image
+            - name: Build control-plane image
               uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v2.3.0
               with:
                   context: .
-                  target: ${{ matrix.target }}
+                  target: control-plane
                   platforms: ${{ matrix.platform }}
                   outputs: type=docker,dest=${{ runner.temp }}/runtime-image.tar
-                  tags: ${{ env.IMAGE }}:${{ needs.preflight.outputs.version }}-${{ matrix.target }}-${{ matrix.arch }}
+                  tags: ${{ env.IMAGE }}:${{ needs.preflight.outputs.version }}-control-plane-${{ matrix.arch }}
                   labels: |
                       org.opencontainers.image.source=https://github.com/TerseAI/durable-actors
                       org.opencontainers.image.revision=${{ github.sha }}
                       org.opencontainers.image.version=${{ needs.preflight.outputs.version }}
                       org.opencontainers.image.licenses=MIT
 
-            - name: Check the release image runtime
+            - name: Check the control-plane release image runtime
               env:
-                  IMAGE_ARCH_TAG: ${{ env.IMAGE }}:${{ needs.preflight.outputs.version }}-${{ matrix.target }}-${{ matrix.arch }}
+                  IMAGE_ARCH_TAG: ${{ env.IMAGE }}:${{ needs.preflight.outputs.version }}-control-plane-${{ matrix.arch }}
               run: |
                   docker load --input "${{ runner.temp }}/runtime-image.tar"
-                  bash scripts/test-runtime-image.sh "$IMAGE_ARCH_TAG" "${{ matrix.target }}"
+                  bash scripts/test-runtime-image.sh "$IMAGE_ARCH_TAG" "control-plane"
 
             - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
               with:
-                  name: runtime-image-${{ matrix.target }}-${{ matrix.arch }}
+                  name: runtime-image-control-plane-${{ matrix.arch }}
+                  path: ${{ runner.temp }}/runtime-image.tar
+                  if-no-files-found: error
+                  compression-level: 0
+                  retention-days: 1
+
+            - name: Build typescript image
+              uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v2.3.0
+              with:
+                  context: .
+                  target: typescript
+                  platforms: ${{ matrix.platform }}
+                  outputs: type=docker,dest=${{ runner.temp }}/runtime-image.tar
+                  tags: ${{ env.IMAGE }}:${{ needs.preflight.outputs.version }}-typescript-${{ matrix.arch }}
+                  labels: |
+                      org.opencontainers.image.source=https://github.com/TerseAI/durable-actors
+                      org.opencontainers.image.revision=${{ github.sha }}
+                      org.opencontainers.image.version=${{ needs.preflight.outputs.version }}
+                      org.opencontainers.image.licenses=MIT
+
+            - name: Check the typescript release image runtime
+              env:
+                  IMAGE_ARCH_TAG: ${{ env.IMAGE }}:${{ needs.preflight.outputs.version }}-typescript-${{ matrix.arch }}
+              run: |
+                  docker load --input "${{ runner.temp }}/runtime-image.tar"
+                  bash scripts/test-runtime-image.sh "$IMAGE_ARCH_TAG" "typescript"
+
+            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: runtime-image-typescript-${{ matrix.arch }}
+                  path: ${{ runner.temp }}/runtime-image.tar
+                  if-no-files-found: error
+                  compression-level: 0
+                  retention-days: 1
+
+            - name: Build python image
+              uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v2.3.0
+              with:
+                  context: .
+                  target: python
+                  platforms: ${{ matrix.platform }}
+                  outputs: type=docker,dest=${{ runner.temp }}/runtime-image.tar
+                  tags: ${{ env.IMAGE }}:${{ needs.preflight.outputs.version }}-python-${{ matrix.arch }}
+                  labels: |
+                      org.opencontainers.image.source=https://github.com/TerseAI/durable-actors
+                      org.opencontainers.image.revision=${{ github.sha }}
+                      org.opencontainers.image.version=${{ needs.preflight.outputs.version }}
+                      org.opencontainers.image.licenses=MIT
+
+            - name: Check the python release image runtime
+              env:
+                  IMAGE_ARCH_TAG: ${{ env.IMAGE }}:${{ needs.preflight.outputs.version }}-python-${{ matrix.arch }}
+              run: |
+                  docker load --input "${{ runner.temp }}/runtime-image.tar"
+                  bash scripts/test-runtime-image.sh "$IMAGE_ARCH_TAG" "python"
+
+            - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: runtime-image-python-${{ matrix.arch }}
                   path: ${{ runner.temp }}/runtime-image.tar
                   if-no-files-found: error
                   compression-level: 0
