@@ -74,7 +74,7 @@
       "properties": {"pollIntervalMs": {"type": "integer", "minimum": 1}},
       "required": ["pollIntervalMs"]
     },
-    "projectLimits": {
+    "organizationLimits": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -121,7 +121,7 @@
   },
   "required": [
     "publicUrl", "placement", "storage", "credentialsSecret", "ingress", "replicaCount", "actors",
-    "alarms", "projectLimits", "postgres", "resources", "images", "sandboxNamespace", "nodeSelector",
+    "alarms", "organizationLimits", "postgres", "resources", "images", "sandboxNamespace", "nodeSelector",
     "networkPolicy"
   ],
   "definitions": {

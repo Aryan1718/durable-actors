@@ -29,7 +29,7 @@ actors:
   memoryLimitMiB: null
 alarms:
   pollIntervalMs: 100
-projectLimits:
+organizationLimits:
   enabled: true
   maxActiveActors: 500
   actorStartsPerSecond: 50
