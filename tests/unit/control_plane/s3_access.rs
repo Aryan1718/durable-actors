@@ -42,7 +42,7 @@ async fn s3_image_hosts_bootstrap_and_refresh_without_gcs_artifact_access() -> R
     )
     .with_runtime_access(access.clone());
     let spec: HostLaunchSpec = serde_json::from_value(serde_json::json!({
-        "projectId":"default", "imageRef":"image", "workingDirectory":"/app", "secretRefs":[]
+        "organizationId":"organization", "projectId":"default", "imageRef":"image", "workingDirectory":"/app", "secretRefs":[]
     }))?;
     let actor = ActorKey {
         project_id: "default".into(),

@@ -312,7 +312,7 @@ async fn registration_requires_an_organization() -> Result<()> {
         listener.local_addr()?
     );
     let server = tokio::spawn(async { axum::serve(listener, routes).await });
-    let bundle = crate::bundle::ActorBundle::decode(&crate::sandbox::testing::code_artifact(1))?;
+    let bundle = crate::bucket::gcs::GcsBundle::decode(&crate::sandbox::testing::code_artifact(1))?;
     for organization in [None, Some("")] {
         let mut body = serde_json::json!({"bundle": bundle, "contract": contract()});
         if let Some(organization) = organization {
