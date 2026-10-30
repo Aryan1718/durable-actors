@@ -153,3 +153,7 @@ impl RuntimeAccess {
         self.issuer.issue(actor, &self.persistence, code).await
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/unit/bucket/access.rs"]
+mod tests;

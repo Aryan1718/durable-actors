@@ -34,6 +34,8 @@ pub(crate) enum ControlPlaneCommandReply {
         reply: super::socket_gateway::SocketOperationReply,
     },
     StorageAccess {
+        // Flattened so the reply keeps the `tokens` field that already-running hosts read.
+        #[serde(flatten)]
         access: Option<crate::bucket::access::StorageAccess>,
         replacement_token: String,
     },
