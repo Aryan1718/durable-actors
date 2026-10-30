@@ -18,13 +18,18 @@ async fn exec(
     bindings: Vec<SqlValue>,
     immediate: bool,
 ) -> Result<Executed> {
-    database
+    let executed = database
         .call(DatabaseCall::Exec {
             sql: sql.into(),
             bindings,
             immediate,
         })
-        .await
+        .await?;
+    executed
+        .result
+        .as_ref()
+        .map_err(|error| anyhow!("{error:#}"))?;
+    Ok(executed)
 }
 
 fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
@@ -32,7 +37,7 @@ fn raw(value: serde_json::Value) -> Box<serde_json::value::RawValue> {
 }
 
 async fn fields(database: &SqliteDatabase) -> Result<serde_json::Value> {
-    Ok(serde_json::to_value(database.call(DatabaseCall::Fields).await?.result)?["fields"].clone())
+    Ok(serde_json::to_value(database.call(DatabaseCall::Fields).await?.result?)?["fields"].clone())
 }
 
 #[tokio::test]
@@ -62,7 +67,7 @@ async fn values_keep_their_sqlite_storage_classes() -> Result<()> {
         false,
     )
     .await?;
-    let DatabaseResult::Rows { columns, rows } = selected.result else {
+    let DatabaseResult::Rows { columns, rows } = selected.result? else {
         anyhow::bail!("expected rows");
     };
     assert_eq!(columns, ["value", "kind"]);
@@ -91,12 +96,10 @@ async fn values_keep_their_sqlite_storage_classes() -> Result<()> {
 async fn runtime_owned_statements_are_rejected() -> Result<()> {
     let (_directory, database) = database().await?;
     for (sql, message) in [
-        ("BEGIN IMMEDIATE", "own SQLite transactions"),
-        ("COMMIT", "own SQLite transactions"),
-        ("SAVEPOINT nested", "own SQLite transactions"),
-        ("RELEASE nested", "own SQLite transactions"),
-        ("ROLLBACK", "own SQLite transactions"),
-        ("ATTACH 'other.sqlite' AS other", "own SQLite transactions"),
+        (
+            "ATTACH 'other.sqlite' AS other",
+            "own SQLite database files",
+        ),
         (
             "CREATE TABLE __terse_shadow (value TEXT)",
             "names are reserved",
@@ -140,83 +143,164 @@ async fn single_statements_may_end_with_semicolons_comments_and_trigger_bodies()
     )
     .await?;
     assert_eq!(
-        serde_json::to_value(audit.result)?["rows"],
+        serde_json::to_value(audit.result?)?["rows"],
         json!([[{"type": "text", "value": "created"}], [{"type": "text", "value": "after"}]])
     );
     let version = exec(&database, "PRAGMA user_version", vec![], false).await?;
     assert_eq!(
-        serde_json::to_value(version.result)?["rows"],
+        serde_json::to_value(version.result?)?["rows"],
         json!([[{"type": "integer", "value": "3"}]])
     );
     Ok(())
 }
 
 #[tokio::test]
-async fn immediate_writes_commit_once_and_atomic_writes_wait_for_commit() -> Result<()> {
+async fn ordinary_sql_autocommits_and_explicit_transactions_group_writes() -> Result<()> {
     let (_directory, database) = database().await?;
     assert!(
-        exec(&database, "CREATE TABLE notes (body TEXT)", vec![], true)
+        exec(&database, "CREATE TABLE notes (body TEXT)", vec![], false)
             .await?
             .committed
     );
     assert!(
-        !exec(&database, "SELECT * FROM notes", vec![], true)
-            .await?
-            .committed
-    );
-    assert!(
-        !exec(
+        exec(
             &database,
-            "INSERT INTO notes VALUES ('draft')",
+            "INSERT INTO notes VALUES ('before')",
             vec![],
             false
         )
         .await?
         .committed
     );
-    assert!(database.call(DatabaseCall::Commit).await?.committed);
+    assert!(
+        !exec(&database, "SELECT * FROM notes", vec![], true)
+            .await?
+            .committed
+    );
+    exec(&database, "BEGIN", vec![], true).await?;
+    assert!(
+        !exec(
+            &database,
+            "INSERT INTO notes VALUES ('inside')",
+            vec![],
+            true
+        )
+        .await?
+        .committed
+    );
+    assert!(exec(&database, "COMMIT", vec![], true).await?.committed);
     assert!(!database.call(DatabaseCall::Commit).await?.committed);
     Ok(())
 }
 
 #[tokio::test]
-async fn rollback_discards_uncommitted_sql_and_fields() -> Result<()> {
+async fn raw_sql_savepoints_preserve_outer_writes_and_only_commit_on_outer_release() -> Result<()> {
+    let (_directory, database) = database().await?;
+    exec(&database, "CREATE TABLE notes (body TEXT)", vec![], true).await?;
+    exec(&database, "SAVEPOINT outer_scope", vec![], true).await?;
+    exec(&database, "INSERT INTO notes VALUES ('kept')", vec![], true).await?;
+    exec(&database, "SAVEPOINT inner_scope", vec![], true).await?;
+    exec(&database, "INSERT INTO notes VALUES ('lost')", vec![], true).await?;
+    assert!(
+        !exec(&database, "ROLLBACK TO inner_scope", vec![], true)
+            .await?
+            .committed
+    );
+    assert!(
+        !exec(&database, "RELEASE inner_scope", vec![], true)
+            .await?
+            .committed
+    );
+    assert!(
+        exec(&database, "RELEASE outer_scope", vec![], true)
+            .await?
+            .committed
+    );
+    let selected = exec(&database, "SELECT body FROM notes", vec![], true).await?;
+    assert_eq!(
+        serde_json::to_value(selected.result?)?["rows"],
+        json!([[{"type":"text","value":"kept"}]])
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn rollback_discards_sql_and_persisted_writes_without_reporting_a_commit() -> Result<()> {
     let (_directory, database) = database().await?;
     database
         .call(DatabaseCall::InitializeFields {
-            fields: [("count".to_string(), raw(json!(1)))].into(),
+            fields: [("count".into(), raw(json!(1)))].into(),
         })
-        .await?;
-    exec(&database, "CREATE TABLE notes (body TEXT)", vec![], false).await?;
-    assert!(database.call(DatabaseCall::Commit).await?.committed);
+        .await?
+        .result?;
+    exec(&database, "CREATE TABLE notes (body TEXT)", vec![], true).await?;
+    exec(&database, "BEGIN", vec![], true).await?;
     database
         .call(DatabaseCall::PersistField {
             name: "count".into(),
             value: raw(json!(2)),
-            immediate: false,
+            immediate: true,
         })
-        .await?;
+        .await?
+        .result?;
+    exec(&database, "INSERT INTO notes VALUES ('lost')", vec![], true).await?;
+    assert!(!exec(&database, "ROLLBACK", vec![], true).await?.committed);
+    assert_eq!(fields(&database).await?, json!({"count":1}));
+    let selected = exec(&database, "SELECT body FROM notes", vec![], true).await?;
+    assert_eq!(serde_json::to_value(selected.result?)?["rows"], json!([]));
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_commit_can_be_rolled_back_without_publishing() -> Result<()> {
+    let (_directory, database) = database().await?;
     exec(
         &database,
-        "INSERT INTO notes VALUES ('lost')",
+        "CREATE TABLE parent (id PRIMARY KEY)",
         vec![],
-        false,
+        true,
     )
     .await?;
-    database.call(DatabaseCall::Rollback).await?;
-    assert_eq!(fields(&database).await?, json!({"count": 1}));
-    let notes = exec(
+    exec(
         &database,
-        "SELECT count(*) AS total FROM notes",
+        "CREATE TABLE child (parent_id REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)",
         vec![],
-        false,
+        true,
     )
     .await?;
-    assert_eq!(
-        serde_json::to_value(notes.result)?["rows"],
-        json!([[{"type": "integer", "value": "0"}]])
+    exec(&database, "BEGIN", vec![], true).await?;
+    exec(&database, "INSERT INTO child VALUES (42)", vec![], true).await?;
+    let failed = database
+        .call(DatabaseCall::Exec {
+            sql: "COMMIT".into(),
+            bindings: vec![],
+            immediate: true,
+        })
+        .await?;
+    assert!(failed.result.is_err());
+    assert!(!failed.committed);
+    assert!(!exec(&database, "ROLLBACK", vec![], true).await?.committed);
+    assert!(
+        exec(&database, "INSERT INTO parent VALUES (42)", vec![], true)
+            .await?
+            .committed
     );
-    assert!(!database.call(DatabaseCall::Commit).await?.committed);
+    Ok(())
+}
+
+#[tokio::test]
+async fn sqlite_fail_conflicts_still_report_committed_rows_for_replication() -> Result<()> {
+    let (_directory, database) = database().await?;
+    exec(&database, "CREATE TABLE items (value UNIQUE)", vec![], true).await?;
+    let failed = database
+        .call(DatabaseCall::Exec {
+            sql: "INSERT OR FAIL INTO items VALUES (1), (1)".into(),
+            bindings: vec![],
+            immediate: true,
+        })
+        .await?;
+    assert!(failed.result.is_err());
+    assert!(failed.committed);
     Ok(())
 }
 
@@ -240,7 +324,7 @@ async fn fields_preserve_json_text_and_replacement_removes_missing_names() -> Re
             fields: [("stale".to_string(), raw(json!("ignored")))].into(),
         })
         .await?;
-    let listed = serde_json::to_string(&database.call(DatabaseCall::Fields).await?.result)?;
+    let listed = serde_json::to_string(&database.call(DatabaseCall::Fields).await?.result?)?;
     assert!(
         listed.contains(r#""nested":{"z":1,"a":[true,null]}"#),
         "{listed}"

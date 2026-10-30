@@ -1,0 +1,21 @@
+{
+    "name": "durable-actors-example-drizzle",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "dev": "durable-actors dev",
+        "generate": "durable-actors generate",
+        "migrations": "drizzle-kit generate",
+        "check": "tsc --noEmit",
+        "client": "bun client.ts"
+    },
+    "dependencies": {
+        "drizzle-orm": "0.45.4",
+        "durable-actors": "workspace:*"
+    },
+    "devDependencies": {
+        "@types/node": "^22.0.0",
+        "drizzle-kit": "^0.31.0",
+        "typescript": "~5.9.3"
+    }
+}

@@ -2,15 +2,9 @@ import { ActorDefinitionError } from "../errors.js"
 
 import { ActorResource } from "./resource.js"
 
-/** Saves all of the method's writes together when it succeeds, or none if it throws. */
-function Atomic(_value: Function, context: ClassMethodDecoratorContext): void {
-    if (context.kind !== "method" || context.static || context.private || typeof context.name !== "string")
-        throw new ActorDefinitionError("@Atomic requires a public instance async method")
-}
-
 /**
  * Lets other calls run during awaits. State may change while waiting.
- * Disables error rollback for the whole actor class.
+ * Disables error rollback and `db.transaction` for the whole actor class.
  * @experimental
  */
 function Interleave(_value: Function, context: ClassMethodDecoratorContext): void {
@@ -18,7 +12,7 @@ function Interleave(_value: Function, context: ClassMethodDecoratorContext): voi
         throw new ActorDefinitionError("@Interleave requires a public instance async method")
 }
 
-/** Saves each assignment; reassign objects and arrays to save changes. `@Atomic` methods save on success. */
+/** Saves each assignment; reassign objects and arrays to save changes. Assignments inside `db.transaction` roll back with it. */
 function Persisted(_value: undefined, context: ClassFieldDecoratorContext): void {
     validateField("Persisted", context)
     if (context.private) throw new ActorDefinitionError("@Persisted cannot decorate a JavaScript private field")
@@ -48,4 +42,4 @@ function validateField(name: string, context: ClassFieldDecoratorContext): void 
         throw new ActorDefinitionError(`@${name} requires an instance field with a string name`)
 }
 
-export { Atomic, Emittable, Ephemeral, Interleave, Persisted, Resource }
+export { Emittable, Ephemeral, Interleave, Persisted, Resource }

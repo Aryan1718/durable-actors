@@ -27,28 +27,59 @@ test("values keep their SQLite storage classes across the host boundary", () => 
     host.close()
 })
 
-test("immediate mode asks the host to commit each write", async () => {
+test("query returns columns and rows in column order, keeping duplicate names", () => {
     const host = new HostDatabase()
     const database = new DatabaseProxy(host.call)
-    await runWithActorDatabase({}, "immediate", async () => {
-        database.exec("CREATE TABLE entries (value INTEGER)")
-        database.persistField("count", 1)
-    })
-    await runWithActorDatabase({}, "atomic", async () => {
-        database.persistField("count", 2)
-        database.persistField("count", undefined)
-    })
+    database.exec("CREATE TABLE agents (id INTEGER, name TEXT)")
+    database.exec("CREATE TABLE channels (id INTEGER, agent_id INTEGER)")
+    database.exec("INSERT INTO agents VALUES (1, 'ada')")
+    database.exec("INSERT INTO channels VALUES (10, 1)")
     assert.deepEqual(
-        host.calls.map(call => ("immediate" in call ? [call.op, call.immediate] : [call.op])),
-        [
-            ["exec", true],
-            ["persist_field", true],
-            ["persist_field", false],
-            ["delete_field", false]
-        ]
+        database.query(
+            "SELECT agents.id, channels.id, agents.name FROM agents JOIN channels ON channels.agent_id = agents.id WHERE agents.id = ?",
+            1
+        ),
+        { columns: ["id", "id", "name"], rows: [[1, 10, "ada"]] }
     )
-    assert.equal(host.commits, 2)
-    database.rollback()
+    assert.deepEqual(database.query("INSERT INTO agents VALUES (2, 'grace')"), { columns: [], rows: [] })
+    host.close()
+})
+
+test("background work cannot read or write while an explicit transaction runs", async () => {
+    const host = new HostDatabase()
+    const database = new DatabaseProxy(host.call)
+    let release!: () => void
+    const gate = new Promise<void>(resolve => (release = resolve))
+    let exec!: Promise<unknown>
+    let query!: Promise<unknown>
+    await runWithActorDatabase({}, async () => {
+        exec = gate.then(() => database.exec("SELECT 1"))
+        query = gate.then(() => database.query("SELECT 1"))
+    })
+    await database.transaction(async () => {
+        release()
+        await assert.rejects(exec, /in use by a db.transaction/)
+        await assert.rejects(query, /in use by a db.transaction/)
+    })
+    host.close()
+})
+
+test("ordinary SQL autocommits and explicit scopes group persisted writes", async () => {
+    const host = new HostDatabase()
+    const database = new DatabaseProxy(host.call)
+    database.exec("CREATE TABLE entries (value INTEGER)")
+    database.persistField("count", 1)
+    const committed = host.commits
+    await assert.rejects(
+        database.transaction(async () => {
+            database.persistField("count", 2)
+            database.persistField("count", undefined)
+            assert.equal(host.commits, committed)
+            throw new Error("abort")
+        }),
+        /abort/
+    )
+    assert.equal(host.commits, committed)
     assert.deepEqual(database.fields(), { count: 1 })
     host.close()
 })

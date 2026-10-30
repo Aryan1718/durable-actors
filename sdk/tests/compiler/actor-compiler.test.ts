@@ -28,33 +28,6 @@ test("db is reserved for the actor SQLite database", () => {
     assert.ok(result.diagnostics.some(diagnostic => String(diagnostic.messageText).includes("reserved")))
 })
 
-test("records only atomic methods, including aliased decorators", () => {
-    const result = analyze(`import { Actor, Atomic as A } from "./sdk.js"
-        export class PiAgent extends Actor { @A async testAtomic() {} async prompt() {} }`)
-    assert.deepEqual(result.diagnostics, [])
-    assert.deepEqual(result.schemas, [{ actorName: "PiAgent", fields: [], atomicMethods: ["testAtomic"] }])
-})
-
-test("rejects invalid atomic declarations", () => {
-    for (const member of [
-        "@Atomic value = 1",
-        "@Atomic sync() {}",
-        "@Atomic static async run() {}",
-        "@Atomic private async run() {}",
-        "@Atomic protected async run() {}",
-        "@Atomic async #run() {}",
-        "@Atomic() async run() {}",
-        "@Atomic @Atomic async run() {}"
-    ]) {
-        const result = analyze(`import { Actor, Atomic } from "./sdk.js"
-            export class Room extends Actor { ${member} }`)
-        assert.ok(
-            result.diagnostics.some(diagnostic => String(diagnostic.messageText).includes("@Atomic")),
-            member
-        )
-    }
-})
-
 test("recognizes aliased interleave async methods", () => {
     const result = analyze(`import { Actor, Interleave as R } from "./sdk.js"
         export class Room extends Actor { @R async stream() {} async read() {} }`)
@@ -115,6 +88,34 @@ test("emittable fields must be public persisted fields with one emission annotat
         const result = analyze(`import { Actor, Persisted, Ephemeral, Emittable } from "./sdk.js"
             export class Room extends Actor { ${field} }`)
         assert.ok(result.diagnostics.length > 0, field)
+    }
+})
+
+test("accepts mapped object types and still rejects symbol keys", async () => {
+    const root = await createProject()
+    try {
+        const entrypoint = path.join(root, "src/actors.ts")
+        for (const type of ['Record<"first" | "second", number>', '{ [K in "first" | "second"]: number }']) {
+            await writeFile(
+                entrypoint,
+                `import { Actor } from "durable-actors"
+                export class Room extends Actor { async read(): Promise<${type}> { return { first: 1, second: 2 } } }`
+            )
+            const contract = JSON.stringify(new ActorCompiler().compileContract(entrypoint))
+            assert.match(contract, /"first"/)
+            assert.match(contract, /"second"/)
+        }
+        await writeFile(
+            entrypoint,
+            `import { Actor } from "durable-actors"
+            export class Room extends Actor { async read(): Promise<{ [Symbol.iterator]: number }> { return null! } }`
+        )
+        assert.throws(
+            () => new ActorCompiler().compileContract(entrypoint),
+            /Room.read result must be JSON-compatible; symbol properties/
+        )
+    } finally {
+        await rm(root, { recursive: true, force: true })
     }
 })
 
@@ -509,7 +510,6 @@ function analyze(source: string, extra: Record<string, string> = {}) {
             export function Persisted(...args: unknown[]) {}
             export function Emittable(...args: unknown[]) {}
             export function Interleave(...args: unknown[]) {}
-            export function Atomic(...args: unknown[]) {}
             export function Compute(...args: unknown[]) {}
             export function Ephemeral(...args: unknown[]) {}
             export function Resource(...args: unknown[]) {}`,

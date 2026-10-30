@@ -796,7 +796,7 @@ async fn start_worker(
         &entrypoint,
         format!(
             r#"
-import {{ Actor, Atomic, Persisted, Emittable, type ActorSocket }} from {};
+import {{ Actor, Persisted, Emittable, type ActorSocket }} from {};
 import {{ existsSync }} from 'node:fs';
 import {{ setTimeout }} from 'node:timers/promises';
 export class Counter extends Actor<{{name?:string; notified?:boolean; user?:string}}, {{type:"start"; padding?:string}}, {{delta:string}} | {{text:string}}> {{
@@ -807,8 +807,12 @@ export class Counter extends Actor<{{name?:string; notified?:boolean; user?:stri
     async readHistory() {{ return this.history; }}
     async appendHistory() {{ this.history += 'saved'; return this.history; }}
     async change() {{ this.count++; this.count++; this.secret = 'changed'; }}
-    @Atomic
-    async fail() {{ this.count++; throw new Error('failed'); }}
+    async fail() {{
+        return this.db.transaction(async () => {{
+            this.count++;
+            throw new Error('failed');
+        }});
+    }}
     async onConnect(socket: ActorSocket<{{name?:string; notified?:boolean; user?:string}}, {{delta:string}} | {{text:string}}, "member">) {{
         socket.metadata = {{ name: 'member' }};
         socket.setTags('member');

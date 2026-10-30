@@ -14,7 +14,6 @@ interface SdkSymbols {
     readonly Persisted: ts.Symbol
     readonly Ephemeral: ts.Symbol
     readonly Emittable: ts.Symbol
-    readonly Atomic?: ts.Symbol
     readonly Interleave?: ts.Symbol
     readonly Compute?: ts.Symbol
     readonly Resource?: ts.Symbol
@@ -25,7 +24,6 @@ enum AnnotationKind {
     Persistence = "persistence",
     Emission = "emission",
     Interleave = "interleave",
-    Atomicity = "atomicity",
     Compute = "compute",
     Resource = "resource"
 }
@@ -40,7 +38,7 @@ type Annotation =
     | PersistenceAnnotation
     | { readonly kind: AnnotationKind.Compute; readonly node: ts.Decorator; readonly options: ComputeOptions }
     | {
-          readonly kind: AnnotationKind.Emission | AnnotationKind.Interleave | AnnotationKind.Atomicity
+          readonly kind: AnnotationKind.Emission | AnnotationKind.Interleave
           readonly node: ts.Decorator
       }
     | {

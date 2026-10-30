@@ -13,34 +13,41 @@ use tokio::{
 
 #[tokio::test]
 #[ignore = "requires bun run --bun --cwd sdk build and Bun"]
-async fn atomic_sqlite_and_object_fields_survive_runtime_restart_together() -> Result<()> {
+async fn transactional_sqlite_and_object_fields_survive_runtime_restart_together() -> Result<()> {
     let project = tempfile::tempdir()?;
     local_project::write_actor(
         project.path(),
         r#"
         @Persisted count = 0;
         @Persisted payload = "";
-        @Atomic
         async initialize(): Promise<void> {
-            this.payload = "x".repeat(17 * 1024 * 1024);
-            this.db.exec("CREATE TABLE entries (value TEXT NOT NULL)");
-            this.db.exec("CREATE TABLE payload (data BLOB)");
-            this.db.exec("INSERT INTO payload VALUES (zeroblob(?))", 25 * 1024 * 1024);
+            return this.db.transaction(async () => {
+                this.payload = "x".repeat(17 * 1024 * 1024);
+                this.db.exec("CREATE TABLE entries (value TEXT NOT NULL)");
+                this.db.exec("CREATE TABLE payload (data BLOB)");
+                this.db.exec("INSERT INTO payload VALUES (zeroblob(?))", 25 * 1024 * 1024);
+            });
         }
-        @Atomic
-        async insert(value: string): Promise<void> { this.db.exec("INSERT INTO entries (value) VALUES (?)", value); }
-        @Atomic
-        async increment(): Promise<number> { return ++this.count; }
-        @Atomic
+        async insert(value: string): Promise<void> {
+            return this.db.transaction(async () => {
+                this.db.exec("INSERT INTO entries (value) VALUES (?)", value);
+            });
+        }
+        async increment(): Promise<number> {
+            return this.db.transaction(async () => ++this.count);
+        }
         async migrate(): Promise<void> {
-            this.db.exec("ALTER TABLE entries ADD COLUMN enabled INTEGER DEFAULT 1");
-            this.db.exec("PRAGMA user_version = 2");
+            return this.db.transaction(async () => {
+                this.db.exec("ALTER TABLE entries ADD COLUMN enabled INTEGER DEFAULT 1");
+                this.db.exec("PRAGMA user_version = 2");
+            });
         }
-        @Atomic
         async fail(): Promise<void> {
-            ++this.count;
-            this.db.exec("INSERT INTO entries VALUES ('discarded')");
-            throw new Error("rollback");
+            return this.db.transaction(async () => {
+                ++this.count;
+                this.db.exec("INSERT INTO entries VALUES ('discarded')");
+                throw new Error("rollback");
+            });
         }
         async read(): Promise<{count: number; schemaVersion: number; fieldBytes: number; databaseBytes: number; entries: {value: string}[]}> {
             return {
@@ -285,6 +292,107 @@ async fn dev_supports_backend_rpc_and_cli_generation_without_credentials() -> Re
     assert!(consumer.path().join("generated/index.js").exists());
     assert!(consumer.path().join("generated/index.d.ts").exists());
     runtime.stop().await
+}
+
+#[tokio::test]
+#[ignore = "requires bun run --bun --cwd sdk build and Bun"]
+async fn drizzle_transactions_survive_awaits_crashes_and_restart() -> Result<()> {
+    let project = tempfile::tempdir()?;
+    local_project::write_actor(
+        project.path(),
+        r#"
+        @Persisted count = 0;
+        @Ephemeral private orm = drizzle(this.db);
+        constructor(context: ActorContext) {
+            super(context);
+            migrate(this.db, {
+                journal: { entries: [{ idx: 0, when: 1, tag: "initial" }] },
+                migrations: { m0000: "CREATE TABLE entries (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE)" }
+            });
+        }
+        async ordinaryFailure(): Promise<void> {
+            await this.orm.insert(entries).values({ name: "autocommit" });
+            this.count = 1;
+            throw new Error("ordinary failure");
+        }
+        async transact(): Promise<void> {
+            await this.orm.transaction(async tx => {
+                await tx.insert(entries).values({ name: "outer" });
+                this.count = 2;
+                const response = await fetch("data:text/plain,after-fetch");
+                const name = await response.text();
+                try {
+                    await tx.transaction(async nested => {
+                        await nested.insert(entries).values({ name: "discarded" });
+                        this.count = 99;
+                        nested.rollback();
+                    });
+                } catch {}
+                if (this.count !== 2) throw new Error("field rollback failed");
+                await tx.insert(entries).values({ name });
+            }, { behavior: "immediate" });
+        }
+        async crash(): Promise<void> {
+            await this.orm.transaction(async tx => {
+                await tx.insert(entries).values({ name: "crashed" });
+                this.count = 100;
+                process.exit(1);
+            });
+        }
+        async read(): Promise<{ count: number; names: string[]; migrations: number }> {
+            const rows = await this.orm.select().from(entries).orderBy(entries.id);
+            return {
+                count: this.count,
+                names: rows.map(row => row.name),
+                migrations: this.db.exec<{ count: number }>('SELECT count(*) AS count FROM __drizzle_migrations')[0]!.count
+            };
+        }
+    "#,
+    )?;
+    let sdk = Path::new(env!("CARGO_MANIFEST_DIR")).join("sdk");
+    let imports = format!(
+        "import {{ drizzle, migrate }} from {};\nimport type {{ ActorContext }} from {};\nimport {{ sqliteTable, integer, text }} from {};\nconst entries = sqliteTable('entries', {{ id: integer('id').primaryKey(), name: text('name').notNull() }});\n",
+        serde_json::to_string(&sdk.join("dist/drizzle.js"))?,
+        serde_json::to_string(&sdk.join("dist/index.js"))?,
+        serde_json::to_string(&sdk.join("node_modules/drizzle-orm/sqlite-core/index.js"))?,
+    );
+    let actor = project.path().join("actors.ts");
+    std::fs::write(&actor, imports + &std::fs::read_to_string(&actor)?)?;
+    for first in [true, false] {
+        let runtime = LocalRuntime::start(project.path(), None).await?;
+        let script = format!(
+            r#"
+            import assert from 'node:assert/strict';
+            import {{ createActorTransport }} from {};
+            const client = createActorTransport({{ controlPlaneUrl: process.argv[1] }});
+            const call = method => client.invoke('Counter', 'one', method, []);
+            if ({first}) {{
+                await assert.rejects(call('ordinaryFailure'), /ordinary failure/);
+                assert.deepEqual(await call('read'), {{ count: 1, names: ['autocommit'], migrations: 1 }});
+                await call('transact');
+                await assert.rejects(call('crash'));
+            }}
+            assert.deepEqual(await call('read'), {{ count: 2, names: ['autocommit', 'outer', 'after-fetch'], migrations: 1 }});
+        "#,
+            serde_json::to_string(&sdk.join("dist/backend.js"))?
+        );
+        let output = timeout(
+            Duration::from_secs(60),
+            Command::new("bun")
+                .args(["--input-type=module", "--eval", &script, &runtime.origin])
+                .env("DURABLE_ACTORS_TELEMETRY", "0")
+                .kill_on_drop(true)
+                .output(),
+        )
+        .await??;
+        ensure!(
+            output.status.success(),
+            "Drizzle client failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        runtime.stop().await?;
+    }
+    Ok(())
 }
 
 struct LocalRuntime {

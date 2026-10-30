@@ -28,8 +28,10 @@ export class Counter extends Actor {
     }
 
     async explode(): Promise<never> {
-        this.count = 999
-        throw new CounterExplosionError()
+        return this.db.transaction(async () => {
+            this.count = 999
+            throw new CounterExplosionError()
+        })
     }
 }
 
@@ -95,7 +97,7 @@ const forwarderIdentity = {
 
 const counterDefinition = registerActorClass(Counter, {
     actorName: "Counter",
-    atomicMethods: ["explode"],
+
     fields: [{ name: "count", persistence: Persistence.Persisted }]
 })
 const forwarderDefinition = registerActorClass(Forwarder, { actorName: "Forwarder", fields: [] })
@@ -184,14 +186,16 @@ test("ephemeral caches survive resident calls and reset after atomic failure or 
         }
 
         async fail() {
-            this.count = 999
-            this.cache.set("calls", 999)
-            throw new Error("failed")
+            return this.db.transaction(async () => {
+                this.count = 999
+                this.cache.set("calls", 999)
+                throw new Error("failed")
+            })
         }
     }
     const definition = registerActorClass(CachingCounter, {
         actorName: "CachingCounter",
-        atomicMethods: ["fail"],
+
         fields: [
             { name: "count", persistence: Persistence.Persisted },
             { name: "cache", persistence: Persistence.Ephemeral }

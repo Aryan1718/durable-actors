@@ -49,6 +49,11 @@
             "import": "./dist/proxy.js",
             "default": "./dist/proxy.js"
         },
+        "./drizzle": {
+            "types": "./dist/drizzle.d.ts",
+            "import": "./dist/drizzle.js",
+            "default": "./dist/drizzle.js"
+        },
         ".": {
             "types": "./dist/index.d.ts",
             "import": "./dist/index.js",
@@ -112,10 +117,19 @@
         "ws": "^8.18.3",
         "zod": "^4.3.6"
     },
+    "peerDependencies": {
+        "drizzle-orm": ">=0.40.0"
+    },
+    "peerDependenciesMeta": {
+        "drizzle-orm": {
+            "optional": true
+        }
+    },
     "devDependencies": {
         "@types/node": "^22.0.0",
         "@types/validate-npm-package-name": "^4.0.2",
         "@types/ws": "^8.18.1",
+        "drizzle-orm": "0.45.4",
         "dts-bundle-generator": "9.5.1",
         "typedoc": "^0.28.20",
         "typedoc-plugin-missing-exports": "^4.1.4"

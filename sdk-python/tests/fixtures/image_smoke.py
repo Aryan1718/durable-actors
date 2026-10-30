@@ -117,6 +117,9 @@ class FieldStore:
         op = call["op"]
         if op == "fields":
             return {"type": "fields", "fields": self.committed}
+        if op == "exec" and call["sql"] == "BEGIN":
+            self.pending = self.committed.copy()
+            return {"type": "rows", "columns": [], "rows": []}
         if op == "replace_fields":
             self.pending = call["fields"]
         elif op == "commit":

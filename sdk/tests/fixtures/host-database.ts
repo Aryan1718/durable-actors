@@ -7,13 +7,27 @@ import type { JsonObject, JsonValue } from "../../src/json.js"
 
 type Binding = null | bigint | number | string | Uint8Array
 
+interface Statement {
+    all(...bindings: Binding[]): Record<string, Binding>[]
+    run(...bindings: Binding[]): unknown
+    get(...bindings: Binding[]): Record<string, Binding> | null | undefined
+}
+
+interface BunStatement extends Statement {
+    readonly columnNames: string[]
+    values(...bindings: Binding[]): Binding[][]
+}
+
+interface NodeStatement extends Statement {
+    columns(): { name: string }[]
+    setReturnArrays(enabled: boolean): void
+}
+
 interface Connection {
+    readonly inTransaction?: boolean
+    readonly isTransaction?: boolean
     exec(sql: string): void
-    prepare(sql: string): {
-        all(...bindings: Binding[]): Record<string, Binding>[]
-        run(...bindings: Binding[]): unknown
-        get(...bindings: Binding[]): Record<string, Binding> | null | undefined
-    }
+    prepare(sql: string): Statement
     close(): void
 }
 
@@ -24,7 +38,6 @@ export class HostDatabase {
     commits = 0
     readonly calls: DatabaseCall[] = []
     private readonly connection: Connection
-    private transaction = false
     private synced: string
 
     constructor(readonly path = freshPath()) {
@@ -53,41 +66,43 @@ export class HostDatabase {
         this.calls.push(call)
         switch (call.op) {
             case "exec":
-                return this.write(call.immediate, () => this.exec(call.sql, call.bindings.map(decode)))
+                return this.write(
+                    () => this.exec(call.sql, call.bindings.map(decode)),
+                    /^\s*rollback(?:\s*;)?\s*$/i.test(call.sql)
+                )
             case "fields":
                 return { type: "fields", fields: this.fields() }
             case "initialize_fields":
-                return this.write(false, () => {
+                return this.write(() => {
                     for (const [name, value] of Object.entries(call.fields))
                         this.connection
                             .prepare("INSERT INTO __terse_fields VALUES (?, ?) ON CONFLICT(name) DO NOTHING")
                             .run(name, JSON.stringify(value))
                 })
             case "persist_field":
-                return this.write(call.immediate, () => this.persist(call.name, call.value))
+                return this.write(() => this.persist(call.name, call.value))
             case "delete_field":
-                return this.write(call.immediate, () => {
+                return this.write(() => {
                     this.connection.prepare("DELETE FROM __terse_fields WHERE name = ?").run(call.name)
                 })
             case "replace_fields":
-                return this.write(false, () => {
+                return this.write(() => {
                     for (const [name, value] of Object.entries(call.fields)) this.persist(name, value)
                     for (const name of Object.keys(this.fields()))
                         if (!Object.hasOwn(call.fields, name))
                             this.connection.prepare("DELETE FROM __terse_fields WHERE name = ?").run(name)
                 })
             case "alarm":
-                return this.write(false, () => this.alarm())
+                return this.write(() => this.alarm())
             case "set_alarm":
-                return this.write(call.immediate, () => this.updateAlarm(call.timestamp_ms))
+                return this.write(() => this.updateAlarm(call.timestamp_ms))
             case "delete_alarm":
-                return this.write(call.immediate, () => this.updateAlarm(null))
+                return this.write(() => this.updateAlarm(null))
             case "commit":
                 this.commit()
                 return { type: "done" }
             case "rollback":
-                if (this.transaction) this.connection.exec("ROLLBACK")
-                this.transaction = false
+                if (this.inTransaction) this.connection.exec("ROLLBACK")
                 this.synced = this.changeToken()
                 return { type: "done" }
         }
@@ -107,24 +122,29 @@ export class HostDatabase {
     }
 
     close(): void {
-        if (this.transaction) this.connection.exec("ROLLBACK")
+        if (this.inTransaction) this.connection.exec("ROLLBACK")
         this.connection.close()
     }
 
-    private write(immediate: boolean, operation: () => DatabaseResult | void): DatabaseResult {
-        const opened = !this.transaction
-        if (opened) this.connection.exec("BEGIN IMMEDIATE")
-        this.transaction = true
-        const before = this.changeToken()
-        const result = operation() ?? { type: "done" }
-        if (immediate && (opened || this.changeToken() !== before)) this.commit()
-        return result
+    private get inTransaction(): boolean {
+        return this.connection.inTransaction ?? this.connection.isTransaction ?? false
+    }
+
+    private write(operation: () => DatabaseResult | void, rollback = false): DatabaseResult {
+        try {
+            return operation() ?? { type: "done" }
+        } finally {
+            if (!this.inTransaction) {
+                const token = this.changeToken()
+                if (!rollback && token !== this.synced) this.commits++
+                this.synced = token
+            }
+        }
     }
 
     private exec(sql: string, bindings: Binding[]): DatabaseResult {
-        const rows = this.connection.prepare(sql).all(...bindings)
-        const columns = Object.keys(rows[0] ?? {})
-        return { type: "rows", columns, rows: rows.map(row => columns.map(column => encode(row[column]!))) }
+        const { columns, rows } = positionalRows(this.connection.prepare(sql), bindings)
+        return { type: "rows", columns, rows: rows.map(row => row.map(encode)) }
     }
 
     private persist(name: string, value: JsonValue): void {
@@ -160,11 +180,9 @@ export class HostDatabase {
     }
 
     private commit(): void {
-        if (this.transaction) this.connection.exec("COMMIT")
-        this.transaction = false
-        const token = this.changeToken()
-        if (token !== this.synced) this.commits++
-        this.synced = token
+        this.write(() => {
+            if (this.inTransaction) this.connection.exec("COMMIT")
+        })
     }
 
     private changeToken(): string {
@@ -200,6 +218,16 @@ function encode(value: Binding): DatabaseValue {
         return Number.isInteger(value) ? { type: "integer", value: value.toString() } : { type: "real", value }
     if (typeof value === "string") return { type: "text", value }
     return { type: "blob", value: Buffer.from(value).toString("base64") }
+}
+
+function positionalRows(statement: Statement, bindings: Binding[]): { columns: string[]; rows: Binding[][] } {
+    if ("values" in statement) {
+        const bun = statement as BunStatement
+        return { rows: bun.values(...bindings) ?? [], columns: bun.columnNames }
+    }
+    const node = statement as NodeStatement
+    node.setReturnArrays(true)
+    return { rows: node.all(...bindings) as unknown as Binding[][], columns: node.columns().map(column => column.name) }
 }
 
 function freshPath(): string {

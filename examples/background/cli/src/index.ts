@@ -18,7 +18,7 @@ const scenarios: Record<string, (gym: Gym) => Promise<boolean>> = {
         const status = await gym.status()
         return check(status, status.jobs[0].done === 2 && status.activations === 2)
     },
-    // Background SQL is rejected while @Atomic holds the transaction, then retries.
+    // Background SQL is rejected while a db.transaction is open, then retries.
     async atomic(gym) {
         await gym.start(30, 100)
         await sleep(500)

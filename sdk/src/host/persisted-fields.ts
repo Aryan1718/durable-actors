@@ -26,6 +26,7 @@ function bindPersistedFields(
                 value = next
             }
         }
+        database.onFieldRestore(field.name, restored => (value = restored))
         Object.defineProperty(instance, field.name, descriptor)
         context.persistedFields.set(field.name, descriptor)
     }

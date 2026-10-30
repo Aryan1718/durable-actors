@@ -209,13 +209,14 @@ function assertJsonType(
             `${label} must be JSON-compatible; unsupported type ${checker.typeToString(type)}`
         )
     for (const property of type.getProperties()) {
-        const declaration = property.valueDeclaration ?? property.declarations?.[0]
-        if (!declaration || property.name.startsWith("__@"))
+        if (property.name.startsWith("__@"))
             throw new ActorDefinitionError(`${label} must be JSON-compatible; symbol properties are not supported`)
+        // Mapped-type properties (Record, Drizzle's $inferSelect) have no declaration of their own.
+        const declaration = property.valueDeclaration ?? property.declarations?.[0]
         assertJsonType(
             checker,
             unchecked,
-            checker.getTypeOfSymbolAtLocation(property, declaration),
+            declaration ? checker.getTypeOfSymbolAtLocation(property, declaration) : checker.getTypeOfSymbol(property),
             `${label}.${property.name}`,
             !!(property.flags & ts.SymbolFlags.Optional),
             seen
