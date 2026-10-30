@@ -150,7 +150,7 @@ async fn fixture(
     let admin = AdminService::new(api_key.map(str::to_owned), registry.clone(), issuer.clone())?;
     let spec = HostLaunchSpec {
         image_policy: Default::default(),
-        organization_id: Some("org-test".into()),
+        organization_id: "org-test".into(),
         sandboxes: Default::default(),
         project_id: "default".into(),
         source: None,

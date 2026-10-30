@@ -172,7 +172,7 @@ async fn bundle_registration_preserves_code_and_contract_during_secret_rotation(
         .error_for_status()?;
     let active = admin.current_deployment("default").await?.unwrap();
     assert_eq!(active.image_ref, "im-runtime");
-    assert_eq!(active.organization_id.as_deref(), Some("org-test"));
+    assert_eq!(active.organization_id, "org-test");
     assert_eq!(active.actor_entrypoint.as_deref(), Some("actors.mjs"));
     assert_eq!(active.code_snapshot, Some(bundle.encode()?));
     assert!(active.sandboxes.contains_key("ChatRoom"));
@@ -303,6 +303,35 @@ async fn bundle_registration_validates_immutable_artifacts_before_retiring_hosts
 }
 
 #[tokio::test]
+async fn registration_requires_an_organization() -> Result<()> {
+    let (service, admin, _) = fixture()?;
+    let routes = super::super::public_api::router(service, admin.clone());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = format!(
+        "http://{}/v1/projects/default/deployment",
+        listener.local_addr()?
+    );
+    let server = tokio::spawn(async { axum::serve(listener, routes).await });
+    let bundle = crate::bundle::ActorBundle::decode(&crate::sandbox::testing::code_artifact(1))?;
+    for organization in [None, Some("")] {
+        let mut body = serde_json::json!({"bundle": bundle, "contract": contract()});
+        if let Some(organization) = organization {
+            body["organizationId"] = organization.into();
+        }
+        let response = reqwest::Client::new()
+            .put(&url)
+            .bearer_auth("api-key")
+            .json(&body)
+            .send()
+            .await?;
+        assert_eq!(response.status(), reqwest::StatusCode::BAD_REQUEST);
+    }
+    assert!(admin.current_deployment("default").await?.is_none());
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn bundle_contracts_are_scoped_to_the_project() -> Result<()> {
     let (service, admin, _) = fixture()?;
     let first = source();
@@ -375,7 +404,7 @@ fn fixture_with_idle_timeout(
 fn source() -> HostLaunchSpec {
     HostLaunchSpec {
         image_policy: super::super::admin::ImagePolicy::Platform,
-        organization_id: Some("org-test".into()),
+        organization_id: "org-test".into(),
         sandboxes: Default::default(),
         project_id: "default".into(),
         source: None,

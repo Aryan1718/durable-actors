@@ -21,7 +21,7 @@ pub(crate) struct HostLaunchSpec {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sandboxes: BTreeMap<String, SandboxOptions>,
     pub project_id: String,
-    pub organization_id: Option<String>,
+    pub organization_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<DeploymentSource>,
     #[serde(default)]
@@ -75,10 +75,9 @@ impl HostLaunchSpec {
             &self.actor_entrypoint,
         ))
         .expect("host identity is serializable");
-        if let Some(organization) = &self.organization_id {
-            identity
-                .extend(serde_json::to_vec(organization).expect("organization is serializable"));
-        }
+        identity.extend(
+            serde_json::to_vec(&self.organization_id).expect("organization is serializable"),
+        );
         if !self.sandboxes.is_empty() {
             identity.extend(
                 serde_json::to_vec(&self.sandboxes).expect("sandbox options are serializable"),
@@ -94,9 +93,7 @@ impl HostLaunchSpec {
             options.validate()?;
         }
         validate_component("project ID", &self.project_id, 64)?;
-        if let Some(organization) = &self.organization_id {
-            validate_component("organization ID", organization, 64)?;
-        }
+        validate_component("organization ID", &self.organization_id, 64)?;
         if let Some(snapshot) = &self.code_snapshot {
             let manifest = crate::bundle::ActorBundle::decode(snapshot)?;
             ensure!(
@@ -145,14 +142,14 @@ pub(crate) trait AdminRegistry: Send + Sync {
     async fn organization_access_enabled(&self, organization: Option<&str>) -> Result<bool>;
     async fn project_access_enabled(&self, project: &str) -> Result<bool> {
         let spec = self.launch_spec(project).await?;
-        self.organization_access_enabled(spec.as_ref().and_then(|s| s.organization_id.as_deref()))
+        self.organization_access_enabled(spec.as_ref().map(|s| s.organization_id.as_str()))
             .await
     }
     async fn disabled_deployments(&self) -> Result<Vec<HostLaunchSpec>> {
         let mut disabled = Vec::new();
         for spec in self.launch_specs().await? {
             if !self
-                .organization_access_enabled(spec.organization_id.as_deref())
+                .organization_access_enabled(Some(&spec.organization_id))
                 .await?
             {
                 disabled.push(spec);

@@ -41,7 +41,7 @@ pub struct ControlPlaneProcessConfig {
     pub region: Option<String>,
     pub alarm_poll_interval: Duration,
     pub redis: Option<RedisConfig>,
-    pub project_limits: Option<super::ProjectLimits>,
+    pub organization_limits: Option<super::OrganizationLimits>,
 }
 
 pub struct ControlPlaneStorageConfig {
@@ -196,12 +196,12 @@ async fn control_plane_routes(
         .saturating_add(Duration::from_millis(
             crate::host_leases::MAX_HOST_LEASE_DURATION_MS,
         ));
-    let admission = config.project_limits.map(|limits| {
-        use super::project_limits::*;
+    let admission = config.organization_limits.map(|limits| {
+        use super::organization_limits::*;
         let reservations: Arc<dyn ReservationStore> = match &redis {
             Some(redis) => Arc::new(RedisReservations::new(
                 redis.clone(),
-                "durable-actors:admission:v2",
+                "durable-actors:admission:v3",
                 retention,
             )),
             None => Arc::new(MemoryReservations::new(
@@ -574,7 +574,7 @@ impl ControlPlaneProcessConfig {
             region,
             alarm_poll_interval,
             redis: redis_config(&mut get)?,
-            project_limits: super::ProjectLimits::from_lookup(&mut get, true)?,
+            organization_limits: super::OrganizationLimits::from_lookup(&mut get, true)?,
         })
     }
 }

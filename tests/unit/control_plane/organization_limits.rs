@@ -64,13 +64,13 @@ async fn routing_preserves_suspension_and_admission_errors() -> Result<()> {
 #[test]
 fn limits_are_enabled_hosted_and_opt_in_locally() -> Result<()> {
     assert_eq!(
-        ProjectLimits::from_lookup(&mut |_| None, true)?,
+        OrganizationLimits::from_lookup(&mut |_| None, true)?,
         Some(limits(500, 50, 100))
     );
     assert!(local_admission(&mut |_| None)?.is_none());
     assert!(
         local_admission(
-            &mut |key| (key == "DURABLE_ACTORS_PROJECT_LIMITS_ENABLED").then(|| "true".into())
+            &mut |key| (key == "DURABLE_ACTORS_ORGANIZATION_LIMITS_ENABLED").then(|| "true".into())
         )?
         .is_some()
     );
@@ -78,24 +78,41 @@ fn limits_are_enabled_hosted_and_opt_in_locally() -> Result<()> {
 }
 
 #[tokio::test]
-async fn reservations_enforce_capacity_until_the_actor_stops() -> Result<()> {
+async fn organization_projects_share_capacity_until_the_actor_stops() -> Result<()> {
     for store in stores()? {
         let limits = limits(1, 50, 100);
-        let first = activation("p", "one", "first");
-        let second = activation("p", "two", "second");
+        let first = activation("o", "p", "one", "first");
+        let second = activation("o", "q", "two", "second");
         store.reserve(&first, limits).await?;
         store.reserve(&first, limits).await?;
         assert_quota(store.reserve(&second, limits).await, 1);
         let lifecycle = LifecycleStore::default()
             .with_observer(Arc::new(ActorAdmission::new(limits, store.clone())));
         lifecycle
-            .record(report(&first, LifecycleKind::Stopped))
+            .record(event(&first, LifecycleKind::Stopped))
             .await?;
         store.reserve(&second, limits).await?;
         store
-            .reserve(&activation("other", "one", "first"), limits)
+            .reserve(&activation("other", "p", "one", "first"), limits)
             .await?;
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn lifecycle_reports_without_an_organization_are_rejected() -> Result<()> {
+    let store = Arc::new(MemoryReservations::new(
+        Arc::new(TestClock(AtomicU64::new(1000))),
+        RETENTION,
+    ));
+    let admission = ActorAdmission::new(limits(1, 50, 100), store);
+    let mut orphan = event(
+        &activation("o", "p", "one", "first"),
+        LifecycleKind::Started,
+    );
+    orphan.organization_id = None;
+    let error = admission.observe(&orphan).await.unwrap_err();
+    assert_eq!(error.to_string(), "lifecycle report has no organization");
     Ok(())
 }
 
@@ -103,8 +120,8 @@ async fn reservations_enforce_capacity_until_the_actor_stops() -> Result<()> {
 async fn releasing_a_failed_launch_frees_capacity() -> Result<()> {
     for store in stores()? {
         let limits = limits(1, 50, 100);
-        let failed = activation("p", "one", "failed");
-        let next = activation("p", "two", "next");
+        let failed = activation("o", "p", "one", "failed");
+        let next = activation("o", "p", "two", "next");
         store.reserve(&failed, limits).await?;
         assert_quota(store.reserve(&next, limits).await, 1);
         store.release(&failed).await?;
@@ -118,11 +135,11 @@ async fn stopping_frees_capacity_but_waking_again_consumes_another_start_token()
     let clock = Arc::new(TestClock(AtomicU64::new(1000)));
     let store = MemoryReservations::new(clock.clone(), RETENTION);
     let limits = limits(1, 1, 1);
-    let first = activation("p", "same-actor", "first");
-    let second = activation("p", "same-actor", "second");
+    let first = activation("o", "p", "same-actor", "first");
+    let second = activation("o", "p", "same-actor", "second");
     store.reserve(&first, limits).await?;
     store
-        .observe(&report(&first, LifecycleKind::Stopped))
+        .observe(&first, &event(&first, LifecycleKind::Stopped).report)
         .await?;
     assert_rate(store.reserve(&second, limits).await);
     clock.0.store(2000, Ordering::SeqCst);
@@ -135,13 +152,13 @@ async fn slots_expire_unless_reports_renew_them() -> Result<()> {
     let clock = Arc::new(TestClock(AtomicU64::new(0)));
     let store = MemoryReservations::new(clock.clone(), RETENTION);
     let limits = limits(1, 50, 100);
-    let live = activation("p", "one", "live");
-    let lost = activation("p", "two", "lost");
-    let next = activation("p", "three", "next");
+    let live = activation("o", "p", "one", "live");
+    let lost = activation("o", "p", "two", "lost");
+    let next = activation("o", "p", "three", "next");
     store.reserve(&live, limits).await?;
     clock.0.store(LAUNCH_LEASE_MS - 1, Ordering::SeqCst);
     store
-        .observe(&report(&live, LifecycleKind::Heartbeat))
+        .observe(&live, &event(&live, LifecycleKind::Heartbeat).report)
         .await?;
     clock.0.store(LAUNCH_LEASE_MS + 1, Ordering::SeqCst);
     assert_quota(store.reserve(&next, limits).await, 1);
@@ -158,11 +175,11 @@ async fn slots_expire_unless_reports_renew_them() -> Result<()> {
 async fn postgres_overrides_inherit_unset_defaults() -> Result<()> {
     with_postgres(async |fixture| {
         let database = PostgresDatabase::connect(&fixture.url).await?;
-        let defaults = ProjectLimits::default();
+        let defaults = OrganizationLimits::default();
         let reservations = MemoryReservations::new(Arc::new(crate::clock::SystemClock), RETENTION);
         let admission = ActorAdmission::new(defaults, Arc::new(reservations)).with_database(database.clone());
-        database.execute("INSERT INTO durable_actors_project_limits (project_id, max_active_actors) VALUES ('p', 20000)", &[]).await?;
-        assert_eq!(admission.limits("p").await?, limits(20_000, 50, 100));
+        database.execute("INSERT INTO durable_actors_organization_limits (organization_id, max_active_actors) VALUES ('o', 20000)", &[]).await?;
+        assert_eq!(admission.limits("o").await?, limits(20_000, 50, 100));
         assert_eq!(admission.limits("other").await?, defaults);
         Ok(())
     }).await
@@ -184,16 +201,17 @@ fn stores() -> Result<Vec<Arc<dyn ReservationStore>>> {
     Ok(stores)
 }
 
-fn limits(max_active_actors: u32, starts_per_second: u32, start_burst: u32) -> ProjectLimits {
-    ProjectLimits {
+fn limits(max_active_actors: u32, starts_per_second: u32, start_burst: u32) -> OrganizationLimits {
+    OrganizationLimits {
         max_active_actors,
         starts_per_second,
         start_burst,
     }
 }
 
-fn activation(project: &str, actor: &str, session: &str) -> Activation {
+fn activation(organization: &str, project: &str, actor: &str, session: &str) -> Activation {
     Activation::new(
+        organization,
         &ActorKey {
             project_id: project.into(),
             actor_name: "Counter".into(),
@@ -204,9 +222,9 @@ fn activation(project: &str, actor: &str, session: &str) -> Activation {
     )
 }
 
-fn report(activation: &Activation, kind: LifecycleKind) -> LifecycleEvent {
+fn event(activation: &Activation, kind: LifecycleKind) -> LifecycleEvent {
     LifecycleEvent {
-        organization_id: None,
+        organization_id: Some(activation.organization.clone()),
         event_id: format!("{}:{kind:?}", activation.session),
         actor: activation.actor.clone(),
         host_id: activation.host.clone(),

@@ -140,7 +140,7 @@ impl ControlPlaneService {
         project_id: &str,
     ) -> Result<Option<HostLaunchSpec>> {
         let spec = self.registry.launch_spec(project_id).await?;
-        self.ensure_organization_access(spec.as_ref().and_then(|s| s.organization_id.as_deref()))
+        self.ensure_organization_access(spec.as_ref().map(|s| s.organization_id.as_str()))
             .await?;
         Ok(spec)
     }
@@ -173,7 +173,7 @@ impl ControlPlaneService {
         source.validate()?;
         let mut update = admin.lock_deployment(&source.project_id).await?;
         self.ensure_project_access(&source.project_id).await?;
-        self.ensure_organization_access(source.organization_id.as_deref())
+        self.ensure_organization_access(Some(&source.organization_id))
             .await?;
         let previous = admin.current_deployment(&source.project_id).await?;
         let local_build = match &self.local_builds {
@@ -571,7 +571,7 @@ impl ControlPlaneService {
                 let replacement_token = self
                     .host_token_issuer
                     .issue_host(
-                        principal.organization_id.as_deref(),
+                        &spec.organization_id,
                         &principal.host_id,
                         &principal.session_id,
                         principal
@@ -758,7 +758,7 @@ impl ControlPlaneService {
                 Ok(target) => return Ok(target),
                 Err(error)
                     if error.is::<AssignmentOutcomeUnknown>()
-                        || error.is::<super::project_limits::AdmissionFailure>() =>
+                        || error.is::<super::organization_limits::AdmissionFailure>() =>
                 {
                     return Err(error);
                 }
@@ -996,7 +996,7 @@ pub(crate) trait HostProvisioner: Send + Sync {
 }
 
 pub(crate) struct SandboxHostProvisioner {
-    admission: Option<Arc<super::project_limits::ActorAdmission>>,
+    admission: Option<Arc<super::organization_limits::ActorAdmission>>,
     runtime_images: Option<super::process::RuntimeImages>,
     pool: Option<Arc<crate::sandbox::pool::SparePool>>,
     resource_bounds: Option<crate::sandbox::ResourceBounds>,
@@ -1009,7 +1009,7 @@ pub(crate) struct SandboxHostProvisioner {
 impl SandboxHostProvisioner {
     pub(super) fn with_actor_admission(
         mut self,
-        admission: Arc<super::project_limits::ActorAdmission>,
+        admission: Arc<super::organization_limits::ActorAdmission>,
     ) -> Self {
         self.admission = Some(admission);
         self
@@ -1155,12 +1155,17 @@ impl SandboxHostProvisioner {
                 .await;
         };
         let (host, session) = (request.host_id.clone(), request.session_id.clone());
-        admission.reserve(actor, &host, &session).await?;
+        let organization = &spec.organization_id;
+        admission
+            .reserve(organization, actor, &host, &session)
+            .await?;
         let launched = self
             .provision(spec, region, actor, request, started_at)
             .await;
         if launched.is_err() {
-            admission.release(actor, &host, &session).await;
+            admission
+                .release(organization, actor, &host, &session)
+                .await;
         }
         launched
     }
@@ -1341,7 +1346,7 @@ impl SandboxHostProvisioner {
         let host_token = self
             .issuer
             .issue_host(
-                spec.organization_id.as_deref(),
+                &spec.organization_id,
                 &host_id,
                 &session_id,
                 &config_key,

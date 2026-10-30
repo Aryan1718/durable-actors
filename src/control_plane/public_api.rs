@@ -327,7 +327,7 @@ async fn register_deployment(
         .map_err(ApiError::bad_request)?;
     let spec = HostLaunchSpec {
         image_policy,
-        organization_id: Some(request.organization_id),
+        organization_id: request.organization_id,
         sandboxes: Default::default(),
         project_id: project_id(path)?,
         source,
@@ -568,7 +568,7 @@ struct RegisterDeploymentRequest {
 struct CurrentDeployment {
     #[serde(skip_serializing_if = "Option::is_none")]
     image_ref: Option<String>,
-    organization_id: Option<String>,
+    organization_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     bundle: Option<crate::bundle::ActorBundle>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -620,9 +620,9 @@ impl ApiError {
         } else if error.is::<super::access::AccessDisabled>() {
             Self::access(error)
         } else if let Some(rejected) =
-            error.downcast_ref::<super::project_limits::AdmissionRejected>()
+            error.downcast_ref::<super::organization_limits::AdmissionRejected>()
         {
-            use super::project_limits::AdmissionRejected;
+            use super::organization_limits::AdmissionRejected;
             let (code, retry_after_seconds) = match rejected {
                 AdmissionRejected::Quota { .. } => ("actor_quota_exceeded", None),
                 AdmissionRejected::Rate {

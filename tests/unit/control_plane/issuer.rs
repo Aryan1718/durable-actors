@@ -28,7 +28,7 @@ fn socket_tickets_bind_actor_metadata_with_short_admission() -> Result<()> {
     assert!(issuer.verify_socket_at(&token, now - 1_000).is_err());
     assert!(socket_issuer()?.verify_socket_at(&token, now).is_err());
     let host = issuer.issue_host(
-        Some("org-test"),
+        "org-test",
         &HostId::new("host.v3.r1.one"),
         &uuid::Uuid::new_v4().to_string(),
         "r1",
@@ -61,7 +61,7 @@ fn host_tokens_round_trip_with_a_bounded_lifetime() -> Result<()> {
     let before = unix_millis()?;
     let host = HostId::new("host.v3.r1.one");
     let issued = issuer.issue_host(
-        Some("org-test"),
+        "org-test",
         &host,
         &uuid::Uuid::new_v4().to_string(),
         "r1",

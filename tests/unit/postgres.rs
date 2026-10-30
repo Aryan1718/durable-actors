@@ -57,8 +57,8 @@ async fn contract_schema_keeps_one_contract_per_project() -> Result<()> {
         let client = database.pool.get().await?;
         client
             .batch_execute(
-                "INSERT INTO durable_actors_deployment (project_id, image_ref, working_directory)
-             VALUES ('team-a', 'image', '/app'), ('team-b', 'image', '/app');
+                "INSERT INTO durable_actors_deployment (project_id, image_ref, working_directory, organization_id)
+             VALUES ('team-a', 'image', '/app', 'org'), ('team-b', 'image', '/app', 'org');
              INSERT INTO durable_actors_contracts (project_id, contract_hash, contract_json)
              VALUES ('team-a', 'hash', '{}'), ('team-b', 'hash', '{}');",
             )
@@ -86,6 +86,58 @@ async fn contract_schema_keeps_one_contract_per_project() -> Result<()> {
             .await?
             .get(0);
         assert_eq!(project, "team-b");
+        Ok(())
+    })
+    .await
+}
+
+#[tokio::test]
+async fn organization_limits_migration_requires_deployment_organizations() -> Result<()> {
+    with_postgres_schema(async |database| {
+        let mut client = database.pool.get().await?;
+        embedded::migrations::runner()
+            .set_target(refinery::Target::Version(24))
+            .run_async(&mut **client)
+            .await?;
+        client
+            .batch_execute(
+                "INSERT INTO durable_actors_deployment (project_id, image_ref, working_directory, organization_id)
+             VALUES ('legacy', 'image', '/app', NULL), ('a', 'image', '/app', 'org'), ('b', 'image', '/app', 'org');
+             INSERT INTO durable_actors_project_limits VALUES ('a', 20000, NULL, 1000), ('b', 5000, 500, NULL);",
+            )
+            .await?;
+        let preflight = embedded::migrations::runner()
+            .run_async(&mut **client)
+            .await
+            .map_err(anyhow::Error::new)
+            .unwrap_err();
+        let preflight = format!("{preflight:#}");
+        assert!(preflight.contains("deployments without a valid organization_id: legacy"));
+        assert!(preflight.contains("HINT: Redeploy each project with organizationId"));
+        // Stands in for the redeploy, which would also replace the project's hosts.
+        client
+            .batch_execute("UPDATE durable_actors_deployment SET organization_id = 'org' WHERE project_id = 'legacy'")
+            .await?;
+        embedded::migrations::runner()
+            .run_async(&mut **client)
+            .await?;
+        let merged = client
+            .query_one("SELECT max_active_actors, actor_starts_per_second, actor_start_burst FROM durable_actors_organization_limits WHERE organization_id = 'org'", &[])
+            .await?;
+        assert_eq!(
+            (merged.get::<_, i64>(0), merged.get::<_, i64>(1), merged.get::<_, i64>(2)),
+            (20_000, 500, 1000)
+        );
+        for (organization, code) in [
+            ("NULL", tokio_postgres::error::SqlState::NOT_NULL_VIOLATION),
+            ("''", tokio_postgres::error::SqlState::CHECK_VIOLATION),
+        ] {
+            let rejected = client
+                .execute(&format!("UPDATE durable_actors_deployment SET organization_id = {organization}"), &[])
+                .await
+                .unwrap_err();
+            assert_eq!(rejected.code(), Some(&code));
+        }
         Ok(())
     })
     .await
@@ -150,7 +202,7 @@ async fn check_isolated_rows(
     first: &tokio_postgres::Client,
     second: &tokio_postgres::Client,
 ) -> Result<()> {
-    let insert = "INSERT INTO durable_actors_deployment (project_id, image_ref, working_directory) VALUES ('project', 'image', '/app')";
+    let insert = "INSERT INTO durable_actors_deployment (project_id, image_ref, working_directory, organization_id) VALUES ('project', 'image', '/app', 'org')";
     first.execute(insert, &[]).await?;
     let count: i64 = second
         .query_one("SELECT count(*) FROM durable_actors_deployment", &[])

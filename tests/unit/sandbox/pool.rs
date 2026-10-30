@@ -41,7 +41,7 @@ async fn platform_spares_follow_current_images_while_custom_spares_remain_pinned
         );
         let registry = LocalAdminRegistry::default();
         let platform: HostLaunchSpec = serde_json::from_value(serde_json::json!({
-            "projectId":"platform", "imagePolicy":"platform", "imageRef":"im-a",
+            "projectId":"platform", "organizationId":"org-test", "imagePolicy":"platform", "imageRef":"im-a",
             "codeSnapshot":crate::sandbox::testing::code_artifact(1),
             "workingDirectory":"/customer", "actorEntrypoint":"actors.mjs", "secretRefs":[]
         }))?;
@@ -105,7 +105,7 @@ async fn custom_resources_cannot_claim_default_sized_spares() -> Result<()> {
     with_postgres(async |fixture| {
         let pool = pool(PostgresDatabase::connect(&fixture.url).await?);
         let spec: HostLaunchSpec = serde_json::from_value(serde_json::json!({
-            "projectId":"default","imageRef":"im-runtime","codeSnapshot":crate::sandbox::testing::code_artifact(1),"workingDirectory":"/customer","secretRefs":[]
+            "projectId":"default","organizationId":"org-test","imageRef":"im-runtime","codeSnapshot":crate::sandbox::testing::code_artifact(1),"workingDirectory":"/customer","secretRefs":[]
         }))?;
         let key = pool.key("im-runtime", "canada");
         let name = reserve(&pool.store, &key, 1).await?.unwrap();
@@ -264,7 +264,7 @@ async fn reconciliation_keeps_spares_for_every_project_runtime() -> Result<()> {
             registry
                 .register_test_deployment(&HostLaunchSpec {
                     image_policy: Default::default(),
-                    organization_id: Some("org-test".into()),
+                    organization_id: "org-test".into(),
                     sandboxes: Default::default(),
                     project_id: project.into(),
                     source: None,

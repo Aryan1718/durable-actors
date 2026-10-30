@@ -173,7 +173,7 @@ async fn gcs_routes_use_the_hosts_epoch_without_claiming_or_preparing_in_the_con
     registry
         .register_test_deployment(&HostLaunchSpec {
             image_policy: Default::default(),
-            organization_id: Some("org-test".into()),
+            organization_id: "org-test".into(),
             sandboxes: Default::default(),
             project_id: "default".into(),
             source: None,
@@ -264,7 +264,7 @@ async fn deploying_replaces_running_hosts_even_when_configuration_is_unchanged()
     );
     let first = HostLaunchSpec {
         image_policy: Default::default(),
-        organization_id: Some("org-test".into()),
+        organization_id: "org-test".into(),
         sandboxes: Default::default(),
         project_id: "default".into(),
         source: None,
@@ -528,7 +528,7 @@ async fn sandbox_regions_constrain_new_and_existing_actors() -> Result<()> {
         )?;
         let registry = Arc::new(LocalAdminRegistry::default());
         let spec: HostLaunchSpec = serde_json::from_value(serde_json::json!({
-            "projectId":"default", "imageRef":"image", "workingDirectory":"/app", "secretRefs":[],
+            "projectId":"default", "organizationId":"org-test", "imageRef":"image", "workingDirectory":"/app", "secretRefs":[],
             "sandboxes":{"Counter":{"regions":["canada","north-america-east"]}}
         }))?;
         registry.register_test_deployment(&spec).await?;
@@ -591,7 +591,7 @@ fn sandbox_resources_override_only_the_configured_fields() -> Result<()> {
         None,
     );
     let spec: HostLaunchSpec = serde_json::from_value(serde_json::json!({
-        "projectId":"default", "imageRef":"image", "workingDirectory":"/app", "secretRefs":[],
+        "projectId":"default", "organizationId":"org-test", "imageRef":"image", "workingDirectory":"/app", "secretRefs":[],
         "sandboxes":{"Counter":{"cpu":2.5,"idleTimeoutMs":60000},"Room":{"memoryMiB":4096}}
     }))?;
     let pool = crate::sandbox::pool::SparePool::new(
@@ -709,7 +709,7 @@ async fn a_losing_activation_routes_to_the_ready_winner() -> Result<()> {
     registry
         .register_test_deployment(&HostLaunchSpec {
             image_policy: Default::default(),
-            organization_id: Some("org-test".into()),
+            organization_id: "org-test".into(),
             sandboxes: Default::default(),
             project_id: "default".into(),
             source: None,
@@ -837,7 +837,7 @@ async fn provisioning_never_changes_the_assigned_region() -> Result<()> {
         registry
             .register_test_deployment(&HostLaunchSpec {
                 image_policy: Default::default(),
-                organization_id: Some("org-test".into()),
+                organization_id: "org-test".into(),
                 sandboxes: Default::default(),
                 project_id: "default".into(),
                 source: None,
@@ -919,7 +919,7 @@ async fn application_credentials_work_without_postgres() -> Result<()> {
     registry
         .register_test_deployment(&HostLaunchSpec {
             image_policy: Default::default(),
-            organization_id: Some("org-test".into()),
+            organization_id: "org-test".into(),
             sandboxes: Default::default(),
             project_id: "default".into(),
             source: None,
@@ -1027,7 +1027,7 @@ async fn socket_ticket_issuance_requires_api_key_and_cannot_delegate_backend_acc
         "host.v3.{}.fixture",
         HostLaunchSpec {
             image_policy: Default::default(),
-            organization_id: Some("org-test".into()),
+            organization_id: "org-test".into(),
             sandboxes: Default::default(),
             project_id: "default".into(),
             source: None,
@@ -1069,7 +1069,7 @@ async fn socket_ticket_issuance_requires_api_key_and_cannot_delegate_backend_acc
         serde_json::json!({"metadata":{"userId":"trusted"},"homeRegion":"north-america-east"});
     let host_token = issuer
         .issue_host(
-            Some("org-test"),
+            "org-test",
             &fixture_host("fixture"),
             &uuid::Uuid::new_v4().to_string(),
             "v1",
@@ -1166,7 +1166,7 @@ async fn actor_discovery_authenticates_and_validates_each_request_contract() -> 
             "host.v3.{}.fixture",
             HostLaunchSpec {
                 image_policy: Default::default(),
-                organization_id: Some("org-test".into()),
+                organization_id: "org-test".into(),
                 sandboxes: Default::default(),
                 project_id: "default".into(),
                 source: None,
@@ -1285,7 +1285,7 @@ async fn deployment_reads_and_deletion_require_the_api_key() -> Result<()> {
     admin
         .register_test_deployment(&HostLaunchSpec {
             image_policy: Default::default(),
-            organization_id: Some("org-test".into()),
+            organization_id: "org-test".into(),
             sandboxes: Default::default(),
             project_id: "default".into(),
             source: Some(super::super::admin::DeploymentSource::Local(
@@ -1374,7 +1374,7 @@ async fn contract_api_returns_the_current_deployments_contract() -> Result<()> {
     let admin = AdminService::new(Some("api-key".into()), registry.clone(), issuer.clone())?;
     let host_token = issuer
         .issue_host(
-            Some("org-test"),
+            "org-test",
             &HostId::new("host.v3.r1.one"),
             &uuid::Uuid::new_v4().to_string(),
             "r1",
@@ -1598,7 +1598,7 @@ async fn project_http_deployments_only_replace_and_retire_their_own_hosts() -> R
 fn fixture_host(suffix: &str) -> HostId {
     let spec = HostLaunchSpec {
         image_policy: Default::default(),
-        organization_id: Some("org-test".into()),
+        organization_id: "org-test".into(),
         sandboxes: Default::default(),
         source: None,
         code_snapshot: None,
@@ -1629,7 +1629,7 @@ async fn regional_discovery_allows_omitted_home_region() -> Result<()> {
                 registry
                     .register_test_deployment(&HostLaunchSpec {
                         image_policy: Default::default(),
-                        organization_id: Some("org-test".into()),
+                        organization_id: "org-test".into(),
                         sandboxes: Default::default(),
                         project_id: project.into(),
                         source: None,

@@ -61,32 +61,34 @@ Configuration uses environment variables. Precedence is to use exported variable
 | `DURABLE_ACTORS_REGION`                 | Unset   | Default region for new actors. Without a decorator region override, explicit assignments must match it; existing actors keep their saved home.                                                                                                                                              |
 | `DURABLE_ACTORS_HOME_REGION`            | Unset   | Region requested by a trusted backend. Omit to use the actor's saved home or the server default.                                                                                                                                                                                            |
 
-## Project actor limits
+## Organization actor limits
 
-Hosted control planes enable per-project limits by default; local development requires explicit opt-in. Controllers share Redis for enforcement, or use memory when Redis is absent (single controller only).
+Hosted control planes enable per-organization limits by default, shared by every project whose deployment names that `organizationId`; local development requires explicit opt-in. Controllers share Redis for enforcement, or use memory when Redis is absent (single controller only).
 
 | Variable | Default | Description |
 | --- | --- | --- |
-| `DURABLE_ACTORS_PROJECT_LIMITS_ENABLED` | `true` hosted; `false` local | Enable activation limits. |
-| `DURABLE_ACTORS_PROJECT_MAX_ACTIVE_ACTORS` | `500` | Maximum starting, running, and draining activations. |
-| `DURABLE_ACTORS_PROJECT_ACTOR_STARTS_PER_SECOND` | `50` | Sustained start rate, including waking dormant actors. |
-| `DURABLE_ACTORS_PROJECT_ACTOR_START_BURST` | `100` | Start-token capacity, initially full. |
+| `DURABLE_ACTORS_ORGANIZATION_LIMITS_ENABLED` | `true` hosted; `false` local | Enable activation limits. |
+| `DURABLE_ACTORS_ORGANIZATION_MAX_ACTIVE_ACTORS` | `500` | Maximum starting, running, and draining activations. |
+| `DURABLE_ACTORS_ORGANIZATION_ACTOR_STARTS_PER_SECOND` | `50` | Sustained start rate, including waking dormant actors. |
+| `DURABLE_ACTORS_ORGANIZATION_ACTOR_START_BURST` | `100` | Start-token capacity, initially full. |
 
-Positive integer limits also map to the Helm chart's `projectLimits` values. Each invocation, WebSocket, or alarm that starts a sandbox consumes one start token and active slot; warm deliveries consume neither. A confirmed lifecycle stop releases its slot; a slot also expires 35 seconds after its host's last report, or 3 minutes after launch if the host never reports. Rejections return `429` with `actor_quota_exceeded` or `actor_start_rate_limited`; rate rejections include `Retry-After`. Backend failures block new starts with `503`.
+Positive integer limits also map to the Helm chart's `organizationLimits` values. Each invocation, WebSocket, or alarm that starts a sandbox consumes one start token and active slot; warm deliveries consume neither. A confirmed lifecycle stop releases its slot; a slot also expires 35 seconds after its host's last report, or 3 minutes after launch if the host never reports. Rejections return `429` with `actor_quota_exceeded` or `actor_start_rate_limited`; rate rejections include `Retry-After`. Backend failures block new starts with `503`.
 
 Operators can override hosted defaults directly in PostgreSQL without restarting:
 
 ```sql
-INSERT INTO durable_actors_project_limits
-    (project_id, max_active_actors, actor_starts_per_second, actor_start_burst)
-VALUES ('my-project', 20000, 500, 1000)
-ON CONFLICT (project_id) DO UPDATE SET
+INSERT INTO durable_actors_organization_limits
+    (organization_id, max_active_actors, actor_starts_per_second, actor_start_burst)
+VALUES ('my-organization', 20000, 500, 1000)
+ON CONFLICT (organization_id) DO UPDATE SET
     max_active_actors = EXCLUDED.max_active_actors,
     actor_starts_per_second = EXCLUDED.actor_starts_per_second,
     actor_start_burst = EXCLUDED.actor_start_burst;
 ```
 
 `NULL` inherits the environment default; deleting the row restores all defaults. Lowering capacity blocks additional starts while existing hosts continue serving. Overrides are operator-only; local opt-in uses environment defaults.
+
+Every deployment must have a valid `organization_id`; local development uses `local`. Upgrading to this schema copies each project override to its organization, keeping the highest value per setting, and drops `durable_actors_project_limits`. Startup fails without changes, listing the affected projects, while any deployment lacks a valid organization or any project override lacks a deployment. Redeploy those projects with `organizationId` before upgrading; a redeploy replaces their hosts, so none keep credentials without an organization.
 
 ## Authentication and callbacks
 
@@ -172,7 +174,7 @@ Each message contains the lifecycle event with four additional fields:
 
 | Field | Meaning |
 | --- | --- |
-| `organizationId` | Owning organization supplied at deployment; null for legacy deployments. |
+| `organizationId` | Owning organization supplied at deployment. |
 | `usageId` | Stable `<hostId>:<sessionId>` activation ID, shared by its start and stop. |
 | `revision` | `2 * sequence` for a host report; `2 * sequence + 1` for an estimated stop based on that report. Higher revisions replace lower revisions for the same activation. |
 | `endedAtMs` | `null` for start or a correction from a live host; the real or estimated stop timestamp for stop. |

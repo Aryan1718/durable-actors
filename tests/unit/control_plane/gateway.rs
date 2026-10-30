@@ -113,7 +113,7 @@ async fn gateways_keep_connections_and_metadata_when_the_actor_host_changes() ->
     registry
         .register_test_deployment(&HostLaunchSpec {
             image_policy: Default::default(),
-            organization_id: Some("org-test".into()),
+            organization_id: "org-test".into(),
             project_id: "default".into(),
             sandboxes: [(
                 "Counter".into(),

@@ -530,7 +530,7 @@ impl Stack {
         };
         let spec = HostLaunchSpec {
             image_policy: Default::default(),
-            organization_id: Some("org-test".into()),
+            organization_id: "org-test".into(),
             sandboxes: Default::default(),
             source: None,
             code_snapshot: None,
@@ -613,7 +613,7 @@ impl Stack {
         });
         let token = issuer
             .issue_host(
-                Some("org-test"),
+                "org-test",
                 &host_id,
                 "00000000-0000-4000-8000-000000000001",
                 &revision,

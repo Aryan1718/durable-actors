@@ -4,10 +4,13 @@ use anyhow::{Result, bail};
 use async_trait::async_trait;
 
 use super::{
-    Activation, AdmissionRejected, LAUNCH_LEASE_MS, ProjectLimits, REPORT_LEASE_MS,
+    Activation, AdmissionRejected, LAUNCH_LEASE_MS, OrganizationLimits, REPORT_LEASE_MS,
     ReservationStore,
 };
-use crate::{actor_lifecycle::LifecycleEvent, redis_client::Redis};
+use crate::{
+    actor_lifecycle::{LifecycleKind, LifecycleReport},
+    redis_client::Redis,
+};
 
 pub(in crate::control_plane) struct RedisReservations {
     redis: Redis,
@@ -24,8 +27,8 @@ impl RedisReservations {
         }
     }
 
-    fn prefix(&self, project: &str) -> String {
-        format!("{}:{{{project}}}", self.namespace)
+    fn prefix(&self, organization: &str) -> String {
+        format!("{}:{{{organization}}}", self.namespace)
     }
 
     fn retention_ms(&self) -> u64 {
@@ -35,8 +38,8 @@ impl RedisReservations {
 
 #[async_trait]
 impl ReservationStore for RedisReservations {
-    async fn reserve(&self, activation: &Activation, limits: ProjectLimits) -> Result<()> {
-        let prefix = self.prefix(&activation.actor.project_id);
+    async fn reserve(&self, activation: &Activation, limits: OrganizationLimits) -> Result<()> {
+        let prefix = self.prefix(&activation.organization);
         let member = activation.member()?;
         let mut command = redis::cmd("EVAL");
         command
@@ -67,7 +70,7 @@ impl ReservationStore for RedisReservations {
     }
 
     async fn release(&self, activation: &Activation) -> Result<()> {
-        let prefix = self.prefix(&activation.actor.project_id);
+        let prefix = self.prefix(&activation.organization);
         let member = activation.member()?;
         let mut command = redis::cmd("EVAL");
         command
@@ -80,9 +83,9 @@ impl ReservationStore for RedisReservations {
         Ok(())
     }
 
-    async fn observe(&self, event: &LifecycleEvent) -> Result<()> {
-        let prefix = self.prefix(&event.actor.project_id);
-        let member = Activation::new(&event.actor, &event.host_id, &event.session_id).member()?;
+    async fn observe(&self, activation: &Activation, report: &LifecycleReport) -> Result<()> {
+        let prefix = self.prefix(&activation.organization);
+        let member = activation.member()?;
         let mut command = redis::cmd("EVAL");
         command
             .arg(include_str!("observe.lua"))
@@ -90,9 +93,9 @@ impl ReservationStore for RedisReservations {
             .arg(format!("{prefix}:active"))
             .arg(format!("{prefix}:session:{member}"))
             .arg(member)
-            .arg(event.report.owner_epoch)
-            .arg(event.report.sequence)
-            .arg(event.report.kind == crate::actor_lifecycle::LifecycleKind::Stopped)
+            .arg(report.owner_epoch)
+            .arg(report.sequence)
+            .arg(report.kind == LifecycleKind::Stopped)
             .arg(self.retention_ms())
             .arg(REPORT_LEASE_MS);
         let _: i32 = self.redis.run(command).await?;

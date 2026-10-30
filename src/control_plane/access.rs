@@ -112,7 +112,7 @@ impl ControlPlaneService {
         };
         if !self
             .registry
-            .organization_access_enabled(spec.organization_id.as_deref())
+            .organization_access_enabled(Some(&spec.organization_id))
             .await?
         {
             self.terminate_deployment_hosts(&spec).await?;

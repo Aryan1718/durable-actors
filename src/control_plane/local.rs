@@ -334,7 +334,7 @@ async fn local_routes(
     )?;
     let spec = HostLaunchSpec {
         image_policy: Default::default(),
-        organization_id: Some("local".into()),
+        organization_id: "local".into(),
         sandboxes: Default::default(),
         project_id: options.project_id.clone(),
         source: None,
@@ -355,7 +355,8 @@ async fn local_routes(
     };
     let max_socket_connections =
         crate::sockets::max_connections(&mut |name| std::env::var(name).ok())?;
-    let admission = super::project_limits::local_admission(&mut |name| std::env::var(name).ok())?;
+    let admission =
+        super::organization_limits::local_admission(&mut |name| std::env::var(name).ok())?;
     let mut provisioner = SandboxHostProvisioner::new(provider, runtime, issuer.clone(), None)
         .with_runtime_access(storage.access.clone());
     if let Some(admission) = &admission {

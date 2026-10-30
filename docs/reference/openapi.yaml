@@ -59,7 +59,7 @@ paths:
             operationId: setOrganizationAccess
             tags: [Access]
             summary: Suspend or restore organization access
-            description: Persists organization holds independently for admin and billing sources; source defaults to admin. Setting enabled to false adds that source's hold; true clears only that source's hold. Access is enabled only when neither source has a hold. Suspended organizations reject new work with access_disabled across all projects with this stored organizationId. A worker polls every five seconds to close sockets and terminate hosts, retrying failures after restarts. In-flight work may continue until termination. Saved state and pending alarms remain. An alarm claimed before suspension may wait for its five-minute claim to expire after restoration. Unknown organization IDs are accepted; deployments without organizationId are unaffected.
+            description: Persists organization holds independently for admin and billing sources; source defaults to admin. Setting enabled to false adds that source's hold; true clears only that source's hold. Access is enabled only when neither source has a hold. Suspended organizations reject new work with access_disabled across all projects with this stored organizationId. A worker polls every five seconds to close sockets and terminate hosts, retrying failures after restarts. In-flight work may continue until termination. Saved state and pending alarms remain. An alarm claimed before suspension may wait for its five-minute claim to expire after restoration. Unknown organization IDs are accepted.
             requestBody: { $ref: "#/components/requestBodies/Access" }
             responses:
                 "202": { $ref: "#/components/responses/AccessAccepted" }
@@ -942,7 +942,7 @@ components:
                 organizationId:
                     type: string
                     pattern: "^[A-Za-z0-9._-]{1,64}$"
-                    description: Owning organization supplied by the upstream deployment service for billing attribution.
+                    description: Owning organization supplied by the upstream deployment service for billing attribution and actor admission limits.
                 bundle: { $ref: "#/components/schemas/ActorBundle" }
                 localSource: { $ref: "#/components/schemas/LocalSource" }
                 secretRefs:
@@ -966,8 +966,9 @@ components:
                 - required: [localSource]
             properties:
                 organizationId:
-                    type: [string, "null"]
-                    description: Owning organization; null for deployments registered before organization attribution.
+                    type: string
+                    pattern: "^[A-Za-z0-9._-]{1,64}$"
+                    description: Owning organization; also scopes actor admission limits.
                 bundle: { $ref: "#/components/schemas/ActorBundle" }
                 localSource: { $ref: "#/components/schemas/LocalSource" }
                 secretRefs: { $ref: "#/components/schemas/Deployment/properties/secretRefs" }

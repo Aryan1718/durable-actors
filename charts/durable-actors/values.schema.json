@@ -203,7 +203,7 @@
         "memoryMiB"
       ]
     },
-    "projectLimits": {
+    "organizationLimits": {
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -341,7 +341,7 @@
     "replicaCount",
     "actors",
     "alarms",
-    "projectLimits",
+    "organizationLimits",
     "postgres",
     "resources",
     "images",

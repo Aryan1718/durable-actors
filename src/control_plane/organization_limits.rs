@@ -5,7 +5,7 @@ use async_trait::async_trait;
 
 use crate::{
     actor::ActorKey,
-    actor_lifecycle::{LifecycleEvent, LifecycleObserver},
+    actor_lifecycle::{LifecycleEvent, LifecycleObserver, LifecycleReport},
     host::HostId,
     postgres::PostgresDatabase,
 };
@@ -21,13 +21,13 @@ const LAUNCH_LEASE_MS: u64 = 180_000;
 const REPORT_LEASE_MS: u64 = crate::actor_lifecycle::STALE_AFTER_MS;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ProjectLimits {
+pub struct OrganizationLimits {
     pub max_active_actors: u32,
     pub starts_per_second: u32,
     pub start_burst: u32,
 }
 
-impl Default for ProjectLimits {
+impl Default for OrganizationLimits {
     fn default() -> Self {
         Self {
             max_active_actors: 500,
@@ -37,15 +37,15 @@ impl Default for ProjectLimits {
     }
 }
 
-impl ProjectLimits {
+impl OrganizationLimits {
     pub(super) fn from_lookup(
         get: &mut impl FnMut(&str) -> Option<String>,
         enabled: bool,
     ) -> Result<Option<Self>> {
-        let enabled = get("DURABLE_ACTORS_PROJECT_LIMITS_ENABLED")
+        let enabled = get("DURABLE_ACTORS_ORGANIZATION_LIMITS_ENABLED")
             .map(|value| value.parse::<bool>())
             .transpose()
-            .context("DURABLE_ACTORS_PROJECT_LIMITS_ENABLED must be boolean")?
+            .context("DURABLE_ACTORS_ORGANIZATION_LIMITS_ENABLED must be boolean")?
             .unwrap_or(enabled);
         if !enabled {
             return Ok(None);
@@ -54,17 +54,17 @@ impl ProjectLimits {
         Ok(Some(Self {
             max_active_actors: positive(
                 get,
-                "DURABLE_ACTORS_PROJECT_MAX_ACTIVE_ACTORS",
+                "DURABLE_ACTORS_ORGANIZATION_MAX_ACTIVE_ACTORS",
                 defaults.max_active_actors,
             )?,
             starts_per_second: positive(
                 get,
-                "DURABLE_ACTORS_PROJECT_ACTOR_STARTS_PER_SECOND",
+                "DURABLE_ACTORS_ORGANIZATION_ACTOR_STARTS_PER_SECOND",
                 defaults.starts_per_second,
             )?,
             start_burst: positive(
                 get,
-                "DURABLE_ACTORS_PROJECT_ACTOR_START_BURST",
+                "DURABLE_ACTORS_ORGANIZATION_ACTOR_START_BURST",
                 defaults.start_burst,
             )?,
         }))
@@ -74,7 +74,7 @@ impl ProjectLimits {
 pub(super) fn local_admission(
     get: &mut impl FnMut(&str) -> Option<String>,
 ) -> Result<Option<Arc<ActorAdmission>>> {
-    Ok(ProjectLimits::from_lookup(get, false)?.map(|limits| {
+    Ok(OrganizationLimits::from_lookup(get, false)?.map(|limits| {
         Arc::new(ActorAdmission::new(
             limits,
             Arc::new(MemoryReservations::new(
@@ -86,13 +86,13 @@ pub(super) fn local_admission(
 }
 
 pub(super) struct ActorAdmission {
-    defaults: ProjectLimits,
+    defaults: OrganizationLimits,
     database: Option<PostgresDatabase>,
     reservations: Arc<dyn ReservationStore>,
 }
 
 impl ActorAdmission {
-    pub fn new(defaults: ProjectLimits, reservations: Arc<dyn ReservationStore>) -> Self {
+    pub fn new(defaults: OrganizationLimits, reservations: Arc<dyn ReservationStore>) -> Self {
         Self {
             defaults,
             database: None,
@@ -105,35 +105,46 @@ impl ActorAdmission {
         self
     }
 
-    pub async fn reserve(&self, actor: &ActorKey, host: &HostId, session: &str) -> Result<()> {
+    pub async fn reserve(
+        &self,
+        organization: &str,
+        actor: &ActorKey,
+        host: &HostId,
+        session: &str,
+    ) -> Result<()> {
         let reserve = async {
             actor.validate()?;
-            let limits = self.limits(&actor.project_id).await?;
-            self.reservations
-                .reserve(&Activation::new(actor, host.as_str(), session), limits)
-                .await
+            let limits = self.limits(organization).await?;
+            let activation = Activation::new(organization, actor, host.as_str(), session);
+            self.reservations.reserve(&activation, limits).await
         };
         reserve.await.context(AdmissionFailure)
     }
 
-    pub async fn release(&self, actor: &ActorKey, host: &HostId, session: &str) {
-        let activation = Activation::new(actor, host.as_str(), session);
+    pub async fn release(
+        &self,
+        organization: &str,
+        actor: &ActorKey,
+        host: &HostId,
+        session: &str,
+    ) {
+        let activation = Activation::new(organization, actor, host.as_str(), session);
         if let Err(error) = self.reservations.release(&activation).await {
-            tracing::warn!(project_id = %actor.project_id, error = %format!("{error:#}"), "failed launch kept its activation slot");
+            tracing::warn!(organization_id = organization, error = %format!("{error:#}"), "failed launch kept its activation slot");
         }
     }
 
-    async fn limits(&self, project: &str) -> Result<ProjectLimits> {
+    async fn limits(&self, organization: &str) -> Result<OrganizationLimits> {
         let Some(database) = &self.database else {
             return Ok(self.defaults);
         };
         let row = database.query_opt(
-            "SELECT max_active_actors, actor_starts_per_second, actor_start_burst FROM durable_actors_project_limits WHERE project_id = $1", &[&project],
+            "SELECT max_active_actors, actor_starts_per_second, actor_start_burst FROM durable_actors_organization_limits WHERE organization_id = $1", &[&organization],
         ).await?;
         let Some(row) = row else {
             return Ok(self.defaults);
         };
-        Ok(ProjectLimits {
+        Ok(OrganizationLimits {
             max_active_actors: row
                 .get::<_, Option<i64>>(0)
                 .map(u32::try_from)
@@ -156,27 +167,39 @@ impl ActorAdmission {
 #[async_trait]
 impl LifecycleObserver for ActorAdmission {
     async fn observe(&self, event: &LifecycleEvent) -> Result<()> {
-        self.reservations.observe(event).await
+        let organization = event
+            .organization_id
+            .as_deref()
+            .context("lifecycle report has no organization")?;
+        let activation = Activation::new(
+            organization,
+            &event.actor,
+            &event.host_id,
+            &event.session_id,
+        );
+        self.reservations.observe(&activation, &event.report).await
     }
 }
 
 #[async_trait]
 pub(super) trait ReservationStore: Send + Sync {
-    async fn reserve(&self, activation: &Activation, limits: ProjectLimits) -> Result<()>;
+    async fn reserve(&self, activation: &Activation, limits: OrganizationLimits) -> Result<()>;
     async fn release(&self, activation: &Activation) -> Result<()>;
-    async fn observe(&self, event: &LifecycleEvent) -> Result<()>;
+    async fn observe(&self, activation: &Activation, report: &LifecycleReport) -> Result<()>;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(super) struct Activation {
+    organization: String,
     actor: ActorKey,
     host: String,
     session: String,
 }
 
 impl Activation {
-    fn new(actor: &ActorKey, host: &str, session: &str) -> Self {
+    fn new(organization: &str, actor: &ActorKey, host: &str, session: &str) -> Self {
         Self {
+            organization: organization.into(),
             actor: actor.clone(),
             host: host.into(),
             session: session.into(),
@@ -185,6 +208,7 @@ impl Activation {
 
     fn member(&self) -> Result<String> {
         Ok(serde_json::to_string(&(
+            &self.actor.project_id,
             &self.actor.actor_name,
             &self.actor.actor_id,
             &self.host,
@@ -204,9 +228,11 @@ impl std::fmt::Display for AdmissionRejected {
         match self {
             Self::Quota { limit } => write!(
                 f,
-                "project limit of {limit} starting or running actors has been reached"
+                "organization limit of {limit} starting or running actors has been reached"
             ),
-            Self::Rate { .. } => f.write_str("project actor start rate limit has been reached"),
+            Self::Rate { .. } => {
+                f.write_str("organization actor start rate limit has been reached")
+            }
         }
     }
 }
@@ -218,7 +244,7 @@ pub(super) struct AdmissionFailure;
 
 impl std::fmt::Display for AdmissionFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("project activation admission failed")
+        f.write_str("organization activation admission failed")
     }
 }
 
@@ -235,5 +261,5 @@ fn positive(get: &mut impl FnMut(&str) -> Option<String>, name: &str, default: u
 }
 
 #[cfg(test)]
-#[path = "../../tests/unit/control_plane/project_limits.rs"]
+#[path = "../../tests/unit/control_plane/organization_limits.rs"]
 mod tests;
